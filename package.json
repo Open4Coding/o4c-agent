@@ -1,0 +1,29 @@
+{
+  "name": "@open4coding/harness",
+  "version": "0.0.1",
+  "description": "open4coding programming harness - core agent loop, tool execution, CLI (o4c)",
+  "type": "module",
+  "bin": {
+    "o4c": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "tsx --test src/test/loop.test.ts"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "commander": "^12.1.0",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
