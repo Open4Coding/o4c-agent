@@ -1,7 +1,7 @@
 {
-  "name": "@open4coding/o4c",
+  "name": "@open4coding/o4c-agent",
   "version": "0.0.1",
-  "description": "o4c - the open4coding programming harness: core agent loop, tool execution, CLI",
+  "description": "o4c-agent - the open4coding programming harness: core agent loop, tool execution, CLI (o4c)",
   "type": "module",
   "bin": {
     "o4c": "./dist/cli.js"
