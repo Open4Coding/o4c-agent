@@ -1,4 +1,4 @@
-# open4coding harness (v0)
+# o4c (v0)
 
 The core agent loop for open4coding, invoked as `o4c`.
 
