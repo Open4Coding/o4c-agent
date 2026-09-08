@@ -3,6 +3,8 @@ import 'dotenv/config';
 import { Command } from 'commander';
 import Anthropic from '@anthropic-ai/sdk';
 import { AnthropicProvider } from './providers/anthropic.js';
+import { MockProvider } from './providers/mock.js';
+import type { LLMProvider } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
 import { AgentLoop } from './agent/loop.js';
 
@@ -17,15 +19,28 @@ program
   .description('open4coding programming harness')
   .version('0.0.1')
   .argument('<prompt...>', 'the task to ask the harness to perform')
-  .option('-m, --model <model>', 'model to use', 'claude-sonnet-4-5')
-  .action(async (promptParts: string[], opts: { model: string }) => {
+  .option('-m, --model <model>', 'model to use', 'claude-opus-5')
+  .option(
+    '-p, --provider <name>',
+    'LLM provider to use: "anthropic" (real, costs money) or "mock" (free, no API key, for development)',
+    'anthropic',
+  )
+  .action(async (promptParts: string[], opts: { model: string; provider: string }) => {
     const prompt = promptParts.join(' ');
 
-    let provider: AnthropicProvider;
-    try {
-      provider = new AnthropicProvider({ model: opts.model });
-    } catch (err) {
-      console.error((err as Error).message);
+    let provider: LLMProvider;
+    if (opts.provider === 'mock') {
+      provider = new MockProvider();
+    } else if (opts.provider === 'anthropic') {
+      try {
+        provider = new AnthropicProvider({ model: opts.model });
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+        return;
+      }
+    } else {
+      console.error(`Unknown provider "${opts.provider}". Use "anthropic" or "mock".`);
       process.exitCode = 1;
       return;
     }

@@ -32,3 +32,18 @@ Or during development, without building first:
 ```
 npm run dev -- "your prompt here"
 ```
+
+## Developing without spending money
+
+`o4c` defaults to the real Anthropic API, which costs real money per call. While developing/testing
+the harness itself (CLI parsing, the agent loop, tool execution), use the free mock provider instead —
+no `ANTHROPIC_API_KEY` needed, zero network calls:
+
+```
+o4c --provider mock "read package.json and tell me the version"
+```
+
+The mock provider (`src/providers/mock.ts`) isn't a model simulator — it makes one trivial tool call
+(if tools are available) so real tool execution still runs against your real files/shell, then returns
+a canned final answer. It exists purely to exercise the loop end-to-end for free; use
+`--provider anthropic` (the default) once you actually want a real response.

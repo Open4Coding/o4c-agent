@@ -57,7 +57,7 @@ export class AnthropicProvider implements LLMProvider {
       );
     }
     this.client = new Anthropic({ apiKey });
-    this.model = options.model ?? 'claude-sonnet-4-5';
+    this.model = options.model ?? 'claude-opus-5';
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
