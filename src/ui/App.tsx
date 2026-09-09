@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
 import { InputBox } from './InputBox.js';
 import { formatEvent } from './formatEvent.js';
@@ -76,6 +76,13 @@ export function App({ loop, initialImage }: AppProps) {
   const [liveLines, setLiveLines] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
+  const [queuedPreview, setQueuedPreview] = useState<string | null>(null);
+
+  // Single-slot queue: you can type ahead and submit while busy instead of being
+  // locked out - the newest submission while processing wins and runs automatically
+  // once the current turn finishes. A ref (not state) since it's read/written from
+  // inside the async turn-processing function itself, not something that drives render.
+  const queuedInputRef = useRef<string | null>(null);
 
   useInput(
     (_input, key) => {
@@ -88,11 +95,8 @@ export function App({ loop, initialImage }: AppProps) {
     setHistory((h) => [...h, { id: nextBlockId++, lines }]);
   }, []);
 
-  const handleSubmit = useCallback(
-    async (raw: string) => {
-      const input = raw.trim();
-      if (!input) return;
-
+  const processTurn = useCallback(
+    async (input: string) => {
       if (input === '/exit' || input === '/quit') {
         exit();
         return;
@@ -107,41 +111,65 @@ export function App({ loop, initialImage }: AppProps) {
           { kind: 'user', text: `> ${input}` },
           { kind: 'system', text: 'History cleared.' },
         ]);
-        return;
+      } else {
+        // Echo the user's own line immediately, as its own permanent block - don't
+        // wait for the (possibly very long) response before it shows up in scrollback.
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+
+        const responseLines: Line[] = [];
+        setLiveLines([]);
+
+        try {
+          const finalAnswer = await loop.run(input, {
+            images: initialImage ? [initialImage] : undefined,
+            onEvent: (event) => {
+              const text = formatEvent(event);
+              if (!text) return;
+              setLiveLines((prev) => [...prev, text]);
+              // Intermediate narration ("text" events) is shown live only - the
+              // final answer is committed separately below, exactly once, avoiding
+              // the duplicate-display bug this used to have.
+              if (event.type === 'tool_call' || event.type === 'tool_result') {
+                responseLines.push({ kind: event.type, text });
+              }
+            },
+          });
+          if (finalAnswer) responseLines.push({ kind: 'final', text: finalAnswer });
+        } catch (err) {
+          responseLines.push({ kind: 'error', text: formatError(err) });
+        } finally {
+          if (responseLines.length > 0) pushBlock(responseLines);
+          setLiveLines([]);
+        }
       }
 
-      // Echo the user's own line immediately, as its own permanent block - don't wait
-      // for the (possibly very long) response before it shows up in scrollback.
-      pushBlock([{ kind: 'user', text: `> ${input}` }]);
-
-      const responseLines: Line[] = [];
-      setLiveLines([]);
-      setIsProcessing(true);
-
-      try {
-        const finalAnswer = await loop.run(input, {
-          images: initialImage ? [initialImage] : undefined,
-          onEvent: (event) => {
-            const text = formatEvent(event);
-            if (!text) return;
-            setLiveLines((prev) => [...prev, text]);
-            // Intermediate narration ("text" events) is shown live only - the final
-            // answer is committed separately below, exactly once, avoiding duplication.
-            if (event.type === 'tool_call' || event.type === 'tool_result') {
-              responseLines.push({ kind: event.type, text });
-            }
-          },
-        });
-        if (finalAnswer) responseLines.push({ kind: 'final', text: finalAnswer });
-      } catch (err) {
-        responseLines.push({ kind: 'error', text: formatError(err) });
-      } finally {
-        if (responseLines.length > 0) pushBlock(responseLines);
-        setLiveLines([]);
+      const queued = queuedInputRef.current;
+      if (queued !== null) {
+        queuedInputRef.current = null;
+        setQueuedPreview(null);
+        await processTurn(queued);
+      } else {
         setIsProcessing(false);
       }
     },
     [loop, initialImage, exit, pushBlock],
+  );
+
+  const handleSubmit = useCallback(
+    (raw: string) => {
+      const input = raw.trim();
+      if (!input) return;
+
+      if (isProcessing) {
+        queuedInputRef.current = input;
+        setQueuedPreview(input);
+        return;
+      }
+
+      setIsProcessing(true);
+      void processTurn(input);
+    },
+    [isProcessing, processTurn],
   );
 
   if (debugMode) {
@@ -180,6 +208,11 @@ export function App({ loop, initialImage }: AppProps) {
         ))}
       {isProcessing && <Spinner />}
       <InputBox disabled={isProcessing} onSubmit={handleSubmit} />
+      {queuedPreview && (
+        <Text dimColor>
+          Queued, will send next: {queuedPreview}
+        </Text>
+      )}
     </Box>
   );
 }

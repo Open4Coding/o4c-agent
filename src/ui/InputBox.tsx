@@ -24,11 +24,14 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
 
   useInput(
     (input, key) => {
-      // Stay "active" unconditionally (below) so Ink keeps holding raw mode on stdin -
-      // if every useInput hook in the tree goes inactive at once, Ink releases raw mode
-      // and the terminal's own echo takes over, leaking typed characters onto the screen
-      // instead of being captured here. Disabled just means "ignore it", not "stop listening".
-      if (disabled) return;
+      // Editing always works, even while `disabled` (busy) - that's what lets you type
+      // ahead and queue up the next message instead of being locked out until the
+      // current turn finishes. `onSubmit` always fires on Enter too; it's up to the
+      // caller (App) to decide whether to run it now or hold it until it's free.
+      // isActive stays unconditionally true (below) for the same raw-mode reason as
+      // before - if every useInput hook in the tree goes inactive at once, Ink
+      // releases raw mode and the terminal's own echo leaks typed characters onto
+      // the screen instead of this handler ever seeing them.
       if (key.return) {
         const submitted = value;
         if (submitted) {
