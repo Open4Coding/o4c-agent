@@ -6,7 +6,7 @@ The core agent loop for open4coding, invoked as `o4c`.
 
 - Prompt -> LLM call -> tool-call parsing -> tool execution -> repeat until done.
 - Anthropic (Claude) provider, designed so other providers can be added without touching the loop.
-- Tools: `read_file`, `write_file`, `run_shell` (in-process for now — not yet plugins).
+- Tools: `read_file`, `write_file`, `run_shell`, `glob_files`, `grep_files` (in-process for now — not yet plugins).
 
 Plugin architecture (protocol-over-process-boundary) is deliberately deferred to v0.2, once this
 core loop is proven end-to-end. See `docs/PATH_FORWARD.md` in the research workspace for the
