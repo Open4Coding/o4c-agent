@@ -76,13 +76,14 @@ export function App({ loop, initialImage }: AppProps) {
   const [liveLines, setLiveLines] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
-  const [queuedPreview, setQueuedPreview] = useState<string | null>(null);
+  const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
 
-  // Single-slot queue: you can type ahead and submit while busy instead of being
-  // locked out - the newest submission while processing wins and runs automatically
-  // once the current turn finishes. A ref (not state) since it's read/written from
-  // inside the async turn-processing function itself, not something that drives render.
-  const queuedInputRef = useRef<string | null>(null);
+  // FIFO queue: you can type ahead and submit (more than once) while busy instead of
+  // being locked out - every submission while processing is kept, in order, and runs
+  // automatically once the current turn finishes, one at a time. A ref (not state)
+  // since it's read/written from inside the async turn-processing function itself,
+  // not something that drives render on its own - queuedPreview mirrors it for display.
+  const queuedInputsRef = useRef<string[]>([]);
 
   useInput(
     (_input, key) => {
@@ -143,11 +144,10 @@ export function App({ loop, initialImage }: AppProps) {
         }
       }
 
-      const queued = queuedInputRef.current;
-      if (queued !== null) {
-        queuedInputRef.current = null;
-        setQueuedPreview(null);
-        await processTurn(queued);
+      const next = queuedInputsRef.current.shift();
+      if (next !== undefined) {
+        setQueuedPreview([...queuedInputsRef.current]);
+        await processTurn(next);
       } else {
         setIsProcessing(false);
       }
@@ -161,8 +161,8 @@ export function App({ loop, initialImage }: AppProps) {
       if (!input) return;
 
       if (isProcessing) {
-        queuedInputRef.current = input;
-        setQueuedPreview(input);
+        queuedInputsRef.current.push(input);
+        setQueuedPreview([...queuedInputsRef.current]);
         return;
       }
 
@@ -208,11 +208,11 @@ export function App({ loop, initialImage }: AppProps) {
         ))}
       {isProcessing && <Spinner />}
       <InputBox disabled={isProcessing} onSubmit={handleSubmit} />
-      {queuedPreview && (
-        <Text dimColor>
-          Queued, will send next: {queuedPreview}
+      {queuedPreview.map((q, i) => (
+        <Text key={i} dimColor>
+          Queued #{i + 1}: {q}
         </Text>
-      )}
+      ))}
     </Box>
   );
 }
