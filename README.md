@@ -33,6 +33,10 @@ Or during development, without building first:
 npm run dev -- "your prompt here"
 ```
 
+Run `o4c` with no prompt to start an interactive, multi-turn session instead of a one-shot
+command — see [`.docs/interactive-repl.md`](.docs/interactive-repl.md) for REPL commands and
+how to run it from a terminal or VS Code.
+
 ## Developing without spending money
 
 `o4c` defaults to the real Anthropic API, which costs real money per call. While developing/testing

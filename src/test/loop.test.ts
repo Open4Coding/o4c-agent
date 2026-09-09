@@ -90,6 +90,38 @@ test('stops after maxIterations if the model never ends the turn', async () => {
   assert.equal(provider.callCount, 3);
 });
 
+test('retains conversation history across multiple run() calls', async () => {
+  const provider = new FakeProvider([
+    { content: 'first answer', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'second answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  await loop.run('first question');
+  await loop.run('second question');
+
+  const secondRequestMessages = provider.receivedRequests[1].messages;
+  assert.deepEqual(
+    secondRequestMessages.map((m) => m.content),
+    ['first question', 'first answer', 'second question'],
+  );
+});
+
+test('reset() clears history so the next run() starts fresh', async () => {
+  const provider = new FakeProvider([
+    { content: 'first answer', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'second answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  await loop.run('first question');
+  loop.reset();
+  await loop.run('second question');
+
+  const secondRequestMessages = provider.receivedRequests[1].messages;
+  assert.deepEqual(secondRequestMessages.map((m) => m.content), ['second question']);
+});
+
 test('emits events for text, tool_call, and tool_result in order', async () => {
   const tool = makeFakeTool('read_file', 'contents');
   const provider = new FakeProvider([

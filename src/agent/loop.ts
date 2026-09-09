@@ -16,18 +16,24 @@ export interface RunOptions {
 }
 
 export class AgentLoop {
+  private messages: Message[] = [];
+
   constructor(
     private provider: LLMProvider,
     private tools: Tool[],
     private systemPrompt: string,
   ) {}
 
+  /** Clears conversation history, starting a fresh session on the next `run()`. */
+  reset(): void {
+    this.messages = [];
+  }
+
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
     const maxIterations = options.maxIterations ?? 25;
     const onEvent = options.onEvent ?? (() => {});
-    const messages: Message[] = [
-      { role: 'user', content: userMessage, images: options.images },
-    ];
+    const messages = this.messages;
+    messages.push({ role: 'user', content: userMessage, images: options.images });
     const toolDefs = this.tools.map((t) => ({
       name: t.name,
       description: t.description,
@@ -45,15 +51,16 @@ export class AgentLoop {
         onEvent({ type: 'text', text: response.content });
       }
 
-      if (response.stopReason !== 'tool_use' || response.toolCalls.length === 0) {
-        return response.content;
-      }
-
+      const isToolUse = response.stopReason === 'tool_use' && response.toolCalls.length > 0;
       messages.push({
         role: 'assistant',
         content: response.content,
-        toolCalls: response.toolCalls,
+        toolCalls: isToolUse ? response.toolCalls : undefined,
       });
+
+      if (!isToolUse) {
+        return response.content;
+      }
 
       for (const call of response.toolCalls) {
         onEvent({ type: 'tool_call', toolName: call.name, toolInput: call.input });
