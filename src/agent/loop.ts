@@ -29,6 +29,11 @@ export class AgentLoop {
     this.messages = [];
   }
 
+  /** Raw conversation history so far - every message, tool call, and tool result. For debug/inspection UIs. */
+  getMessages(): readonly Message[] {
+    return this.messages;
+  }
+
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
     const maxIterations = options.maxIterations ?? 25;
     const onEvent = options.onEvent ?? (() => {});

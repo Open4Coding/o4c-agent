@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 
 export interface InputBoxProps {
@@ -16,13 +16,53 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
   const [value, setValue] = useState('');
   const [cursor, setCursor] = useState(0);
 
+  // Submitted-input recall (up/down arrow), kept local to the input box - it only
+  // needs the raw strings that were submitted, not anything about how they resolved.
+  const historyRef = useRef<string[]>([]);
+  const historyIndexRef = useRef<number>(-1); // -1 = not currently browsing history
+  const draftRef = useRef<string>(''); // what was being typed before browsing started
+
   useInput(
     (input, key) => {
       if (key.return) {
         const submitted = value;
+        if (submitted) {
+          historyRef.current.push(submitted);
+        }
+        historyIndexRef.current = -1;
+        draftRef.current = '';
         setValue('');
         setCursor(0);
         onSubmit(submitted);
+        return;
+      }
+      if (key.upArrow) {
+        const hist = historyRef.current;
+        if (hist.length === 0) return;
+        if (historyIndexRef.current === -1) {
+          draftRef.current = value;
+          historyIndexRef.current = hist.length - 1;
+        } else if (historyIndexRef.current > 0) {
+          historyIndexRef.current -= 1;
+        }
+        const recalled = hist[historyIndexRef.current];
+        setValue(recalled);
+        setCursor(recalled.length);
+        return;
+      }
+      if (key.downArrow) {
+        if (historyIndexRef.current === -1) return;
+        const hist = historyRef.current;
+        if (historyIndexRef.current < hist.length - 1) {
+          historyIndexRef.current += 1;
+          const recalled = hist[historyIndexRef.current];
+          setValue(recalled);
+          setCursor(recalled.length);
+        } else {
+          historyIndexRef.current = -1;
+          setValue(draftRef.current);
+          setCursor(draftRef.current.length);
+        }
         return;
       }
       if (key.leftArrow) {
@@ -41,6 +81,7 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
       }
       if (key.ctrl || key.meta) return;
       if (input) {
+        historyIndexRef.current = -1;
         setValue((v) => v.slice(0, cursor) + input + v.slice(cursor));
         setCursor((c) => c + input.length);
       }

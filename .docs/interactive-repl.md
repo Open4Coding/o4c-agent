@@ -9,8 +9,14 @@
 
 ## REPL commands
 
-- Type a message and press Enter to send it.
+- Type a message and press Enter to send it. Up/down arrow recalls previously submitted
+  messages (per-session only, not persisted across restarts).
 - `/clear` — clears conversation history and starts fresh, without restarting the process.
+- `/debug` — shows the raw underlying conversation data (every message, tool call, and tool
+  result, not the pretty-printed view) instead of the normal screen. Press `Esc` to return to
+  the normal session. If the raw data is longer than fits on one screen, only the most recent
+  lines are shown (Ink's rendering repaints this view rather than letting the terminal scroll
+  it, unlike the normal scrollback) — there's a note when it's been trimmed.
 - `/exit` or `/quit` — ends the session.
 - Ctrl+D (EOF on stdin) also ends the session cleanly.
 
