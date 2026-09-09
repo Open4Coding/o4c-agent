@@ -10,11 +10,14 @@
 ## REPL commands
 
 - Type a message and press Enter to send it. Up/down arrow recalls previously submitted
-  messages (per-session only, not persisted across restarts). Left/right arrow moves the
-  cursor within the current line. Ctrl+A / Ctrl+E jump to the start/end of the line, Ctrl+U
-  clears the whole line you're working on — standard readline/bash conventions, used instead
-  of Home/End/Ctrl+Backspace since terminals send those as raw escape sequences Ink's input
-  handling doesn't parse into dedicated keys.
+  messages (per-session only, not persisted across restarts). The input has no concept of
+  "current line" separate from the rest of what you've typed - it's one buffer, even across
+  multiple lines (e.g. from Ctrl+Enter). So left/right arrow, and Ctrl+A / Ctrl+E, move by a
+  single character or to the absolute start/end of the *entire* prompt, not just the line the
+  cursor happens to be on - and Ctrl+U clears everything you've typed, all lines at once, not
+  just one of them. Standard readline/bash conventions, used instead of Home/End/Ctrl+Backspace
+  since terminals send those as raw escape sequences Ink's input handling doesn't parse into
+  dedicated keys.
 - You can keep typing while a turn is still in progress. Submitting while busy queues the
   message instead of running it immediately - each one is shown as "Queued #1: ...",
   "Queued #2: ...", and so on. They run automatically, one at a time in the order you sent
