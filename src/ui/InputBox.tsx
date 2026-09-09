@@ -87,6 +87,22 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
         setCursor((c) => c - 1);
         return;
       }
+      // Standard readline/bash conventions, since there's no dedicated Home/End key in
+      // Ink's Key type (terminals send those as raw escape sequences it doesn't parse).
+      if (key.ctrl && input === 'a') {
+        setCursor(0);
+        return;
+      }
+      if (key.ctrl && input === 'e') {
+        setCursor(value.length);
+        return;
+      }
+      if (key.ctrl && input === 'u') {
+        historyIndexRef.current = -1;
+        setValue('');
+        setCursor(0);
+        return;
+      }
       if (key.ctrl || key.meta) return;
       if (input) {
         historyIndexRef.current = -1;
