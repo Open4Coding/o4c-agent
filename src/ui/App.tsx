@@ -4,18 +4,12 @@ import { InputBox } from './InputBox.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
 import { formatDebugView } from './formatDebug.js';
+import type { Line } from './types.js';
 import type { AgentLoop } from '../agent/loop.js';
 
 export interface AppProps {
   loop: AgentLoop;
   initialImage?: string;
-}
-
-type LineKind = 'system' | 'user' | 'tool_call' | 'tool_result' | 'final' | 'error';
-
-interface Line {
-  kind: LineKind;
-  text: string;
 }
 
 interface HistoryBlock {
@@ -181,9 +175,7 @@ export function App({ loop, initialImage }: AppProps) {
           --- raw session data (Esc to exit) ---
         </Text>
         {debugLines.map((line, i) => (
-          <Text key={i} dimColor>
-            {line}
-          </Text>
+          <LineText key={i} line={line} />
         ))}
       </Box>
     );
