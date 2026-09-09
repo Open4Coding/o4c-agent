@@ -98,9 +98,7 @@ export function App({ loop, initialImage }: AppProps) {
       }
       if (input === '/debug') {
         setDebugMode(true);
-        return;
-      }
-      if (input === '/clear') {
+      } else if (input === '/clear') {
         loop.reset();
         pushBlock([
           { kind: 'user', text: `> ${input}` },
