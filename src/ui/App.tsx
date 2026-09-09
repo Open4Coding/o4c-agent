@@ -62,7 +62,7 @@ export function App({ loop, initialImage }: AppProps) {
       lines: [
         {
           kind: 'system',
-          text: 'o4c interactive session. Type your request, /clear to clear history, /debug to inspect raw data (Esc to exit), /exit to quit.',
+          text: 'o4c interactive session. Type your request, /clear to clear history, /exit to quit.',
         },
       ],
     },
@@ -97,7 +97,15 @@ export function App({ loop, initialImage }: AppProps) {
         return;
       }
       if (input === '/debug') {
-        setDebugMode(true);
+        // Shelved for now - a real lockup bug in the debug-view/Escape transition
+        // wasn't resolved by the isProcessing fix that was supposed to fix it, so
+        // it's disabled here rather than left reachable in a broken state. The
+        // rest of the implementation (debugMode state, the render branch below,
+        // the Escape listener, formatDebugView) is left in place, just unreachable.
+        pushBlock([
+          { kind: 'user', text: `> ${input}` },
+          { kind: 'system', text: '/debug is temporarily disabled.' },
+        ]);
       } else if (input === '/clear') {
         loop.reset();
         pushBlock([
