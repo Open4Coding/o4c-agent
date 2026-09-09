@@ -1,72 +1,44 @@
 #!/usr/bin/env node
 import 'dotenv/config';
-import { createInterface } from 'node:readline/promises';
+import React from 'react';
+import { render } from 'ink';
 import { Command } from 'commander';
-import Anthropic from '@anthropic-ai/sdk';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { LocalProvider } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
 import { AgentLoop, type AgentEvent } from './agent/loop.js';
+import { App } from './ui/App.js';
+import { formatEvent } from './ui/formatEvent.js';
+import { formatError } from './ui/formatError.js';
 
 const SYSTEM_PROMPT = `You are o4c, the open4coding programming harness. You help the user with
 software engineering tasks in their current directory. You have tools to read files, write files,
 and run shell commands. Use them as needed to complete the user's request, then give a clear final answer.`;
 
 function printEvent(event: AgentEvent): void {
-  if (event.type === 'text' && event.text) {
-    process.stdout.write(`\n${event.text}\n`);
-  } else if (event.type === 'tool_call') {
-    process.stdout.write(`\n[tool] ${event.toolName}(${JSON.stringify(event.toolInput)})\n`);
-  } else if (event.type === 'tool_result') {
-    const preview = (event.toolOutput ?? '').slice(0, 200);
-    process.stdout.write(`[result] ${preview}${(event.toolOutput ?? '').length > 200 ? '...' : ''}\n`);
-  }
+  const line = formatEvent(event);
+  if (!line) return;
+  // tool_result prints directly under its tool_call, no separating blank line.
+  process.stdout.write(event.type === 'tool_result' ? `${line}\n` : `\n${line}\n`);
 }
 
 function printError(err: unknown): void {
-  if (err instanceof Anthropic.APIError) {
-    console.error(`\nAnthropic API error (status ${err.status ?? 'unknown'}): ${err.message}`);
-  } else {
-    console.error(`\nUnexpected error: ${(err as Error).message}`);
-  }
+  console.error(`\n${formatError(err)}`);
 }
 
 async function runRepl(loop: AgentLoop, initialImage?: string): Promise<void> {
-  process.stdout.write(
-    'o4c interactive session. Type your request, or /clear to clear history, /exit to quit.\n',
-  );
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  process.stdout.write('\n> ');
-
-  for await (const line of rl) {
-    const input = line.trim();
-
-    if (!input) {
-      process.stdout.write('\n> ');
-      continue;
-    }
-    if (input === '/exit' || input === '/quit') break;
-    if (input === '/clear') {
-      loop.reset();
-      process.stdout.write('History cleared.\n\n> ');
-      continue;
-    }
-
-    try {
-      const finalAnswer = await loop.run(input, {
-        images: initialImage ? [initialImage] : undefined,
-        onEvent: printEvent,
-      });
-      process.stdout.write(`\n--- final ---\n${finalAnswer}\n`);
-    } catch (err) {
-      printError(err);
-    }
-    process.stdout.write('\n> ');
+  if (!process.stdin.isTTY) {
+    console.error(
+      'Interactive mode requires a real terminal (TTY) - stdin appears to be piped or redirected.\n' +
+        'Run this directly in a terminal, or pass a prompt for one-shot mode instead: o4c "your task"',
+    );
+    process.exitCode = 1;
+    return;
   }
-
-  rl.close();
+  const { waitUntilExit } = render(React.createElement(App, { loop, initialImage }));
+  await waitUntilExit();
 }
 
 const program = new Command();
