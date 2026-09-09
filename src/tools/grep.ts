@@ -32,11 +32,12 @@ export const grepTool: Tool = {
     }
 
     try {
-      let files = await walkFiles(baseDir);
+      let entries = await walkFiles(baseDir);
       if (glob) {
         const globRegex = globToRegExp(glob);
-        files = files.filter((f) => globRegex.test(f));
+        entries = entries.filter((e) => globRegex.test(e.path));
       }
+      const files = entries.filter((e) => !e.isDirectory).map((e) => e.path);
 
       const results: string[] = [];
       outer: for (const file of files) {

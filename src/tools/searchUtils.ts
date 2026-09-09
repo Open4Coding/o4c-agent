@@ -4,13 +4,22 @@ import { join } from 'node:path';
 const DEFAULT_SKIP_DIRS = new Set(['node_modules', '.git', 'dist']);
 const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024; // skip large/binary-likely files (model weights, etc.)
 
+export interface WalkEntry {
+  /** Path relative to baseDir, forward slashes regardless of platform, never a trailing slash. */
+  path: string;
+  isDirectory: boolean;
+}
+
 /**
- * Recursively lists files under `baseDir`, returning paths relative to it with
- * forward slashes regardless of platform (so glob patterns match consistently).
- * Skips node_modules/.git/dist and anything above MAX_FILE_SIZE_BYTES.
+ * Recursively lists files and directories under `baseDir`. Paths are relative to it,
+ * with forward slashes regardless of platform (so glob patterns match consistently) and
+ * never a trailing slash, even for directories - callers append one for display if wanted,
+ * keeping the path usable as-is for glob matching (a trailing `/` would break patterns
+ * like `*` from matching a directory name, since `*` excludes `/`).
+ * Skips node_modules/.git/dist and files above MAX_FILE_SIZE_BYTES.
  */
-export async function walkFiles(baseDir: string): Promise<string[]> {
-  const results: string[] = [];
+export async function walkFiles(baseDir: string): Promise<WalkEntry[]> {
+  const results: WalkEntry[] = [];
 
   async function walk(dir: string, relPrefix: string): Promise<void> {
     let entries;
@@ -23,6 +32,7 @@ export async function walkFiles(baseDir: string): Promise<string[]> {
       const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         if (DEFAULT_SKIP_DIRS.has(entry.name)) continue;
+        results.push({ path: relPath, isDirectory: true });
         await walk(join(dir, entry.name), relPath);
       } else if (entry.isFile()) {
         try {
@@ -31,7 +41,7 @@ export async function walkFiles(baseDir: string): Promise<string[]> {
         } catch {
           continue;
         }
-        results.push(relPath);
+        results.push({ path: relPath, isDirectory: false });
       }
     }
   }
