@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { Command } from 'commander';
 import Anthropic from '@anthropic-ai/sdk';
 import { AnthropicProvider } from './providers/anthropic.js';
+import { LocalProvider } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
@@ -22,15 +23,18 @@ program
   .option('-m, --model <model>', 'model to use', 'claude-opus-5')
   .option(
     '-p, --provider <name>',
-    'LLM provider to use: "anthropic" (real, costs money) or "mock" (free, no API key, for development)',
+    'LLM provider to use: "anthropic" (real, costs money), "local" (self-hosted llama-server), or "mock" (free, no API key, for development)',
     'anthropic',
   )
-  .action(async (promptParts: string[], opts: { model: string; provider: string }) => {
+  .option('--base-url <url>', 'base URL for the "local" provider', 'http://localhost:8080')
+  .action(async (promptParts: string[], opts: { model: string; provider: string; baseUrl: string }) => {
     const prompt = promptParts.join(' ');
 
     let provider: LLMProvider;
     if (opts.provider === 'mock') {
       provider = new MockProvider();
+    } else if (opts.provider === 'local') {
+      provider = new LocalProvider({ baseUrl: opts.baseUrl });
     } else if (opts.provider === 'anthropic') {
       try {
         provider = new AnthropicProvider({ model: opts.model });
@@ -40,7 +44,7 @@ program
         return;
       }
     } else {
-      console.error(`Unknown provider "${opts.provider}". Use "anthropic" or "mock".`);
+      console.error(`Unknown provider "${opts.provider}". Use "anthropic", "local", or "mock".`);
       process.exitCode = 1;
       return;
     }
