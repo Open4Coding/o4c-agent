@@ -11,6 +11,10 @@
 
 - Type a message and press Enter to send it. Up/down arrow recalls previously submitted
   messages (per-session only, not persisted across restarts).
+- You can keep typing while a turn is still in progress. Submitting while busy queues the
+  message (shown as "Queued, will send next: ...") instead of running it immediately - it
+  sends automatically as soon as the current turn finishes. Only the most recent queued
+  message is kept if you submit more than one while busy.
 - `/clear` — clears conversation history and starts fresh, without restarting the process.
 - `/debug` — shows the raw underlying conversation data (every message, tool call, and tool
   result, not the pretty-printed view) instead of the normal screen. Press `Esc` to return to
