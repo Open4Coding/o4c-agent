@@ -11,6 +11,7 @@ export interface Message {
   content: string;
   toolCalls?: ToolCall[];
   toolCallId?: string;
+  images?: string[];
 }
 
 export interface ToolDefinition {

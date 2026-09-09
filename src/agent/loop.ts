@@ -12,6 +12,7 @@ export interface AgentEvent {
 export interface RunOptions {
   maxIterations?: number;
   onEvent?: (event: AgentEvent) => void;
+  images?: string[];
 }
 
 export class AgentLoop {
@@ -24,7 +25,9 @@ export class AgentLoop {
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
     const maxIterations = options.maxIterations ?? 25;
     const onEvent = options.onEvent ?? (() => {});
-    const messages: Message[] = [{ role: 'user', content: userMessage }];
+    const messages: Message[] = [
+      { role: 'user', content: userMessage, images: options.images },
+    ];
     const toolDefs = this.tools.map((t) => ({
       name: t.name,
       description: t.description,

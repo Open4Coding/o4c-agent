@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { extname } from 'node:path';
 import type {
   CompletionRequest,
   CompletionResponse,
@@ -13,20 +15,47 @@ interface OpenAIToolCall {
   function: { name: string; arguments: string };
 }
 
+type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: string | ContentPart[] | null;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
 }
 
-function toOpenAIMessages(systemPrompt: string | undefined, messages: Message[]): OpenAIMessage[] {
+const MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
+async function toImageDataUri(path: string): Promise<string> {
+  const mime = MIME_TYPES[extname(path).toLowerCase()] ?? 'image/png';
+  const data = await readFile(path);
+  return `data:${mime};base64,${data.toString('base64')}`;
+}
+
+async function toOpenAIMessages(
+  systemPrompt: string | undefined,
+  messages: Message[],
+): Promise<OpenAIMessage[]> {
   const result: OpenAIMessage[] = [];
   if (systemPrompt) result.push({ role: 'system', content: systemPrompt });
 
   for (const msg of messages) {
     if (msg.role === 'user') {
-      result.push({ role: 'user', content: msg.content });
+      if (msg.images && msg.images.length > 0) {
+        const parts: ContentPart[] = [{ type: 'text', text: msg.content }];
+        for (const path of msg.images) {
+          parts.push({ type: 'image_url', image_url: { url: await toImageDataUri(path) } });
+        }
+        result.push({ role: 'user', content: parts });
+      } else {
+        result.push({ role: 'user', content: msg.content });
+      }
     } else if (msg.role === 'assistant') {
       const toolCalls = (msg.toolCalls ?? []).map((call) => ({
         id: call.id,
@@ -65,7 +94,7 @@ export class LocalProvider implements LLMProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: toOpenAIMessages(request.systemPrompt, request.messages),
+        messages: await toOpenAIMessages(request.systemPrompt, request.messages),
         tools: request.tools.map((t) => ({
           type: 'function',
           function: { name: t.name, description: t.description, parameters: t.inputSchema },

@@ -27,7 +27,8 @@ program
     'anthropic',
   )
   .option('--base-url <url>', 'base URL for the "local" provider', 'http://localhost:8080')
-  .action(async (promptParts: string[], opts: { model: string; provider: string; baseUrl: string }) => {
+  .option('--image <path>', 'path to an image file to attach (vision-capable providers only)')
+  .action(async (promptParts: string[], opts: { model: string; provider: string; baseUrl: string; image?: string }) => {
     const prompt = promptParts.join(' ');
 
     let provider: LLMProvider;
@@ -53,6 +54,7 @@ program
 
     try {
       const finalAnswer = await loop.run(prompt, {
+        images: opts.image ? [opts.image] : undefined,
         onEvent: (event) => {
           if (event.type === 'text' && event.text) {
             process.stdout.write(`\n${event.text}\n`);
