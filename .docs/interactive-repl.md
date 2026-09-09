@@ -10,7 +10,7 @@
 ## REPL commands
 
 - Type a message and press Enter to send it.
-- `/reset` — clears conversation history and starts fresh, without restarting the process.
+- `/clear` — clears conversation history and starts fresh, without restarting the process.
 - `/exit` or `/quit` — ends the session.
 - Ctrl+D (EOF on stdin) also ends the session cleanly.
 

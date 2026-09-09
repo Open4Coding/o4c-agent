@@ -35,7 +35,7 @@ function printError(err: unknown): void {
 
 async function runRepl(loop: AgentLoop, initialImage?: string): Promise<void> {
   process.stdout.write(
-    'o4c interactive session. Type your request, or /reset to clear history, /exit to quit.\n',
+    'o4c interactive session. Type your request, or /clear to clear history, /exit to quit.\n',
   );
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   process.stdout.write('\n> ');
@@ -48,7 +48,7 @@ async function runRepl(loop: AgentLoop, initialImage?: string): Promise<void> {
       continue;
     }
     if (input === '/exit' || input === '/quit') break;
-    if (input === '/reset') {
+    if (input === '/clear') {
       loop.reset();
       process.stdout.write('History cleared.\n\n> ');
       continue;
