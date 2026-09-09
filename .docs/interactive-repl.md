@@ -39,13 +39,14 @@ o4c -p local
 The simplest way is the integrated terminal — it's a real shell, so nothing about the harness
 changes:
 
-1. Open this project folder in VS Code.
+1. Open this project folder **directly** in VS Code (**File > Open Folder...** ->
+   `o4c-agent`, not a parent folder — see Troubleshooting below for why this matters).
 2. Open the integrated terminal (`` Ctrl+` ``, or **View > Terminal**).
 3. Run `o4c` (or `npm run dev`, or `node dist/cli.js`) exactly as you would anywhere else.
 
 If you're developing the harness itself and want to step through the TypeScript source with
-breakpoints instead of just running it, add a debug configuration. Create (or extend)
-`.vscode/launch.json`:
+breakpoints instead of just running it, use the debug configuration already checked into this
+repo at `.vscode/launch.json`:
 
 ```json
 {
@@ -64,9 +65,23 @@ breakpoints instead of just running it, add a debug configuration. Create (or ex
 }
 ```
 
-Then **Run and Debug** (`Ctrl+Shift+D`) > **o4c REPL (debug)** > **Start Debugging** (`F5`). No
+**Run and Debug** (`Ctrl+Shift+D`) > **o4c REPL (debug)** > **Start Debugging** (`F5`). No
 prompt argument is passed, so it starts the interactive REPL with breakpoints active. Add
 `"args": ["-p", "local"]` (or any other flags) to the configuration to change how it launches.
+
+## Troubleshooting
+
+- **Run and Debug shows "Open a file which can be debugged or run" instead of "o4c REPL
+  (debug)"**: VS Code only auto-loads `.vscode/launch.json` relative to the currently *open
+  folder*. If you opened a parent directory (e.g. `D:\Open4Coding`) instead of `o4c-agent`
+  itself, the config won't be found even though the file exists on disk. Fix: **File > Open
+  Folder...** and open `o4c-agent` directly, not its parent.
+- **`o4c: command not found` / "not recognized" in the terminal**: `npm link` (part of the main
+  README's setup) registers the global `o4c` command — if it was skipped, or if you're in a
+  terminal session that was already open *before* running it, `o4c` won't resolve. Run
+  `npm link` from the project root, then open a **new** terminal (PATH is read once per shell
+  session, not live-reloaded) — `npx tsx src/cli.ts` works in the meantime without needing the
+  link at all.
 
 ## Notes
 
