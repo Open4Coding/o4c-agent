@@ -24,6 +24,11 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
 
   useInput(
     (input, key) => {
+      // Stay "active" unconditionally (below) so Ink keeps holding raw mode on stdin -
+      // if every useInput hook in the tree goes inactive at once, Ink releases raw mode
+      // and the terminal's own echo takes over, leaking typed characters onto the screen
+      // instead of being captured here. Disabled just means "ignore it", not "stop listening".
+      if (disabled) return;
       if (key.return) {
         const submitted = value;
         if (submitted) {
@@ -86,7 +91,7 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
         setCursor((c) => c + input.length);
       }
     },
-    { isActive: !disabled },
+    { isActive: true },
   );
 
   const before = value.slice(0, cursor);

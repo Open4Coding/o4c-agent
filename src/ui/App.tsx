@@ -172,13 +172,13 @@ export function App({ loop, initialImage }: AppProps) {
           </Box>
         )}
       </Static>
-      {isProcessing && liveLines.length === 0 && <Spinner />}
       {isProcessing &&
         liveLines.map((line, i) => (
           <Text key={i} dimColor>
             {line}
           </Text>
         ))}
+      {isProcessing && <Spinner />}
       <InputBox disabled={isProcessing} onSubmit={handleSubmit} />
     </Box>
   );
