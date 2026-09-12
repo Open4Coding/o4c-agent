@@ -91,6 +91,10 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
   ]);
   const [liveLines, setLiveLines] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  // Separate from isProcessing (which covers the whole turn, including waiting on /resume's
+  // picker or /wipe's confirmations) - this is only true while an actual LLM call is in flight,
+  // so the "Thinking..." spinner doesn't run during a turn that's really just waiting on the user.
+  const [isThinking, setIsThinking] = useState(false);
   const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
 
   // Drives the "/" command palette - mirrors InputBox's own text (InputBox owns the actual
@@ -242,6 +246,7 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
 
         const responseLines: Line[] = [];
         setLiveLines([]);
+        setIsThinking(true);
         let toolEventCount = 0;
         let summaryLine: Line | undefined;
 
@@ -287,6 +292,7 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
         } finally {
           if (responseLines.length > 0) pushBlock(responseLines);
           setLiveLines([]);
+          setIsThinking(false);
 
           // Autosave after every completed turn, success or error - even a failed turn already
           // pushed the user's message into loop's history (AgentLoop.run pushes it before calling
@@ -401,13 +407,13 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
           </Box>
         )}
       </Static>
-      {isProcessing &&
+      {isThinking &&
         liveLines.map((line, i) => (
           <Text key={i} dimColor>
             {line}
           </Text>
         ))}
-      {isProcessing && <Spinner />}
+      {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
         active={!confirmDialog && !resumePicker}
