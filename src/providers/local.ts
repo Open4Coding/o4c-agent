@@ -81,27 +81,46 @@ function mapStopReason(reason: string): StopReason {
   return 'end_turn';
 }
 
+const DEFAULT_TIMEOUT_MS = 5 * 60_000;
+
 export class LocalProvider implements LLMProvider {
   readonly name = 'local';
   private baseUrl: string;
+  private timeoutMs: number;
 
-  constructor(options: { baseUrl?: string } = {}) {
+  constructor(options: { baseUrl?: string; timeoutMs?: number } = {}) {
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: await toOpenAIMessages(request.systemPrompt, request.messages),
-        tools: request.tools.map((t) => ({
-          type: 'function',
-          function: { name: t.name, description: t.description, parameters: t.inputSchema },
-        })),
-        max_tokens: 4096,
-      }),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: await toOpenAIMessages(request.systemPrompt, request.messages),
+          tools: request.tools.map((t) => ({
+            type: 'function',
+            function: { name: t.name, description: t.description, parameters: t.inputSchema },
+          })),
+          max_tokens: 4096,
+        }),
+        // Without this, a hung or runaway generation (e.g. a model stuck repeating inside a
+        // <think> block) leaves the request in flight forever - nothing in AgentLoop or the UI
+        // can cancel it, so the whole REPL (including /exit, queued behind the turn) is
+        // effectively frozen until this resolves on its own.
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        throw new Error(
+          `Local server did not respond within ${Math.round(this.timeoutMs / 1000)}s - the model may be stuck generating. Try again, or check the local server.`,
+        );
+      }
+      throw err;
+    }
 
     if (!response.ok) {
       throw new Error(`Local server error (status ${response.status}): ${await response.text()}`);
@@ -112,6 +131,7 @@ export class LocalProvider implements LLMProvider {
         finish_reason: string;
         message: { content: string | null; tool_calls?: OpenAIToolCall[] };
       }>;
+      usage?: { prompt_tokens: number; completion_tokens: number };
     };
 
     const choice = data.choices[0];
@@ -125,6 +145,9 @@ export class LocalProvider implements LLMProvider {
       content: choice.message.content ?? '',
       toolCalls,
       stopReason: mapStopReason(choice.finish_reason),
+      usage: data.usage
+        ? { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens }
+        : undefined,
     };
   }
 }

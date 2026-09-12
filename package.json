@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "tsx --test src/test/loop.test.ts src/test/searchUtils.test.ts"
+    "test": "tsx --test src/test/loop.test.ts src/test/searchUtils.test.ts src/test/slashCommand.test.ts src/test/sessionStore.test.ts src/test/projectContext.test.ts src/test/InputBox.test.tsx src/test/SelectList.test.tsx src/test/App.test.tsx"
   },
   "license": "Apache-2.0",
   "dependencies": {
@@ -26,6 +26,7 @@
   "devDependencies": {
     "@types/node": "20.19.43",
     "@types/react": "18.3.31",
+    "ink-testing-library": "4.0.0",
     "tsx": "4.23.13",
     "typescript": "5.9.3"
   },

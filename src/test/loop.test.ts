@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentLoop } from '../agent/loop.js';
+import { AgentLoop, MaxIterationsError } from '../agent/loop.js';
 import { FakeProvider } from './fakeProvider.js';
 import { makeFakeTool } from './fakeTool.js';
 
@@ -84,9 +84,10 @@ test('stops after maxIterations if the model never ends the turn', async () => {
   const provider = new FakeProvider(infiniteResponses);
   const loop = new AgentLoop(provider, [tool], 'system');
 
-  const result = await loop.run('never stop', { maxIterations: 3 });
-
-  assert.equal(result, '(stopped: max iterations reached without a final answer)');
+  await assert.rejects(
+    () => loop.run('never stop', { maxIterations: 3 }),
+    MaxIterationsError,
+  );
   assert.equal(provider.callCount, 3);
 });
 

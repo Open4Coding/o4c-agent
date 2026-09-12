@@ -1,6 +1,15 @@
-import { writeFile as fsWriteFile, mkdir } from 'node:fs/promises';
+import { writeFile as fsWriteFile, mkdir, access } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Tool } from './types.js';
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export const writeFileTool: Tool = {
   name: 'write_file',
@@ -17,9 +26,14 @@ export const writeFileTool: Tool = {
     const path = String(input.path ?? '');
     const content = String(input.content ?? '');
     try {
+      const existedBefore = await fileExists(path);
       await mkdir(dirname(path), { recursive: true });
       await fsWriteFile(path, content, 'utf-8');
-      return `Wrote ${content.length} characters to ${path}`;
+      // No interactive confirmation yet (that's a real UI feature, tracked separately in
+      // docs/frontend-design.checklist.md alongside run_shell's safety rails) - this at least
+      // makes an overwrite visible in the transcript instead of silent.
+      const verb = existedBefore ? 'Overwrote' : 'Wrote';
+      return `${verb} ${content.length} characters to ${path}`;
     } catch (err) {
       return `Error writing file "${path}": ${(err as Error).message}`;
     }

@@ -1,9 +1,21 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 
 export interface InputBoxProps {
   prompt?: string;
   disabled?: boolean;
+  /** When false, this box stops reacting to keystrokes entirely - an overlay (ConfirmDialog,
+   * SessionPicker) owns input instead. Default true. */
+  active?: boolean;
+  /** When true, Enter/↑/↓ are left alone here (a live overlay like CommandPalette owns them
+   * instead) while normal typing, backspace, and cursor movement keep working. Default false. */
+  suppressNav?: boolean;
+  /** Fires with the current text on every edit - lets a parent drive something off the live
+   * value (e.g. deciding whether to show the command palette) without owning the text itself. */
+  onChange?: (value: string) => void;
+  /** Bumping this (to any new number) clears the box's text/cursor without touching submit
+   * history - used when a palette selection fills in and submits a command programmatically. */
+  resetToken?: number;
   onSubmit: (value: string) => void;
 }
 
@@ -12,9 +24,28 @@ export interface InputBoxProps {
  * grows the parent Box's height to fit as the line exceeds the terminal width - no
  * manual wrap-point math needed.
  */
-export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBoxProps) {
+export function InputBox({
+  prompt = '> ',
+  disabled = false,
+  active = true,
+  suppressNav = false,
+  onChange,
+  resetToken,
+  onSubmit,
+}: InputBoxProps) {
   const [value, setValue] = useState('');
   const [cursor, setCursor] = useState(0);
+
+  useEffect(() => {
+    onChange?.(value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  useEffect(() => {
+    setValue('');
+    setCursor(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetToken]);
 
   // Submitted-input recall (up/down arrow), kept local to the input box - it only
   // needs the raw strings that were submitted, not anything about how they resolved.
@@ -28,11 +59,11 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
       // ahead and queue up the next message instead of being locked out until the
       // current turn finishes. `onSubmit` always fires on Enter too; it's up to the
       // caller (App) to decide whether to run it now or hold it until it's free.
-      // isActive stays unconditionally true (below) for the same raw-mode reason as
-      // before - if every useInput hook in the tree goes inactive at once, Ink
-      // releases raw mode and the terminal's own echo leaks typed characters onto
-      // the screen instead of this handler ever seeing them.
+      // The hook's own isActive is tied to `active` (below) rather than left unconditionally
+      // true, since a sibling overlay (ConfirmDialog, SessionPicker) has its own always-active
+      // useInput holding raw mode whenever this one is deactivated - so it's still safe.
       if (key.return) {
+        if (suppressNav) return; // CommandPalette owns Enter while it's open
         const submitted = value;
         if (submitted) {
           historyRef.current.push(submitted);
@@ -45,6 +76,7 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
         return;
       }
       if (key.upArrow) {
+        if (suppressNav) return; // CommandPalette owns ↑/↓ while it's open
         const hist = historyRef.current;
         if (hist.length === 0) return;
         if (historyIndexRef.current === -1) {
@@ -59,6 +91,7 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
         return;
       }
       if (key.downArrow) {
+        if (suppressNav) return; // CommandPalette owns ↑/↓ while it's open
         if (historyIndexRef.current === -1) return;
         const hist = historyRef.current;
         if (historyIndexRef.current < hist.length - 1) {
@@ -110,7 +143,7 @@ export function InputBox({ prompt = '> ', disabled = false, onSubmit }: InputBox
         setCursor((c) => c + input.length);
       }
     },
-    { isActive: true },
+    { isActive: active },
   );
 
   const before = value.slice(0, cursor);

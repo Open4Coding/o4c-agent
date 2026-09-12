@@ -12,10 +12,17 @@ import type {
  * simulator - just enough deterministic behavior to exercise the real
  * agent loop and real tool execution end to end.
  */
+// Not a real tokenizer - mock has no model to ask, so this is a crude chars/4 estimate purely so
+// /context has something to show when testing with --provider mock. Never treated as accurate.
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
 export class MockProvider implements LLMProvider {
   readonly name = 'mock';
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    const inputChars = request.messages.reduce((sum, m) => sum + m.content.length, 0);
     const hasToolResult = request.messages.some((m) => m.role === 'tool');
 
     if (!hasToolResult && request.tools.length > 0) {
@@ -25,10 +32,12 @@ export class MockProvider implements LLMProvider {
         name: tool.name,
         input: placeholderInput(tool),
       };
+      const content = `[mock] calling "${tool.name}" to see what happens.`;
       return {
-        content: `[mock] calling "${tool.name}" to see what happens.`,
+        content,
         toolCalls: [call],
         stopReason: 'tool_use',
+        usage: { inputTokens: Math.ceil(inputChars / 4), outputTokens: estimateTokens(content) },
       };
     }
 
@@ -37,10 +46,12 @@ export class MockProvider implements LLMProvider {
       ? `[mock] ran a tool and got ${lastTool.content.length} characters back.`
       : '[mock] no tools were available to call.';
 
+    const content = `${summary} This is a canned mock response, not a real answer - use --provider anthropic for that.`;
     return {
-      content: `${summary} This is a canned mock response, not a real answer - use --provider anthropic for that.`,
+      content,
       toolCalls: [],
       stopReason: 'end_turn',
+      usage: { inputTokens: estimateTokens(String(inputChars)), outputTokens: estimateTokens(content) },
     };
   }
 }

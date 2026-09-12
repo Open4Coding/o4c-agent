@@ -92,6 +92,10 @@ export class AnthropicProvider implements LLMProvider {
       content,
       toolCalls,
       stopReason: mapStopReason(response.stop_reason),
+      usage: {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+      },
     };
   }
 }

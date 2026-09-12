@@ -9,6 +9,9 @@ import { MockProvider } from './providers/mock.js';
 import type { LLMProvider } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
 import { AgentLoop, type AgentEvent } from './agent/loop.js';
+import { SessionStore } from './session/sessionStore.js';
+import { RunLogger } from './session/runLog.js';
+import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
 import { App } from './ui/App.js';
 import { formatEvent } from './ui/formatEvent.js';
 import { formatError } from './ui/formatError.js';
@@ -28,7 +31,7 @@ function printError(err: unknown): void {
   console.error(`\n${formatError(err)}`);
 }
 
-async function runRepl(loop: AgentLoop, initialImage?: string): Promise<void> {
+async function runRepl(loop: AgentLoop, projectRoot: string | undefined, initialImage?: string): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
       'Interactive mode requires a real terminal (TTY) - stdin appears to be piped or redirected.\n' +
@@ -37,8 +40,16 @@ async function runRepl(loop: AgentLoop, initialImage?: string): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { waitUntilExit } = render(React.createElement(App, { loop, initialImage }));
+  const sessionStore = new SessionStore(sessionsDirFor(projectRoot));
+  const runLogger = new RunLogger(logsDirFor(projectRoot));
+  const { waitUntilExit } = render(
+    React.createElement(App, { loop, initialImage, sessionStore, runLogger }),
+  );
   await waitUntilExit();
+  // Without an explicit exit, a lingering open handle (most likely a keep-alive socket from an
+  // in-flight or just-finished fetch to the local model server) can keep the event loop alive
+  // well after the UI itself has unmounted, making /exit feel like it needs pressing twice.
+  process.exit(process.exitCode ?? 0);
 }
 
 const program = new Command();
@@ -59,6 +70,15 @@ program
   .action(async (promptParts: string[], opts: { model: string; provider: string; baseUrl: string; image?: string }) => {
     const prompt = promptParts.join(' ');
 
+    // The trust gate: a project that has never used o4c before (no .o4c/ anywhere above cwd) gets
+    // asked once, interactively, before anything else happens - including before any project-level
+    // o4c.md is read, since that content is attacker-controlled text from whoever's repo this is
+    // until the user has actually said they trust it.
+    const cwd = process.cwd();
+    const { trusted, projectRoot } = await ensureTrusted(cwd);
+    const projectContext = trusted ? await resolveO4cMd(cwd, projectRoot) : '';
+    const systemPrompt = projectContext ? `${SYSTEM_PROMPT}\n\n${projectContext}` : SYSTEM_PROMPT;
+
     let provider: LLMProvider;
     if (opts.provider === 'mock') {
       provider = new MockProvider();
@@ -78,10 +98,10 @@ program
       return;
     }
 
-    const loop = new AgentLoop(provider, defaultTools, SYSTEM_PROMPT);
+    const loop = new AgentLoop(provider, defaultTools, systemPrompt);
 
     if (!prompt) {
-      await runRepl(loop, opts.image);
+      await runRepl(loop, projectRoot, opts.image);
       return;
     }
 

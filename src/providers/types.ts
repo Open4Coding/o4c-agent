@@ -28,10 +28,18 @@ export interface CompletionRequest {
 
 export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens';
 
+/** Token counts for one completion request, as reported by the provider itself - not estimated. */
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface CompletionResponse {
   content: string;
   toolCalls: ToolCall[];
   stopReason: StopReason;
+  /** Absent if the provider doesn't report usage (shouldn't happen for Anthropic/local, but keep it optional rather than fabricate zeros). */
+  usage?: Usage;
 }
 
 export interface LLMProvider {

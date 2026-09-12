@@ -15,8 +15,24 @@ export interface RunOptions {
   images?: string[];
 }
 
+/** Thrown when the loop exhausts its iteration budget without the model reaching a final answer. */
+export class MaxIterationsError extends Error {
+  constructor(public readonly maxIterations: number) {
+    super(`stopped after ${maxIterations} iterations without a final answer`);
+    this.name = 'MaxIterationsError';
+  }
+}
+
+export interface CumulativeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Number of completion requests actually sent to the provider, not turns or tool calls. */
+  requestCount: number;
+}
+
 export class AgentLoop {
   private messages: Message[] = [];
+  private usage: CumulativeUsage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
 
   constructor(
     private provider: LLMProvider,
@@ -24,14 +40,30 @@ export class AgentLoop {
     private systemPrompt: string,
   ) {}
 
-  /** Clears conversation history, starting a fresh session on the next `run()`. */
+  /** Clears conversation history and cumulative usage, starting a fresh session on the next `run()`. */
   reset(): void {
     this.messages = [];
+    this.usage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
   }
 
   /** Raw conversation history so far - every message, tool call, and tool result. For debug/inspection UIs. */
   getMessages(): readonly Message[] {
     return this.messages;
+  }
+
+  /** Token usage accumulated across every provider request this session, as reported by the provider - not estimated (except MockProvider, which has no real tokenizer to ask). */
+  getUsage(): Readonly<CumulativeUsage> {
+    return this.usage;
+  }
+
+  /**
+   * Replaces in-memory history with a previously-saved session's messages (for /resume).
+   * Cumulative usage resets to zero - it tracks this process's own request activity, not a
+   * lifetime total for the session, so there's nothing real to restore it to.
+   */
+  loadMessages(messages: readonly Message[]): void {
+    this.messages = [...messages];
+    this.usage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
   }
 
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
@@ -51,6 +83,12 @@ export class AgentLoop {
         messages,
         tools: toolDefs,
       });
+
+      this.usage.requestCount += 1;
+      if (response.usage) {
+        this.usage.inputTokens += response.usage.inputTokens;
+        this.usage.outputTokens += response.usage.outputTokens;
+      }
 
       if (response.content) {
         onEvent({ type: 'text', text: response.content });
@@ -78,6 +116,6 @@ export class AgentLoop {
       }
     }
 
-    return '(stopped: max iterations reached without a final answer)';
+    throw new MaxIterationsError(maxIterations);
   }
 }
