@@ -7,6 +7,7 @@ const execAsync = promisify(exec);
 export const runShellTool: Tool = {
   name: 'run_shell',
   description: 'Run a shell command and return its stdout/stderr output.',
+  mutating: true,
   inputSchema: {
     type: 'object',
     properties: {

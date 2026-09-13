@@ -13,6 +13,10 @@ export interface RunOptions {
   maxIterations?: number;
   onEvent?: (event: AgentEvent) => void;
   images?: string[];
+  /** Called before executing each tool call - lets the caller (App.tsx, via the mode system in
+   * src/ui/modePolicy.ts) allow or deny it. Omitted entirely, every tool call runs unconditionally
+   * (existing callers/tests keep working exactly as before). */
+  toolPolicy?: (tool: Tool, input: Record<string, unknown>) => Promise<'allow' | 'deny'>;
 }
 
 /** Thrown when the loop exhausts its iteration budget without the model reaching a final answer. */
@@ -108,9 +112,14 @@ export class AgentLoop {
       for (const call of response.toolCalls) {
         onEvent({ type: 'tool_call', toolName: call.name, toolInput: call.input });
         const tool = this.tools.find((t) => t.name === call.name);
-        const output = tool
-          ? await tool.execute(call.input)
-          : `Error: no tool registered with name "${call.name}"`;
+        let output: string;
+        if (!tool) {
+          output = `Error: no tool registered with name "${call.name}"`;
+        } else if (options.toolPolicy && (await options.toolPolicy(tool, call.input)) === 'deny') {
+          output = `Blocked by the current mode: ${call.name} was not executed.`;
+        } else {
+          output = await tool.execute(call.input);
+        }
         onEvent({ type: 'tool_result', toolName: call.name, toolOutput: output });
         messages.push({ role: 'tool', content: output, toolCallId: call.id });
       }

@@ -46,9 +46,46 @@ class ManyToolCallsProvider implements LLMProvider {
   }
 }
 
+// Calls write_file once (at a caller-chosen path) then ends the turn - lets mode-system tests
+// verify real end-to-end behavior (file created or not) rather than just checking UI text.
+class WriteFileProvider implements LLMProvider {
+  readonly name = 'write-file-test';
+  private called = false;
+  constructor(private targetPath: string) {}
+  async complete(_request: CompletionRequest): Promise<CompletionResponse> {
+    if (!this.called) {
+      this.called = true;
+      return {
+        content: '',
+        toolCalls: [{ id: 'w1', name: 'write_file', input: { path: this.targetPath, content: 'hello' } }],
+        stopReason: 'tool_use',
+      };
+    }
+    return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
+// Calls run_shell once with a harmless command, then ends the turn.
+class RunShellProvider implements LLMProvider {
+  readonly name = 'run-shell-test';
+  private called = false;
+  async complete(_request: CompletionRequest): Promise<CompletionResponse> {
+    if (!this.called) {
+      this.called = true;
+      return {
+        content: '',
+        toolCalls: [{ id: 's1', name: 'run_shell', input: { command: 'echo hi' } }],
+        stopReason: 'tool_use',
+      };
+    }
+    return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
 const ENTER = String.fromCharCode(13);
 const ESCAPE = String.fromCharCode(27);
 const DOWN = String.fromCharCode(27) + '[B';
+const SHIFT_TAB = String.fromCharCode(27) + '[Z';
 
 function tick(ms = 10): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -542,5 +579,169 @@ test('/wipe: Escape on the first confirmation cancels the same as answering No',
     assert.ok(anyFrameIncludes(frames, 'Wipe cancelled'));
     const after = await store.readManifest();
     assert.equal(after.length, 1);
+  });
+});
+
+test('/mode opens a picker listing all four modes', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Choose a mode'));
+    assert.ok(anyFrameIncludes(frames, 'Auto'));
+    assert.ok(anyFrameIncludes(frames, 'Accept Edits'));
+    assert.ok(anyFrameIncludes(frames, 'Plan'));
+
+    // Cancel rather than leaving the picker's pending promise (and processTurn) dangling
+    // unresolved after the test ends.
+    stdin.write(ESCAPE);
+    await tick(50);
+  });
+});
+
+test('Shift+Tab cycles through the four modes in order, independent of /mode', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    assert.ok((lastFrame() ?? '').includes('Mode: Manual'));
+
+    stdin.write(SHIFT_TAB);
+    await waitFor(() => (lastFrame() ?? '').includes('Mode: Auto'));
+
+    stdin.write(SHIFT_TAB);
+    await waitFor(() => (lastFrame() ?? '').includes('Mode: Accept Edits'));
+
+    stdin.write(SHIFT_TAB);
+    await waitFor(() => (lastFrame() ?? '').includes('Mode: Plan'));
+
+    // Wraps back around to Manual after the last mode.
+    stdin.write(SHIFT_TAB);
+    await waitFor(() => (lastFrame() ?? '').includes('Mode: Manual'));
+  });
+});
+
+test('Manual Mode (the default) prompts before write_file, and declining leaves the file untouched', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, 'manual-no.txt');
+    const { stdin, frames } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+
+    await submit(stdin, 'please write the file');
+    await tick(100);
+
+    assert.ok(anyFrameIncludes(frames, 'Allow write_file'));
+    stdin.write(ENTER); // ConfirmDialog defaults to "No"
+    await tick(100);
+
+    await assert.rejects(() => readFile(targetPath, 'utf-8'));
+  });
+});
+
+test('Manual Mode: confirming yes actually runs write_file', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, 'manual-yes.txt');
+    const { stdin } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+
+    await submit(stdin, 'please write the file');
+    await tick(100);
+    stdin.write(DOWN); // move from "No" to "Yes"
+    await tick(20);
+    stdin.write(ENTER);
+    await tick(100);
+
+    assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
+  });
+});
+
+test('Plan Mode blocks a real write_file call end-to-end - the file is never created', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, 'blocked.txt');
+    const { stdin, frames } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+    stdin.write(DOWN);
+    await tick(20);
+    stdin.write(DOWN);
+    await tick(20);
+    stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan
+    await tick(20);
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Mode set to Plan'));
+
+    await submit(stdin, 'please write the file');
+    await tick(100);
+
+    assert.ok(anyFrameIncludes(frames, 'Blocked by the current mode'));
+    await assert.rejects(() => readFile(targetPath, 'utf-8'));
+  });
+});
+
+test('Auto Mode runs write_file with no confirmation prompt at all', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, 'auto.txt');
+    const { stdin, lastFrame } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+    stdin.write(DOWN); // Manual -> Auto
+    await tick(20);
+    stdin.write(ENTER);
+    await tick(50);
+
+    await submit(stdin, 'please write the file');
+    await tick(100);
+
+    assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
+    assert.equal((lastFrame() ?? '').includes('Allow write_file'), false);
+  });
+});
+
+test('Accept Edits mode auto-runs write_file but still confirms run_shell', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, 'accept-edits.txt');
+    const { stdin, frames } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+    stdin.write(DOWN);
+    await tick(20);
+    stdin.write(DOWN); // Manual -> Auto -> Accept Edits
+    await tick(20);
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Mode set to Accept Edits'));
+
+    await submit(stdin, 'please write the file');
+    await tick(100);
+
+    assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
+  });
+});
+
+test('Accept Edits mode still confirms run_shell even though write_file is automatic', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir, provider: new RunShellProvider() });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+    stdin.write(DOWN);
+    await tick(20);
+    stdin.write(DOWN);
+    await tick(20);
+    stdin.write(ENTER);
+    await tick(50);
+
+    await submit(stdin, 'please run a command');
+    await tick(100);
+
+    assert.ok(anyFrameIncludes(frames, 'Allow run_shell'));
+    // Answer "No" - denying is enough to prove the confirmation gate is real, and resolving it
+    // lets processTurn actually finish instead of leaving a dangling pending promise (and the
+    // Ink tree mounted) after the test ends.
+    stdin.write(ESCAPE);
+    await tick(50);
   });
 });

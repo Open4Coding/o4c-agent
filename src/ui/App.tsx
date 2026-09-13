@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Box, Static, Text, useApp } from 'ink';
+import { Box, Static, Text, useApp, useInput } from 'ink';
 import { InputBox } from './InputBox.js';
 import { SessionPicker } from './SessionPicker.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { CommandPalette } from './CommandPalette.js';
+import { ModePicker } from './ModePicker.js';
+import { MODES, classifyToolAccess, modeInfo, type Mode } from './modePolicy.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
 import { formatMessage } from './formatMessage.js';
@@ -11,6 +13,7 @@ import type { Line } from './types.js';
 import type { AgentLoop, AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
+import type { Tool } from '../tools/types.js';
 import {
   KNOWN_COMMANDS,
   looksLikeSlashCommand,
@@ -129,6 +132,15 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
     resolve: (id: string | undefined) => void;
   } | null>(null);
 
+  // Governs whether write_file/run_shell run silently, need confirmation, or are blocked outright
+  // - see src/ui/modePolicy.ts. Manual is the default: a deliberate behavior change from "nothing
+  // is ever confirmed" today, the actual fix for the long-open run_shell/write_file safety gap.
+  const [mode, setMode] = useState<Mode>('manual');
+  // Same pending-Promise-resolver pattern as resumePicker, for the /mode command's picker.
+  const [modePicker, setModePicker] = useState<{ resolve: (m: Mode | undefined) => void } | null>(
+    null,
+  );
+
   // Same pending-Promise-resolver pattern as resumePicker, generic to any yes/no confirmation
   // (run_shell execution, write_file overwrite, /wipe). /wipe chains two of these in sequence by
   // calling askConfirm twice, awaiting each in turn - no special "double confirm" logic needed.
@@ -143,9 +155,38 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
     });
   }, []);
 
+  // Passed into loop.run() as RunOptions.toolPolicy - the current mode decides whether a
+  // mutating tool call runs silently, needs a yes/no first (via the same ConfirmDialog /wipe
+  // uses), or is refused outright (Plan Mode).
+  const toolPolicy = useCallback(
+    async (tool: Tool, input: Record<string, unknown>): Promise<'allow' | 'deny'> => {
+      const access = classifyToolAccess(mode, tool);
+      if (access === 'allow') return 'allow';
+      if (access === 'deny') return 'deny';
+      const ok = await askConfirm(`Allow ${tool.name}(${JSON.stringify(input)})?`);
+      return ok ? 'allow' : 'deny';
+    },
+    [mode, askConfirm],
+  );
+
   const pushBlock = useCallback((lines: Line[]) => {
     setHistory((h) => [...h, { id: nextBlockId++, lines }]);
   }, []);
+
+  // Shift+Tab cycles through the 4 modes in order, in addition to (not instead of) /mode's
+  // picker - a quick keyboard-only path for the same switch. Always active regardless of what
+  // else is showing, matching how this shortcut behaves elsewhere.
+  useInput(
+    (_input, key) => {
+      if (key.tab && key.shift) {
+        const currentIndex = MODES.findIndex((m) => m.mode === mode);
+        const next = MODES[(currentIndex + 1) % MODES.length].mode;
+        setMode(next);
+        pushBlock([{ kind: 'system', text: `Mode set to ${modeInfo(next).label}.` }]);
+      }
+    },
+    { isActive: true },
+  );
 
   const processTurn = useCallback(
     async (input: string) => {
@@ -231,6 +272,17 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
           { kind: 'user', text: `> ${input}` },
           { kind: 'system', text },
         ]);
+      } else if (input === '/mode') {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const chosen = await new Promise<Mode | undefined>((resolve) => {
+          setModePicker({ resolve });
+        });
+        if (chosen) {
+          setMode(chosen);
+          pushBlock([{ kind: 'system', text: `Mode set to ${modeInfo(chosen).label}.` }]);
+        } else {
+          pushBlock([{ kind: 'system', text: 'Mode unchanged.' }]);
+        }
       } else if (looksLikeSlashCommand(input) && !KNOWN_COMMANDS.includes(commandName(input))) {
         pushBlock([
           { kind: 'user', text: `> ${input}` },
@@ -253,6 +305,7 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
         try {
           const finalAnswer = await loop.run(input, {
             images: initialImage ? [initialImage] : undefined,
+            toolPolicy,
             onEvent: (event: AgentEvent) => {
               // The full, untruncated event always goes to the run log, regardless of what (or
               // whether) anything gets displayed - fire-and-forget, a logging failure shouldn't
@@ -316,8 +369,21 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, askConfirm],
+    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy],
   );
+
+  const handleModePickerSelect = useCallback(
+    (m: Mode) => {
+      modePicker?.resolve(m);
+      setModePicker(null);
+    },
+    [modePicker],
+  );
+
+  const handleModePickerCancel = useCallback(() => {
+    modePicker?.resolve(undefined);
+    setModePicker(null);
+  }, [modePicker]);
 
   const handlePickerSelect = useCallback(
     (id: string) => {
@@ -394,7 +460,8 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
   );
 
   const paletteMatches = isComposingCommand(inputValue) ? matchCommands(inputValue) : [];
-  const paletteOpen = !paletteDismissed && !confirmDialog && !resumePicker && paletteMatches.length > 0;
+  const paletteOpen =
+    !paletteDismissed && !confirmDialog && !resumePicker && !modePicker && paletteMatches.length > 0;
 
   return (
     <Box flexDirection="column">
@@ -416,12 +483,15 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !resumePicker}
+        active={!confirmDialog && !resumePicker && !modePicker}
         suppressNav={paletteOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
         onSubmit={handleSubmit}
       />
+      <Text color={modeInfo(mode).color}>
+        Mode: {modeInfo(mode).label}  (/mode or Shift+Tab to change)
+      </Text>
       {confirmDialog ? (
         <ConfirmDialog message={confirmDialog.message} onResolve={handleConfirmResolve} />
       ) : resumePicker ? (
@@ -430,6 +500,8 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
           onSelect={handlePickerSelect}
           onCancel={handlePickerCancel}
         />
+      ) : modePicker ? (
+        <ModePicker currentMode={mode} onSelect={handleModePickerSelect} onCancel={handleModePickerCancel} />
       ) : paletteOpen ? (
         <CommandPalette commands={paletteMatches} onSelect={handlePaletteSelect} onCancel={handlePaletteCancel} />
       ) : null}

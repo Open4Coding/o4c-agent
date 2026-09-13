@@ -34,7 +34,7 @@ test('commandName extracts just the /word, ignoring anything after whitespace', 
 });
 
 test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - no /help, no /debug', () => {
-  assert.deepEqual(KNOWN_COMMANDS, ['/clear', '/resume', '/wipe', '/context', '/ctx', '/exit', '/quit']);
+  assert.deepEqual(KNOWN_COMMANDS, ['/clear', '/resume', '/wipe', '/context', '/ctx', '/mode', '/exit', '/quit']);
 });
 
 test('isComposingCommand is true for a bare "/" or a partial command name, false once a space is typed', () => {

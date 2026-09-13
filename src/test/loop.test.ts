@@ -123,6 +123,59 @@ test('reset() clears history so the next run() starts fresh', async () => {
   assert.deepEqual(secondRequestMessages.map((m) => m.content), ['second question']);
 });
 
+test('toolPolicy denying a call skips execution and feeds back a blocked message', async () => {
+  const tool = makeFakeTool('write_file', 'should never see this', true);
+  const provider = new FakeProvider([
+    {
+      content: '',
+      toolCalls: [{ id: 't1', name: 'write_file', input: { path: 'x' } }],
+      stopReason: 'tool_use',
+    },
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  await loop.run('write something', { toolPolicy: async () => 'deny' });
+
+  assert.equal(tool.calls.length, 0);
+  const toolMessage = provider.receivedRequests[1].messages.find((m) => m.role === 'tool');
+  assert.match(toolMessage?.content ?? '', /Blocked by the current mode/);
+});
+
+test('toolPolicy allowing a call runs the tool normally', async () => {
+  const tool = makeFakeTool('write_file', 'wrote it', true);
+  const provider = new FakeProvider([
+    {
+      content: '',
+      toolCalls: [{ id: 't1', name: 'write_file', input: { path: 'x' } }],
+      stopReason: 'tool_use',
+    },
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  await loop.run('write something', { toolPolicy: async () => 'allow' });
+
+  assert.equal(tool.calls.length, 1);
+});
+
+test('omitting toolPolicy runs every tool call unconditionally, as before', async () => {
+  const tool = makeFakeTool('write_file', 'wrote it', true);
+  const provider = new FakeProvider([
+    {
+      content: '',
+      toolCalls: [{ id: 't1', name: 'write_file', input: { path: 'x' } }],
+      stopReason: 'tool_use',
+    },
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  await loop.run('write something');
+
+  assert.equal(tool.calls.length, 1);
+});
+
 test('emits events for text, tool_call, and tool_result in order', async () => {
   const tool = makeFakeTool('read_file', 'contents');
   const provider = new FakeProvider([

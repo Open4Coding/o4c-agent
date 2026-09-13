@@ -22,6 +22,10 @@ export const COMMANDS: CommandInfo[] = [
     aliases: ['/ctx'],
     description: 'Show local token-usage for this session - no LLM call.',
   },
+  {
+    name: '/mode',
+    description: 'Switch between Manual, Auto, Accept Edits, and Plan mode.',
+  },
   { name: '/exit', aliases: ['/quit'], description: 'End the session.' },
 ];
 

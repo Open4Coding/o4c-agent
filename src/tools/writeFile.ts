@@ -14,6 +14,7 @@ async function fileExists(path: string): Promise<boolean> {
 export const writeFileTool: Tool = {
   name: 'write_file',
   description: 'Write text content to a file, creating parent directories and overwriting the file if it exists.',
+  mutating: true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -29,9 +30,6 @@ export const writeFileTool: Tool = {
       const existedBefore = await fileExists(path);
       await mkdir(dirname(path), { recursive: true });
       await fsWriteFile(path, content, 'utf-8');
-      // No interactive confirmation yet (that's a real UI feature, tracked separately in
-      // docs/frontend-design.checklist.md alongside run_shell's safety rails) - this at least
-      // makes an overwrite visible in the transcript instead of silent.
       const verb = existedBefore ? 'Overwrote' : 'Wrote';
       return `${verb} ${content.length} characters to ${path}`;
     } catch (err) {
