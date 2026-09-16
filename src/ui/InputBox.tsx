@@ -44,6 +44,7 @@ export function InputBox({
   useEffect(() => {
     setValue('');
     setCursor(0);
+    killedRef.current = '';
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetToken]);
 
@@ -52,6 +53,10 @@ export function InputBox({
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef<number>(-1); // -1 = not currently browsing history
   const draftRef = useRef<string>(''); // what was being typed before browsing started
+  // What Ctrl-U most recently killed (the bash/readline "kill ring", one slot deep) - the next
+  // up-arrow press yanks it back in at the current cursor position instead of browsing history,
+  // so an accidental Ctrl-U is one keystroke to undo rather than gone for good.
+  const killedRef = useRef<string>('');
 
   useInput(
     (input, key) => {
@@ -70,6 +75,7 @@ export function InputBox({
         }
         historyIndexRef.current = -1;
         draftRef.current = '';
+        killedRef.current = '';
         setValue('');
         setCursor(0);
         onSubmit(submitted);
@@ -77,6 +83,13 @@ export function InputBox({
       }
       if (key.upArrow) {
         if (suppressNav) return; // CommandPalette owns ↑/↓ while it's open
+        if (historyIndexRef.current === -1 && killedRef.current) {
+          const killed = killedRef.current;
+          killedRef.current = '';
+          setValue((v) => v.slice(0, cursor) + killed + v.slice(cursor));
+          setCursor((c) => c + killed.length);
+          return;
+        }
         const hist = historyRef.current;
         if (hist.length === 0) return;
         if (historyIndexRef.current === -1) {
@@ -131,9 +144,15 @@ export function InputBox({
         return;
       }
       if (key.ctrl && input === 'u') {
-        historyIndexRef.current = -1;
-        setValue('');
-        setCursor(0);
+        // Bash convention: kill from line-start to the cursor only, leaving anything after
+        // the cursor untouched - and stash what was killed so the next up-arrow can yank it
+        // back in (see killedRef above), instead of an accidental Ctrl-U losing it for good.
+        if (cursor > 0) {
+          killedRef.current = value.slice(0, cursor);
+          historyIndexRef.current = -1;
+          setValue((v) => v.slice(cursor));
+          setCursor(0);
+        }
         return;
       }
       if (key.ctrl || key.meta) return;

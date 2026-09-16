@@ -139,6 +139,74 @@ test('Ctrl+A/E jump to the start/end of the buffer, Ctrl+U clears it entirely', 
   assert.deepEqual(submitted, ['clean']);
 });
 
+test('Ctrl+U only kills from line-start to the cursor, leaving text after it in place', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  await tick();
+
+  await type(stdin, 'hello world');
+  for (let i = 0; i < 6; i++) await press(stdin, LEFT); // cursor between "hello" and " world"
+  await press(stdin, CTRL_U);
+  await press(stdin, ENTER);
+
+  assert.deepEqual(submitted, [' world']);
+});
+
+test('up-arrow right after Ctrl+U yanks the killed text back in at the cursor', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  await tick();
+
+  await type(stdin, 'hello world');
+  for (let i = 0; i < 6; i++) await press(stdin, LEFT); // cursor between "hello" and " world"
+  await press(stdin, CTRL_U);
+  await press(stdin, UP);
+  await press(stdin, ENTER);
+
+  assert.deepEqual(submitted, ['hello world']);
+});
+
+test('a second up-arrow after the yank is consumed falls through to normal history recall', async () => {
+  // Checks the final submitted value only, not an intermediate lastFrame() snapshot - Ink's
+  // reconciliation across two rapid state-updating keystrokes (Ctrl+U then Up) can be caught
+  // mid-repaint by a frame snapshot one tick in, even though the underlying state is already
+  // correct (confirmed by tracing it directly). If the kill ring wrongly yanked a *second* time
+  // instead of falling through to history, the final value would be 'betabeta' or similar, not
+  // a clean 'alpha' - so this still fully exercises the fallthrough without relying on a frame
+  // captured at a fragile instant.
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  await tick();
+
+  await type(stdin, 'alpha');
+  await press(stdin, ENTER);
+
+  await type(stdin, 'beta');
+  await press(stdin, CTRL_U); // cursor is at the end, kills the whole word
+  await press(stdin, UP); // first up-arrow: yanks 'beta' back
+  await press(stdin, UP); // kill ring is now empty: falls through to real history recall
+  await press(stdin, ENTER);
+
+  assert.deepEqual(submitted, ['alpha', 'alpha']);
+});
+
+test('the kill ring is cleared on submit, so it does not bleed into the next message', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  await tick();
+
+  await type(stdin, 'killed text');
+  await press(stdin, CTRL_U);
+  await press(stdin, ENTER); // submits '', and should clear the kill ring too
+
+  await type(stdin, 'fresh');
+  await press(stdin, UP); // no history yet and no kill ring - must be a no-op, not a stale yank
+
+  assert.equal(lastFrame()?.includes('killed text'), false);
+  await press(stdin, ENTER);
+  assert.deepEqual(submitted, ['', 'fresh']);
+});
+
 test('editing works even when disabled=true, matching the type-ahead queueing design', async () => {
   const submitted: string[] = [];
   const { stdin } = render(
