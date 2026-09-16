@@ -53,8 +53,17 @@ const CURSOR_UP_ONE = `${CSI}1A`;
  * - Swapping the live region for a placeholder plus a debounce, and correcting each frame as it
  *   is written: every transition still went through the same broken pipe mid-drag.
  *
- * Known residual limit: if the live region is taller than the visible viewport, part of the old
- * frame is already in scrollback and can't be reached.
+ * Known residual limits:
+ * - If the live region is taller than the visible viewport, part of the old frame is already in
+ *   scrollback and can't be reached.
+ * - The row math assumes the terminal REFLOWS wrapped lines on resize. Windows Terminal does
+ *   (confirmed with the probe above - the cursor moved up exactly as lines unwrapped), as do
+ *   iTerm2, Terminal.app, VTE/GNOME, kitty, Alacritty and tmux. xterm and legacy conhost do not
+ *   (they clip), and there is no reliable way to detect which behaviour is active - the very
+ *   reason upstream declined a similar fix (vadimdemedes/ink PR #916) and documented it as a
+ *   known limitation instead (PR #920). On a non-reflowing terminal the old frame stays at one
+ *   row per line, the erase here would over-count, and the cursor-up would walk into committed
+ *   history. This project targets Windows Terminal, so that is accepted rather than guarded.
  */
 
 /**
