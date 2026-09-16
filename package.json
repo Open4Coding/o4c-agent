@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "tsx --test src/test/loop.test.ts src/test/searchUtils.test.ts src/test/slashCommand.test.ts src/test/sessionStore.test.ts src/test/projectContext.test.ts src/test/modePolicy.test.ts src/test/InputBox.test.tsx src/test/SelectList.test.tsx src/test/App.test.tsx"
+    "test": "tsx --test src/test/loop.test.ts src/test/searchUtils.test.ts src/test/slashCommand.test.ts src/test/sessionStore.test.ts src/test/projectContext.test.ts src/test/modePolicy.test.ts src/test/resizeReflowFix.test.ts src/test/InputBox.test.tsx src/test/SelectList.test.tsx src/test/App.test.tsx"
   },
   "license": "Apache-2.0",
   "dependencies": {
@@ -21,7 +21,8 @@
     "commander": "12.1.0",
     "dotenv": "17.4.2",
     "ink": "5.2.1",
-    "react": "18.3.1"
+    "react": "18.3.1",
+    "string-width": "7.2.0"
   },
   "devDependencies": {
     "@types/node": "20.19.43",

@@ -745,3 +745,12 @@ test('Accept Edits mode still confirms run_shell even though write_file is autom
     await tick(50);
   });
 });
+
+// Terminal-resize handling is deliberately NOT part of App at all - it lives in
+// src/ui/resizeReflowFix.ts, installed on process.stdout by cli.ts before render(), and is tested
+// on its own in resizeReflowFix.test.ts. Two earlier in-App attempts are worth not repeating:
+// bumping a `key` on <Static> to re-wrap history on resize (Static writes are permanent and
+// additive - Static.js - so that appended a second copy of the whole conversation every time),
+// and swapping the live region for a placeholder during a drag (every frame transition still
+// went through Ink's same broken erase, so it only changed which stale frames got left behind).
+// See the module's doc comment and docs/frontend-design.checklist.md §5e for the full history.

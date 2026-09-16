@@ -13,6 +13,7 @@ import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
 import { App } from './ui/App.js';
+import { installResizeReflowFix } from './ui/resizeReflowFix.js';
 import { formatEvent } from './ui/formatEvent.js';
 import { formatError } from './ui/formatError.js';
 
@@ -42,6 +43,9 @@ async function runRepl(loop: AgentLoop, projectRoot: string | undefined, initial
   }
   const sessionStore = new SessionStore(sessionsDirFor(projectRoot));
   const runLogger = new RunLogger(logsDirFor(projectRoot));
+  // Must be installed before render() so it sees Ink's very first frame - see the module's own
+  // doc comment for the bug this works around.
+  installResizeReflowFix(process.stdout);
   const { waitUntilExit } = render(
     React.createElement(App, { loop, initialImage, sessionStore, runLogger }),
   );
