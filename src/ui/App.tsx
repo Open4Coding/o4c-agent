@@ -14,6 +14,7 @@ import type { AgentLoop, AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import type { Tool } from '../tools/types.js';
+import type { Message } from '../providers/types.js';
 import {
   KNOWN_COMMANDS,
   looksLikeSlashCommand,
@@ -28,6 +29,15 @@ export interface AppProps {
   initialImage?: string;
   sessionStore: SessionStore;
   runLogger: RunLogger;
+  /** Set by cli.ts when this process was launched with `--resume <id>` - seeds the visible
+   * scrollback and currentSessionIdRef on mount, since a fresh process handoff (see `restart`
+   * below) never gets a chance to append it mid-session. */
+  initialSession?: { id: string; title: string; messages: Message[] };
+  /** Requests that /clear, /wipe or /resume hand off to a brand-new process instead of resetting
+   * state in-place - see cli.ts's spawnRestart for why. Call this, then exit() (as /exit does),
+   * never both without the other: cli.ts only spawns the replacement after this process's Ink
+   * instance has actually unmounted. */
+  restart: (resumeId?: string) => void;
 }
 
 // Above this many tool_call/tool_result events in a single turn, further ones collapse into a
@@ -79,10 +89,10 @@ function LineText({ line }: { line: Line }) {
   }
 }
 
-export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
+export function App({ loop, initialImage, sessionStore, runLogger, initialSession, restart }: AppProps) {
   const { exit } = useApp();
-  const [history, setHistory] = useState<HistoryBlock[]>([
-    {
+  const [history, setHistory] = useState<HistoryBlock[]>(() => {
+    const banner: HistoryBlock = {
       id: nextBlockId++,
       lines: [
         {
@@ -90,8 +100,16 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
           text: 'o4c interactive session. Type your request, or / to see available commands.',
         },
       ],
-    },
-  ]);
+    };
+    if (!initialSession) return [banner];
+    const blocks: HistoryBlock[] = [
+      banner,
+      { id: nextBlockId++, lines: [{ kind: 'system', text: `Resumed session: ${initialSession.title}` }] },
+    ];
+    const restoredLines = initialSession.messages.flatMap(formatMessage);
+    if (restoredLines.length > 0) blocks.push({ id: nextBlockId++, lines: restoredLines });
+    return blocks;
+  });
   const [liveLines, setLiveLines] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   // Separate from isProcessing (which covers the whole turn, including waiting on /resume's
@@ -119,9 +137,9 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
   const queuedInputsRef = useRef<string[]>([]);
 
   // undefined = no session persisted yet (fresh start, or just after /clear). Set once the first
-  // turn autosaves successfully; reused on every subsequent save so it updates in place rather
-  // than creating a new session file per turn.
-  const currentSessionIdRef = useRef<string | undefined>(undefined);
+  // turn autosaves successfully, or immediately on mount by a /resume restart handoff; reused on
+  // every subsequent save so it updates in place rather than creating a new session file per turn.
+  const currentSessionIdRef = useRef<string | undefined>(initialSession?.id);
 
   // Non-null while /resume's picker is showing. `resolve` is the pending Promise's resolver
   // that processTurn is awaiting on - selecting or cancelling calls it, which is what lets
@@ -193,15 +211,13 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
       // /exit and /quit are intercepted earlier, in handleSubmit, before they can ever be
       // queued behind a busy turn - they never reach here.
       if (input === '/clear') {
-        loop.reset();
-        // The just-cleared session's file (if it had been autosaved) is left alone on disk,
-        // resumable via /resume - only the in-memory pointer to it is dropped, so the next
-        // message starts a brand-new session id instead of overwriting that one.
-        currentSessionIdRef.current = undefined;
-        pushBlock([
-          { kind: 'user', text: `> ${input}` },
-          { kind: 'system', text: 'History cleared.' },
-        ]);
+        // Handed off to a brand-new process (see AppProps.restart's doc comment) rather than
+        // reset in-place - the only way to get a genuinely clear screen. The just-cleared
+        // session's file (if it had been autosaved) is left alone on disk, resumable via /resume
+        // - no resumeId is passed, so the new process starts with a brand-new session id instead
+        // of overwriting that one.
+        restart();
+        setTimeout(() => exit(), 0);
       } else if (input === '/resume') {
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
         const sessions = await sessionStore.readManifest();
@@ -212,23 +228,11 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
             setResumePicker({ sessions, resolve });
           });
           if (chosenId) {
-            const data = await sessionStore.load(chosenId);
-            if (data) {
-              loop.loadMessages(data.messages);
-              currentSessionIdRef.current = data.id;
-              pushBlock([{ kind: 'system', text: `Resumed session: ${data.title}` }]);
-              // Restore the visible scrollback too - loadMessages only restores the model's
-              // own memory, so without this the screen stays blank even though the loop
-              // already has full context (this was the actual bug: /resume "worked" in that
-              // later questions were answered correctly, but the prior conversation never
-              // reappeared on screen).
-              const restoredLines = data.messages.flatMap(formatMessage);
-              if (restoredLines.length > 0) pushBlock(restoredLines);
-            } else {
-              pushBlock([
-                { kind: 'error', text: 'Failed to load that session (it may have been removed).' },
-              ]);
-            }
+            // Handed off to a brand-new process, started with `--resume <chosenId>` - it loads
+            // and displays that session's history itself, before its first render, instead of
+            // this process appending it mid-session (see AppProps.restart's doc comment).
+            restart(chosenId);
+            setTimeout(() => exit(), 0);
           } else {
             pushBlock([{ kind: 'system', text: 'Resume cancelled.' }]);
           }
@@ -251,9 +255,8 @@ export function App({ loop, initialImage, sessionStore, runLogger }: AppProps) {
               pushBlock([{ kind: 'system', text: 'Wipe cancelled.' }]);
             } else {
               await sessionStore.delete(currentSessionIdRef.current);
-              loop.reset();
-              currentSessionIdRef.current = undefined;
-              pushBlock([{ kind: 'system', text: 'Session permanently deleted.' }]);
+              restart();
+              setTimeout(() => exit(), 0);
             }
           }
         }

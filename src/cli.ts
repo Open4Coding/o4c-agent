@@ -3,10 +3,11 @@ import 'dotenv/config';
 import React from 'react';
 import { render } from 'ink';
 import { Command } from 'commander';
+import { spawnSync } from 'node:child_process';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { LocalProvider } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
-import type { LLMProvider } from './providers/types.js';
+import type { LLMProvider, Message } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
 import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { SessionStore } from './session/sessionStore.js';
@@ -16,6 +17,39 @@ import { App } from './ui/App.js';
 import { installResizeReflowFix } from './ui/resizeReflowFix.js';
 import { formatEvent } from './ui/formatEvent.js';
 import { formatError } from './ui/formatError.js';
+
+interface RestartableOpts {
+  model: string;
+  provider: string;
+  baseUrl: string;
+  image?: string;
+}
+
+/**
+ * /clear, /wipe and /resume all hand off to a brand-new process instead of resetting state
+ * in-place - the only way to get a genuinely clear screen. A real ESC[2J mid-session was tried
+ * and rejected (see resizeReflowFix.ts's doc comment): on Windows Terminal it scrolls the stale
+ * frame into scrollback instead of erasing it. Done once at a fresh process's cold start, before
+ * Ink ever renders, there's no live frame to corrupt - it's the same "scroll old content out of
+ * view" every `clear`/`cls` does.
+ *
+ * Blocking (spawnSync), not fire-and-forget: an async spawn() followed immediately by
+ * process.exit() races the OS on Windows - this process can exit before CreateProcess finishes
+ * duplicating the inherited stdio handles into the child, so the child silently never starts and
+ * control just falls back to the shell. Blocking until the child itself exits (recursively, if
+ * IT restarts too) has no such race and costs nothing - this process has nothing left to do but
+ * wait anyway.
+ */
+function spawnRestart(opts: RestartableOpts, resumeId: string | undefined): number {
+  const args = ['-m', opts.model, '-p', opts.provider, '--base-url', opts.baseUrl];
+  if (opts.image) args.push('--image', opts.image);
+  if (resumeId) args.push('--resume', resumeId);
+  const result = spawnSync(process.execPath, [process.argv[1], ...args], {
+    stdio: 'inherit',
+    env: { ...process.env, O4C_FRESH_SCREEN: '1' },
+  });
+  return result.status ?? 0;
+}
 
 const SYSTEM_PROMPT = `You are o4c, the open4coding programming harness. You help the user with
 software engineering tasks in their current directory. You have tools to read files, write files,
@@ -32,7 +66,13 @@ function printError(err: unknown): void {
   console.error(`\n${formatError(err)}`);
 }
 
-async function runRepl(loop: AgentLoop, projectRoot: string | undefined, initialImage?: string): Promise<void> {
+async function runRepl(
+  loop: AgentLoop,
+  projectRoot: string | undefined,
+  sessionStore: SessionStore,
+  opts: RestartableOpts,
+  initialSession?: { id: string; title: string; messages: Message[] },
+): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
       'Interactive mode requires a real terminal (TTY) - stdin appears to be piped or redirected.\n' +
@@ -41,15 +81,34 @@ async function runRepl(loop: AgentLoop, projectRoot: string | undefined, initial
     process.exitCode = 1;
     return;
   }
-  const sessionStore = new SessionStore(sessionsDirFor(projectRoot));
+  // Set only by spawnRestart, on the process it just spawned - cleared immediately so it doesn't
+  // survive into anything this process itself spawns later.
+  if (process.env.O4C_FRESH_SCREEN === '1') {
+    delete process.env.O4C_FRESH_SCREEN;
+    process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
+  }
   const runLogger = new RunLogger(logsDirFor(projectRoot));
   // Must be installed before render() so it sees Ink's very first frame - see the module's own
   // doc comment for the bug this works around.
   installResizeReflowFix(process.stdout);
+  let pendingRestart: { resumeId: string | undefined } | undefined;
+  const restart = (resumeId?: string) => {
+    pendingRestart = { resumeId };
+  };
   const { waitUntilExit } = render(
-    React.createElement(App, { loop, initialImage, sessionStore, runLogger }),
+    React.createElement(App, {
+      loop,
+      initialImage: opts.image,
+      sessionStore,
+      runLogger,
+      initialSession,
+      restart,
+    }),
   );
   await waitUntilExit();
+  if (pendingRestart) {
+    process.exit(spawnRestart(opts, pendingRestart.resumeId));
+  }
   // Without an explicit exit, a lingering open handle (most likely a keep-alive socket from an
   // in-flight or just-finished fetch to the local model server) can keep the event loop alive
   // well after the UI itself has unmounted, making /exit feel like it needs pressing twice.
@@ -71,7 +130,8 @@ program
   )
   .option('--base-url <url>', 'base URL for the "local" provider', 'http://localhost:8080')
   .option('--image <path>', 'path to an image file to attach (vision-capable providers only)')
-  .action(async (promptParts: string[], opts: { model: string; provider: string; baseUrl: string; image?: string }) => {
+  .option('--resume <sessionId>', 'resume a saved session by id (used internally by /resume)')
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string }) => {
     const prompt = promptParts.join(' ');
 
     // The trust gate: a project that has never used o4c before (no .o4c/ anywhere above cwd) gets
@@ -105,7 +165,19 @@ program
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
 
     if (!prompt) {
-      await runRepl(loop, projectRoot, opts.image);
+      const sessionStore = new SessionStore(sessionsDirFor(projectRoot));
+      let initialSession: { id: string; title: string; messages: Message[] } | undefined;
+      if (opts.resume) {
+        const data = await sessionStore.load(opts.resume);
+        if (!data) {
+          console.error(`Could not find a saved session with id "${opts.resume}".`);
+          process.exitCode = 1;
+          return;
+        }
+        loop.loadMessages(data.messages);
+        initialSession = { id: data.id, title: data.title, messages: data.messages };
+      }
+      await runRepl(loop, projectRoot, sessionStore, opts, initialSession);
       return;
     }
 

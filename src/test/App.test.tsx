@@ -11,7 +11,7 @@ import { MockProvider } from '../providers/mock.js';
 import { defaultTools } from '../tools/index.js';
 import { SessionStore } from '../session/sessionStore.js';
 import { RunLogger } from '../session/runLog.js';
-import type { CompletionRequest, CompletionResponse, LLMProvider } from '../providers/types.js';
+import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 
 // Simulates a turn that never comes back (a hung/runaway local-model generation) so tests can
 // verify /exit isn't stuck waiting behind it in the FIFO queue.
@@ -130,13 +130,34 @@ function anyFrameIncludes(frames: string[], text: string): boolean {
   return frames.some((f) => f.includes(text));
 }
 
-async function setup(opts: { dir: string; provider?: LLMProvider }) {
+async function setup(opts: {
+  dir: string;
+  provider?: LLMProvider;
+  // As if this process had been launched via `--resume <id>` (a /resume restart handoff) -
+  // see the "launched with an initial session" test below for what this actually covers.
+  initialSession?: { id: string; title: string; messages: Message[] };
+}) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
   const loop = new AgentLoop(opts.provider ?? new MockProvider(), defaultTools, 'test system prompt');
-  const instance = render(React.createElement(App, { loop, sessionStore: store, runLogger }));
+  // /clear, /wipe and /resume now hand off to a brand-new process instead of resetting state
+  // in-place (see AppProps.restart's doc comment) - nothing to actually spawn in a test, so this
+  // just records what App asked for.
+  const restartCalls: Array<string | undefined> = [];
+  const restart = (resumeId?: string) => {
+    restartCalls.push(resumeId);
+  };
+  const instance = render(
+    React.createElement(App, {
+      loop,
+      sessionStore: store,
+      runLogger,
+      initialSession: opts.initialSession,
+      restart,
+    }),
+  );
   await tick();
-  return { ...instance, loop, store, runLogger };
+  return { ...instance, loop, store, runLogger, restartCalls };
 }
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -230,7 +251,7 @@ test('the command palette narrows as more is typed', async () => {
 
 test('Enter in the command palette selects and submits the highlighted command, clearing the input', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, frames } = await setup({ dir });
+    const { stdin, frames, restartCalls } = await setup({ dir });
 
     // "/cl" uniquely matches /clear (not /context/ctx) - Enter should submit it directly.
     await type(stdin, '/cl');
@@ -238,7 +259,8 @@ test('Enter in the command palette selects and submits the highlighted command, 
     stdin.write(ENTER);
     await tick(50);
 
-    assert.ok(anyFrameIncludes(frames, 'History cleared.'));
+    // /clear hands off to a restart (no resumeId) rather than resetting state in-place.
+    assert.deepEqual(restartCalls, [undefined]);
   });
 });
 
@@ -340,9 +362,9 @@ test('/context reflects real usage after a turn has run', async () => {
   });
 });
 
-test('a real turn autosaves the session, and /clear starts a genuinely new one', async () => {
+test('a real turn autosaves the session, and /clear hands off to a restart with no resumeId', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, store } = await setup({ dir });
+    const { stdin, store, restartCalls } = await setup({ dir });
 
     await submit(stdin, 'first session message');
     await tick(100);
@@ -354,17 +376,12 @@ test('a real turn autosaves the session, and /clear starts a genuinely new one',
     await submit(stdin, '/clear');
     await tick(50);
 
+    // No resumeId - the freshly spawned process starts blank, with a brand-new session id on its
+    // next autosave, rather than overwriting this one.
+    assert.deepEqual(restartCalls, [undefined]);
     // The pre-clear session must still be on disk and resumable.
     const manifestAfterClear = await store.readManifest();
     assert.ok(manifestAfterClear.some((m) => m.id === firstId));
-
-    await submit(stdin, 'second session message');
-    await tick(100);
-
-    const manifestAfterSecond = await store.readManifest();
-    assert.equal(manifestAfterSecond.length, 2);
-    assert.ok(manifestAfterSecond.some((m) => m.id === firstId));
-    assert.ok(manifestAfterSecond.some((m) => m.id !== firstId));
   });
 });
 
@@ -379,7 +396,7 @@ test('/resume with no saved sessions says so instead of showing an empty picker'
   });
 });
 
-test('/resume shows a picker; Enter on the default (newest) selection loads it and future turns autosave back into it, not a new session', async () => {
+test('/resume shows a picker; Enter on the default (newest) selection hands off to a restart with that session\'s id', async () => {
   await withTempDir(async (dir) => {
     // Seed two sessions directly via the store, independent of the running App instance.
     const seedStore = new SessionStore(dir);
@@ -387,7 +404,7 @@ test('/resume shows a picker; Enter on the default (newest) selection loads it a
     await tick(20); // ensure a distinct updatedAt so ordering is unambiguous
     const newerId = await seedStore.save([{ role: 'user', content: 'newer session' }]);
 
-    const { stdin, frames, loop, store } = await setup({ dir });
+    const { stdin, frames, restartCalls } = await setup({ dir });
 
     await submit(stdin, '/resume');
     await tick(50);
@@ -397,55 +414,55 @@ test('/resume shows a picker; Enter on the default (newest) selection loads it a
     stdin.write(ENTER); // default selection is index 0 = newest
     await tick(50);
 
-    assert.ok(anyFrameIncludes(frames, 'Resumed session: newer session'));
-    assert.deepEqual(loop.getMessages(), [{ role: 'user', content: 'newer session' }]);
+    // The new process (spawned with --resume <newerId>) is what actually loads and displays
+    // that session, and autosaves back into it - see the "launched with an initialSession" test
+    // below for that side, which this process hands off to instead of doing in-place.
+    assert.deepEqual(restartCalls, [newerId]);
+    assert.notEqual(newerId, olderId);
+  });
+});
 
-    // A subsequent turn must autosave back into the resumed session's id, not create a third one.
+test('launched with an initialSession (as a /resume restart handoff would be), the resumed conversation reappears on screen and a later turn autosaves back into the same session id', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    const id = await seedStore.save([
+      { role: 'user', content: 'what does this project do' },
+      { role: 'assistant', content: 'it is a CLI coding harness' },
+    ]);
+    const data = await seedStore.load(id);
+    assert.ok(data);
+
+    const { stdin, frames, loop, store } = await setup({
+      dir,
+      initialSession: { id: data!.id, title: data!.title, messages: data!.messages },
+    });
+
+    assert.deepEqual(loop.getMessages(), []); // loadMessages() happens in cli.ts, before App mounts
+    // The prior conversation must be visible on screen from the very first frame, not just
+    // sitting in the loop's memory.
+    assert.ok(anyFrameIncludes(frames, 'what does this project do'));
+    assert.ok(anyFrameIncludes(frames, 'it is a CLI coding harness'));
+
+    // A subsequent turn must autosave back into the resumed session's id, not create a new one.
     await submit(stdin, 'continuing the resumed session');
     await tick(100);
 
     const manifest = await store.readManifest();
-    assert.equal(manifest.length, 2);
-    const resumed = manifest.find((m) => m.id === newerId);
+    assert.equal(manifest.length, 1);
+    const resumed = manifest.find((m) => m.id === id);
     assert.ok(resumed);
-    assert.ok(resumed.messageCount > 1);
-    assert.equal(manifest.some((m) => m.id === olderId), true);
-  });
-});
-
-test('/resume repopulates the visible scrollback with the resumed conversation, not just the model\'s memory', async () => {
-  await withTempDir(async (dir) => {
-    const seedStore = new SessionStore(dir);
-    await seedStore.save([
-      { role: 'user', content: 'what does this project do' },
-      { role: 'assistant', content: 'it is a CLI coding harness' },
-    ]);
-
-    const { stdin, frames, loop } = await setup({ dir });
-
-    await submit(stdin, '/resume');
-    await tick(50);
-    stdin.write(ENTER); // default selection is the only (newest) entry
-    await tick(50);
-
-    assert.deepEqual(loop.getMessages(), [
-      { role: 'user', content: 'what does this project do' },
-      { role: 'assistant', content: 'it is a CLI coding harness' },
-    ]);
-    // The prior conversation must actually reappear on screen, not just live in the loop's memory.
-    assert.ok(anyFrameIncludes(frames, 'what does this project do'));
-    assert.ok(anyFrameIncludes(frames, 'it is a CLI coding harness'));
+    assert.ok(resumed.messageCount > 2);
   });
 });
 
 test('/resume: pressing Down before Enter selects the older (second) entry instead of the default newest', async () => {
   await withTempDir(async (dir) => {
     const seedStore = new SessionStore(dir);
-    await seedStore.save([{ role: 'user', content: 'older session' }]);
+    const olderId = await seedStore.save([{ role: 'user', content: 'older session' }]);
     await tick(20);
     await seedStore.save([{ role: 'user', content: 'newer session' }]);
 
-    const { stdin, frames, loop } = await setup({ dir });
+    const { stdin, restartCalls } = await setup({ dir });
 
     await submit(stdin, '/resume');
     await tick(50);
@@ -454,8 +471,7 @@ test('/resume: pressing Down before Enter selects the older (second) entry inste
     stdin.write(ENTER);
     await tick(50);
 
-    assert.ok(anyFrameIncludes(frames, 'Resumed session: older session'));
-    assert.deepEqual(loop.getMessages(), [{ role: 'user', content: 'older session' }]);
+    assert.deepEqual(restartCalls, [olderId]);
   });
 });
 
@@ -529,9 +545,9 @@ test('/wipe: Yes then No on the second confirmation still cancels, nothing delet
   });
 });
 
-test('/wipe: Yes then Yes actually deletes the session from disk and /resume', async () => {
+test('/wipe: Yes then Yes actually deletes the session from disk, then hands off to a restart with no resumeId', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, frames, loop, store } = await setup({ dir });
+    const { stdin, store, restartCalls } = await setup({ dir });
 
     await submit(stdin, 'a message to create a session');
     await tick(100);
@@ -549,18 +565,12 @@ test('/wipe: Yes then Yes actually deletes the session from disk and /resume', a
     stdin.write(ENTER); // second: Yes
     await tick(50);
 
-    assert.ok(anyFrameIncludes(frames, 'Session permanently deleted'));
+    // The freshly spawned process starts blank (no resumeId), so it can't resurrect the just-
+    // deleted session.
+    assert.deepEqual(restartCalls, [undefined]);
     const after = await store.readManifest();
     assert.equal(after.some((m) => m.id === id), false);
     assert.equal(await store.load(id), undefined);
-    assert.deepEqual(loop.getMessages(), []);
-
-    // The next message must start a genuinely new session, not resurrect the deleted one.
-    await submit(stdin, 'a fresh message after wiping');
-    await tick(100);
-    const finalManifest = await store.readManifest();
-    assert.equal(finalManifest.length, 1);
-    assert.notEqual(finalManifest[0].id, id);
   });
 });
 
