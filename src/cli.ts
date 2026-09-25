@@ -13,6 +13,7 @@ import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
+import { ConfigStore } from './session/configStore.js';
 import { App } from './ui/App.js';
 import { installResizeReflowFix } from './ui/resizeReflowFix.js';
 import { formatEvent } from './ui/formatEvent.js';
@@ -71,7 +72,7 @@ async function runRepl(
   projectRoot: string | undefined,
   sessionStore: SessionStore,
   opts: RestartableOpts,
-  initialSession?: { id: string; title: string; messages: Message[] },
+  initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] },
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -104,6 +105,24 @@ async function runRepl(
       initialSession,
       restart,
     }),
+    {
+      // Opt-in, off by default (confirmed in ink's own source: does nothing unless set). 'auto'
+      // safely queries the terminal (CSI ? u, 200ms timeout) and only turns the protocol on if
+      // it actually answers - harmless no-op on terminals that don't support it. Windows
+      // Terminal only answers on Preview 1.25+, not stable, so this may or may not do anything
+      // on any given machine. The default 'disambiguateEscapeCodes' flag is exactly what's
+      // needed to tell Shift+Tab apart from plain Tab (previously confirmed via raw-byte probe
+      // to send identical bytes without this) and, later, Ctrl+Enter/Alt+Enter/Shift+Enter
+      // apart from plain Enter for #4a's newline-insertion keybinding.
+      kittyKeyboard: { mode: 'auto' },
+      // Ctrl+C is no longer a way to exit - it was landing inconsistently (reports of the
+      // process surviving it instead of actually terminating) and collided with a still-running
+      // turn's request being in flight with no coordinated cleanup between Ink's own exit path
+      // and cli.ts's process.exit() below. /exit (and Escape, for a running turn specifically -
+      // see App.tsx's handleEscape) are now the only ways to stop something; Ctrl+C is a fully
+      // inert no-op (already safely swallowed by InputBox's own `key.ctrl` catch-all).
+      exitOnCtrlC: false,
+    },
   );
   await waitUntilExit();
   if (pendingRestart) {
@@ -128,26 +147,63 @@ program
     'LLM provider to use: "anthropic" (real, costs money), "local" (self-hosted llama-server), or "mock" (free, no API key, for development)',
     'anthropic',
   )
-  .option('--base-url <url>', 'base URL for the "local" provider', 'http://localhost:8080')
+  .option(
+    '--base-url <url>',
+    'base URL for the "local" provider. If that server requires an API key, set O4C_LOCAL_API_KEY in the environment (no CLI flag, to keep it out of process listings)',
+    'http://localhost:8080',
+  )
   .option('--image <path>', 'path to an image file to attach (vision-capable providers only)')
   .option('--resume <sessionId>', 'resume a saved session by id (used internally by /resume)')
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string }) => {
+  .option(
+    '--profile <name>',
+    'named preset (~/.o4c/profiles/<name>.json) to seed this project\'s config.json from on first trust - only has an effect the one time a project is first trusted; ignored on an already-trusted project. See "o4c-agent-design.md" §1.5/§5.',
+  )
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; profile?: string }) => {
     const prompt = promptParts.join(' ');
 
     // The trust gate: a project that has never used o4c before (no .o4c/ anywhere above cwd) gets
     // asked once, interactively, before anything else happens - including before any project-level
     // o4c.md is read, since that content is attacker-controlled text from whoever's repo this is
-    // until the user has actually said they trust it.
+    // until the user has actually said they trust it. --profile only matters on this first trust;
+    // ensureTrusted itself ignores it entirely once a project already has a .o4c/ (returns early,
+    // never even looks at the parameter).
     const cwd = process.cwd();
-    const { trusted, projectRoot } = await ensureTrusted(cwd);
+    const { trusted, projectRoot } = await ensureTrusted(cwd, undefined, undefined, opts.profile);
     const projectContext = trusted ? await resolveO4cMd(cwd, projectRoot) : '';
     const systemPrompt = projectContext ? `${SYSTEM_PROMPT}\n\n${projectContext}` : SYSTEM_PROMPT;
+
+    // An explicit CLI flag always wins; otherwise fall back to the resolved config.json (global
+    // -> local -> personal, see configStore.ts), and only then to the option's own hardcoded
+    // default. getOptionValueSource distinguishes "user typed --model" from "commander filled in
+    // the default" - without it there'd be no way to tell an explicit `-p anthropic` apart from
+    // config.json quietly wanting `-p local` instead.
+    const configStore = new ConfigStore(trusted ? projectRoot : undefined);
+    const resolvedConfig = await configStore.resolve();
+    function configOr(optName: 'model' | 'provider' | 'baseUrl', cliValue: string): string {
+      if (program.getOptionValueSource(optName) !== 'default') return cliValue;
+      const configValue = resolvedConfig[optName];
+      return typeof configValue === 'string' ? configValue : cliValue;
+    }
+    opts = {
+      ...opts,
+      model: configOr('model', opts.model),
+      provider: configOr('provider', opts.provider),
+      baseUrl: configOr('baseUrl', opts.baseUrl),
+    };
+    // No CLI flag for this on purpose (same reasoning as O4C_LOCAL_API_KEY - keeps it out of
+    // process listings). config.json read here on every launch/restart, so unlike model/provider/
+    // baseUrl above it's never frozen into spawnRestart's argv - a key rotated in config.local.json
+    // takes effect on the very next run without needing anything re-threaded through opts.
+    // config.local.json (personal, always gitignored - see configStore.ts) is the right scope for
+    // this, never the shared config.json.
+    const localApiKey =
+      typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined;
 
     let provider: LLMProvider;
     if (opts.provider === 'mock') {
       provider = new MockProvider();
     } else if (opts.provider === 'local') {
-      provider = new LocalProvider({ baseUrl: opts.baseUrl });
+      provider = new LocalProvider({ baseUrl: opts.baseUrl, apiKey: localApiKey });
     } else if (opts.provider === 'anthropic') {
       try {
         provider = new AnthropicProvider({ model: opts.model });
@@ -166,7 +222,7 @@ program
 
     if (!prompt) {
       const sessionStore = new SessionStore(sessionsDirFor(projectRoot));
-      let initialSession: { id: string; title: string; messages: Message[] } | undefined;
+      let initialSession: { id: string; title: string; messages: Message[]; inputHistory?: string[] } | undefined;
       if (opts.resume) {
         const data = await sessionStore.load(opts.resume);
         if (!data) {
@@ -175,7 +231,7 @@ program
           return;
         }
         loop.loadMessages(data.messages);
-        initialSession = { id: data.id, title: data.title, messages: data.messages };
+        initialSession = { id: data.id, title: data.title, messages: data.messages, inputHistory: data.inputHistory };
       }
       await runRepl(loop, projectRoot, sessionStore, opts, initialSession);
       return;

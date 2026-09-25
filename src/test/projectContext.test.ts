@@ -1,13 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   findProjectRoot,
   ensureTrusted,
   resolveO4cMd,
-  resolveSettings,
   sessionsDirFor,
   logsDirFor,
 } from '../session/projectContext.js';
@@ -95,6 +94,31 @@ test('ensureTrusted creates .o4c and trusts on a "yes" answer, and never asks ag
   });
 });
 
+test('ensureTrusted seeds the new local config.json from the current global one on first trust (#1/#6 copy-on-trust)', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'o4c-project-test-'));
+  try {
+    const globalDir = join(base, 'global');
+    const projectDir = join(base, 'project');
+    await mkdir(globalDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(join(globalDir, 'config.json'), JSON.stringify({ theme: 'dark' }), 'utf-8');
+
+    const original = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      const result = await ensureTrusted(projectDir, async () => 'y', globalDir);
+      assert.deepEqual(result, { trusted: true, projectRoot: projectDir });
+
+      const localRaw = await readFile(join(projectDir, '.o4c', 'config.json'), 'utf-8');
+      assert.deepEqual(JSON.parse(localRaw), { theme: 'dark' });
+    } finally {
+      process.stdin.isTTY = original;
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test('ensureTrusted leaves the project untrusted on a "no" answer, and does not create .o4c', async () => {
   await withTempDir(async (dir) => {
     const original = process.stdin.isTTY;
@@ -160,30 +184,83 @@ test('resolveO4cMd skips intermediate levels that have no o4c.md of their own', 
   });
 });
 
-test('resolveSettings deep-merges local over global, local winning on conflicting keys', async () => {
-  await withTempDir(async (globalDir) => {
+test('ensureTrusted with a profile name seeds config.json from global deep-merged with the profile bundle', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'o4c-project-test-'));
+  try {
+    const globalDir = join(base, 'global');
+    const projectDir = join(base, 'project');
+    await mkdir(join(globalDir, 'profiles'), { recursive: true });
+    await mkdir(projectDir, { recursive: true });
     await writeFile(
-      join(globalDir, 'settings.json'),
-      JSON.stringify({ provider: 'anthropic', nested: { a: 1, b: 1 } }),
+      join(globalDir, 'config.json'),
+      JSON.stringify({ provider: 'anthropic', theme: 'dark' }),
     );
-    await withTempDir(async (projectRoot) => {
-      await mkdir(join(projectRoot, '.o4c'), { recursive: true });
-      await writeFile(
-        join(projectRoot, '.o4c', 'settings.json'),
-        JSON.stringify({ nested: { b: 2 } }),
-      );
+    await writeFile(
+      join(globalDir, 'profiles', 'data-analysis.json'),
+      JSON.stringify({ provider: 'local', activePlugins: ['csv-tools'] }),
+    );
 
-      const result = await resolveSettings(projectRoot, globalDir);
-      assert.deepEqual(result, { provider: 'anthropic', nested: { a: 1, b: 2 } });
-    });
-  });
+    const original = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      const result = await ensureTrusted(projectDir, async () => 'y', globalDir, 'data-analysis');
+      assert.deepEqual(result, { trusted: true, projectRoot: projectDir });
+
+      const localRaw = await readFile(join(projectDir, '.o4c', 'config.json'), 'utf-8');
+      // profile overrides global on conflicting keys (provider), global-only keys pass through
+      // (theme), profile-only keys are added (activePlugins).
+      assert.deepEqual(JSON.parse(localRaw), {
+        provider: 'local',
+        theme: 'dark',
+        activePlugins: ['csv-tools'],
+      });
+
+      const profileRecordRaw = await readFile(join(projectDir, '.o4c', '.profile.json'), 'utf-8');
+      const profileRecord = JSON.parse(profileRecordRaw);
+      assert.equal(profileRecord.name, 'data-analysis');
+      assert.ok(typeof profileRecord.appliedAt === 'string' && profileRecord.appliedAt.length > 0);
+    } finally {
+      process.stdin.isTTY = original;
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
-test('resolveSettings returns {} when neither global nor local settings.json exists', async () => {
-  await withTempDir(async (globalDir) => {
-    await withTempDir(async (projectRoot) => {
-      assert.deepEqual(await resolveSettings(projectRoot, globalDir), {});
-    });
+test('ensureTrusted throws for a profile name that does not exist, and does not trust the project', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'o4c-project-test-'));
+  try {
+    const globalDir = join(base, 'global');
+    const projectDir = join(base, 'project');
+    await mkdir(globalDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+
+    const original = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await assert.rejects(() =>
+        ensureTrusted(projectDir, async () => 'y', globalDir, 'no-such-profile'),
+      );
+      // The project must not have been silently trusted on a bad profile name.
+      assert.equal(await findProjectRoot(projectDir), undefined);
+    } finally {
+      process.stdin.isTTY = original;
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('ensureTrusted with no profile name does not create .profile.json', async () => {
+  await withTempDir(async (dir) => {
+    const original = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      await ensureTrusted(dir, async () => 'y');
+      await assert.rejects(() => readFile(join(dir, '.o4c', '.profile.json'), 'utf-8'));
+    } finally {
+      process.stdin.isTTY = original;
+    }
   });
 });
 

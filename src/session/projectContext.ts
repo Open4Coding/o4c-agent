@@ -4,6 +4,8 @@ import { join, dirname, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { defaultSessionsDir } from './sessionStore.js';
 import { defaultLogsDir } from './runLog.js';
+import { seedLocalConfig } from './configStore.js';
+import { loadProfile, recordAppliedProfile } from './profiles.js';
 
 export function defaultGlobalDir(): string {
   return join(homedir(), '.o4c');
@@ -34,28 +36,6 @@ async function readIfExists(path: string): Promise<string | undefined> {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw err;
   }
-}
-
-async function readJsonIfExists(path: string): Promise<Record<string, unknown>> {
-  const raw = await readIfExists(path);
-  if (!raw) return {};
-  return JSON.parse(raw) as Record<string, unknown>;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function deepMerge(
-  base: Record<string, unknown>,
-  override: Record<string, unknown>,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(override)) {
-    const baseValue = result[key];
-    result[key] = isPlainObject(value) && isPlainObject(baseValue) ? deepMerge(baseValue, value) : value;
-  }
-  return result;
 }
 
 /**
@@ -101,13 +81,15 @@ async function defaultPrompt(question: string): Promise<string> {
  * answer, or no TTY to ask on (piped/non-interactive), leaves `.o4c/` uncreated: this run
  * proceeds untrusted (global-only), and the question is simply asked again next run.
  *
- * Don't read any project-level `o4c.md`/`settings.json` before this resolves - an untrusted
+ * Don't read any project-level `o4c.md`/`config.json` before this resolves - an untrusted
  * directory's content is attacker-controlled text from whoever's repo this is, and folding it
  * into the system prompt unconditionally would be a real prompt-injection surface.
  */
 export async function ensureTrusted(
   cwd: string,
   prompt: (question: string) => Promise<string> = defaultPrompt,
+  configGlobalDir?: string,
+  profileName?: string,
 ): Promise<TrustResult> {
   const existingRoot = await findProjectRoot(cwd);
   if (existingRoot) return { trusted: true, projectRoot: existingRoot };
@@ -119,7 +101,28 @@ export async function ensureTrusted(
   );
   if (!/^y(es)?$/i.test(answer.trim())) return { trusted: false, projectRoot: undefined };
 
+  // Resolved before creating .o4c/ - if profileName is given but doesn't exist, fail loudly
+  // rather than silently trusting the project with a typo'd/missing profile silently ignored.
+  let profileBundle: Record<string, unknown> | undefined;
+  if (profileName) {
+    profileBundle = await loadProfile(profileName, configGlobalDir);
+    if (!profileBundle) {
+      throw new Error(
+        `No such profile: "${profileName}" (looked for {globalDir}/profiles/${profileName}.json).`,
+      );
+    }
+  }
+
   await mkdir(join(cwd, '.o4c'), { recursive: true });
+  // Copy-on-trust seeding: the new local config.json starts as a copy of the current global one
+  // (deep-merged with profileBundle on top, if a profile was selected), so /set-*/config-*
+  // local and global start identical (or global-plus-profile) for this project. configGlobalDir
+  // is test-only (defaults to the real ~/.o4c otherwise) - same purpose as resolveO4cMd's own
+  // optional globalDir parameter below.
+  await seedLocalConfig(cwd, configGlobalDir, profileBundle);
+  if (profileName) {
+    await recordAppliedProfile(cwd, profileName);
+  }
   return { trusted: true, projectRoot: cwd };
 }
 
@@ -172,14 +175,4 @@ export async function resolveO4cMd(
     '',
     body,
   ].join('\n');
-}
-
-/** Deep-merges local `settings.json` over global `settings.json` (local wins); missing files are `{}`. */
-export async function resolveSettings(
-  projectRoot: string | undefined,
-  globalDir: string = defaultGlobalDir(),
-): Promise<Record<string, unknown>> {
-  const global = await readJsonIfExists(join(globalDir, 'settings.json'));
-  const local = projectRoot ? await readJsonIfExists(join(projectRoot, '.o4c', 'settings.json')) : {};
-  return deepMerge(global, local);
 }
