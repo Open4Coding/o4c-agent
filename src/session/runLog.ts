@@ -15,6 +15,15 @@ export function defaultLogsDir(): string {
  */
 export class RunLogger {
   private filePath: string | undefined;
+  // Memoizes the in-flight *initialization* itself, not just its eventual result - callers
+  // never await log() (App.tsx's `void runLogger.log(...)` is deliberately fire-and-forget for
+  // every event), so several calls can genuinely be concurrent. Checking only `this.filePath`
+  // before it's set is a check-then-act race: multiple concurrent calls could each see it unset
+  // before the first one's `await mkdir()` resolves, each compute a different timestamp, and
+  // split writes across separate files - some events silently landing in a file nothing ever
+  // reads back. Awaiting a single shared promise here means only the first call ever does the
+  // computation; every other concurrent call awaits that same result instead of racing it.
+  private initPromise: Promise<string> | undefined;
 
   constructor(private dir: string = defaultLogsDir()) {}
 
@@ -23,13 +32,16 @@ export class RunLogger {
     return this.filePath;
   }
 
-  private async ensureFile(): Promise<string> {
-    if (!this.filePath) {
-      await mkdir(this.dir, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      this.filePath = join(this.dir, `${stamp}.jsonl`);
+  private ensureFile(): Promise<string> {
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        await mkdir(this.dir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        this.filePath = join(this.dir, `${stamp}.jsonl`);
+        return this.filePath;
+      })();
     }
-    return this.filePath;
+    return this.initPromise;
   }
 
   async log(entry: Record<string, unknown>): Promise<void> {

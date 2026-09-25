@@ -24,7 +24,7 @@ export function ModePicker({ currentMode, onSelect, onCancel }: ModePickerProps)
       renderItem={(m, selected) => (
         <Text color={m.color} inverse={selected}>
           {selected ? '> ' : '  '}
-          {m.label}
+          {m.label} — {m.description}
           {m.mode === currentMode ? ' (current)' : ''}
         </Text>
       )}

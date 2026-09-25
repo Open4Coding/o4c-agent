@@ -5,12 +5,16 @@ import { SessionPicker } from './SessionPicker.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { CommandPalette } from './CommandPalette.js';
 import { ModePicker } from './ModePicker.js';
+import { CommandFamilyPicker } from './CommandFamilyPicker.js';
 import { MODES, classifyToolAccess, modeInfo, type Mode } from './modePolicy.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
 import { formatMessage } from './formatMessage.js';
+import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
+import { parseOsArg } from './osKeyboardNotes.js';
+import { detectCurrentOs } from './platform.js';
 import type { Line } from './types.js';
-import type { AgentLoop, AgentEvent } from '../agent/loop.js';
+import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import type { Tool } from '../tools/types.js';
@@ -21,6 +25,8 @@ import {
   isComposingCommand,
   matchCommands,
   commandName,
+  setCommands,
+  configCommands,
   type CommandInfo,
 } from './slashCommand.js';
 
@@ -32,7 +38,7 @@ export interface AppProps {
   /** Set by cli.ts when this process was launched with `--resume <id>` - seeds the visible
    * scrollback and currentSessionIdRef on mount, since a fresh process handoff (see `restart`
    * below) never gets a chance to append it mid-session. */
-  initialSession?: { id: string; title: string; messages: Message[] };
+  initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] };
   /** Requests that /clear, /wipe or /resume hand off to a brand-new process instead of resetting
    * state in-place - see cli.ts's spawnRestart for why. Call this, then exit() (as /exit does),
    * never both without the other: cli.ts only spawns the replacement after this process's Ink
@@ -53,6 +59,7 @@ interface HistoryBlock {
 }
 
 let nextBlockId = 0;
+let nextPrefillToken = 0;
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -141,6 +148,21 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
   // every subsequent save so it updates in place rather than creating a new session file per turn.
   const currentSessionIdRef = useRef<string | undefined>(initialSession?.id);
 
+  // Mirrors InputBox's own submit-history array (kept there, not lifted into React state here -
+  // it only needs to be read at autosave time, not drive any render) so it can be persisted
+  // alongside the conversation. Seeded from a /resume restart handoff exactly like `messages`
+  // is; a fresh session (no initialSession, or /clear/wipe's restart with none) starts empty,
+  // matching the conversation itself also starting empty.
+  const inputHistoryRef = useRef<string[]>(initialSession?.inputHistory ?? []);
+  const handleInputHistoryChange = useCallback((history: string[]) => {
+    inputHistoryRef.current = history;
+  }, []);
+
+  // Non-null only while a turn's loop.run() call is actually in flight - lets Escape cancel it
+  // (see handleEscape below). Null the rest of the time, so an Escape press with nothing running
+  // is a safe no-op rather than needing its own isThinking check.
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   // Non-null while /resume's picker is showing. `resolve` is the pending Promise's resolver
   // that processTurn is awaiting on - selecting or cancelling calls it, which is what lets
   // processTurn pause mid-turn for the picker and then continue afterward, without restructuring
@@ -159,17 +181,43 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
     null,
   );
 
+  // Same pending-Promise-resolver pattern as resumePicker, for /set's picker. Resolves to the
+  // chosen command, not a result of running it - /set itself decides what "chosen" means
+  // (prefilling the input box, below).
+  const [setPicker, setSetPicker] = useState<{
+    resolve: (command: CommandInfo | undefined) => void;
+  } | null>(null);
+
+  // /config's own picker (#6) - the plugin-config counterpart to setPicker above, identical
+  // shape (see CommandFamilyPicker.tsx, shared between both).
+  const [configPicker, setConfigPicker] = useState<{
+    resolve: (command: CommandInfo | undefined) => void;
+  } | null>(null);
+
+  // Bumping the token replaces InputBox's text with `text` (cursor at the end) without
+  // submitting - how /set hands a chosen command like `/set-sessionname` back to the user to
+  // finish typing its argument onto, rather than auto-submitting the way a plain palette
+  // selection does (existing commands all take no arguments, so that never needed this).
+  const [prefill, setPrefill] = useState<{ token: number; text: string } | undefined>(undefined);
+
   // Same pending-Promise-resolver pattern as resumePicker, generic to any yes/no confirmation
   // (run_shell execution, write_file overwrite, /wipe). /wipe chains two of these in sequence by
   // calling askConfirm twice, awaiting each in turn - no special "double confirm" logic needed.
+  // `id` exists purely to be passed as <ConfirmDialog>'s `key` (below) - without it, /wipe's two
+  // sequential dialogs are the same component instance (no key change, same JSX type), so
+  // ConfirmDialog's own internal `selected` state can carry over from the first dialog's "Yes"
+  // into the second instead of resetting to its documented "always defaults to No" - previously
+  // masked by exactly how React happened to batch the null-then-new setConfirmDialog calls
+  // across the intervening microtask, which changed on the React 19 upgrade.
   const [confirmDialog, setConfirmDialog] = useState<{
+    id: number;
     message: string;
     resolve: (confirmed: boolean) => void;
   } | null>(null);
 
   const askConfirm = useCallback((message: string): Promise<boolean> => {
     return new Promise((resolve) => {
-      setConfirmDialog({ message, resolve });
+      setConfirmDialog({ id: nextBlockId++, message, resolve });
     });
   }, []);
 
@@ -191,12 +239,23 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
     setHistory((h) => [...h, { id: nextBlockId++, lines }]);
   }, []);
 
-  // Shift+Tab cycles through the 4 modes in order, in addition to (not instead of) /mode's
-  // picker - a quick keyboard-only path for the same switch. Always active regardless of what
-  // else is showing, matching how this shortcut behaves elsewhere.
+  // Tab cycles through the 4 modes in order, in addition to (not instead of) /mode's picker - a
+  // quick keyboard-only path for the same switch. Originally plain Tab only, not Shift+Tab:
+  // without the Kitty keyboard protocol, Windows Terminal sends the identical byte (0x09) for
+  // both, with no way to tell them apart (confirmed with a raw-input probe - ConPTY only
+  // disambiguates via the separate "Win32 Input Mode" protocol, which Ink doesn't support).
+  // cli.ts's render() now opts into Kitty protocol detection (mode: 'auto'), and on a terminal
+  // that supports it (confirmed via a raw-byte capture of key.shift on David's Windows Terminal
+  // - see the plan for the log), key.shift now correctly reports true for Shift+Tab and false
+  // for plain Tab. This handler doesn't act on that distinction yet - both still cycle forward
+  // identically - since Kitty support isn't universal (older/non-Preview terminals still send
+  // the ambiguous byte, silently falling back to today's behavior). Nothing else in this app's
+  // input boxes or pickers does anything with bare Tab, so it was free to claim either way.
+  // Always active regardless of what else is showing, matching how this shortcut behaves
+  // elsewhere.
   useInput(
     (_input, key) => {
-      if (key.tab && key.shift) {
+      if (key.tab) {
         const currentIndex = MODES.findIndex((m) => m.mode === mode);
         const next = MODES[(currentIndex + 1) % MODES.length].mode;
         setMode(next);
@@ -275,6 +334,23 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
           { kind: 'user', text: `> ${input}` },
           { kind: 'system', text },
         ]);
+      } else if (commandName(input) === '/keyboardcommands') {
+        // Local, display-only, exactly like /context above - never calls loop.run(), so this
+        // table is never sent to the model or added to conversation history (see the module's
+        // own doc comment for why that matters for a later, currently out-of-scope feature -
+        // docs/plans/0001.FrontEndIDEChanges.checklist.md #16, "infinite context window").
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const osArg = input.slice(commandName(input).length).trim();
+        if (!osArg) {
+          pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, detectCurrentOs()) }]);
+        } else {
+          const parsed = parseOsArg(osArg);
+          if (!parsed) {
+            pushBlock([{ kind: 'error', text: 'Usage: /keyboardcommands [windows|mac|linux]' }]);
+          } else {
+            pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, parsed) }]);
+          }
+        }
       } else if (input === '/mode') {
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
         const chosen = await new Promise<Mode | undefined>((resolve) => {
@@ -285,6 +361,60 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
           pushBlock([{ kind: 'system', text: `Mode set to ${modeInfo(chosen).label}.` }]);
         } else {
           pushBlock([{ kind: 'system', text: 'Mode unchanged.' }]);
+        }
+      } else if (input === '/set') {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const commands = setCommands();
+        if (commands.length === 0) {
+          pushBlock([{ kind: 'system', text: 'Nothing to set yet.' }]);
+        } else {
+          const chosen = await new Promise<CommandInfo | undefined>((resolve) => {
+            setSetPicker({ resolve });
+          });
+          if (chosen) {
+            // Prefills rather than auto-submitting (unlike a plain palette selection) - every
+            // /set-* command takes an argument the picker itself has no way to collect.
+            setPrefill({ token: nextPrefillToken++, text: `${chosen.name} ` });
+          } else {
+            pushBlock([{ kind: 'system', text: 'Set cancelled.' }]);
+          }
+        }
+      } else if (input === '/config') {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const commands = configCommands();
+        if (commands.length === 0) {
+          pushBlock([{ kind: 'system', text: 'Nothing to configure yet.' }]);
+        } else {
+          const chosen = await new Promise<CommandInfo | undefined>((resolve) => {
+            setConfigPicker({ resolve });
+          });
+          if (chosen) {
+            // Prefills rather than auto-submitting, same reason as /set's picker above - every
+            // /config-* command takes an argument the picker itself has no way to collect.
+            setPrefill({ token: nextPrefillToken++, text: `${chosen.name} ` });
+          } else {
+            pushBlock([{ kind: 'system', text: 'Config cancelled.' }]);
+          }
+        }
+      } else if (commandName(input) === '/set-sessionname') {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const newName = input.slice(commandName(input).length).trim();
+        if (!currentSessionIdRef.current) {
+          pushBlock([
+            {
+              kind: 'system',
+              text: 'No active session yet - send a message first, then /set-sessionname <name>.',
+            },
+          ]);
+        } else if (!newName) {
+          pushBlock([{ kind: 'error', text: 'Usage: /set-sessionname <name>' }]);
+        } else {
+          try {
+            await sessionStore.rename(currentSessionIdRef.current, newName);
+            pushBlock([{ kind: 'system', text: `Session renamed to "${newName}".` }]);
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
         }
       } else if (looksLikeSlashCommand(input) && !KNOWN_COMMANDS.includes(commandName(input))) {
         pushBlock([
@@ -305,10 +435,14 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
         let toolEventCount = 0;
         let summaryLine: Line | undefined;
 
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+
         try {
           const finalAnswer = await loop.run(input, {
             images: initialImage ? [initialImage] : undefined,
             toolPolicy,
+            signal: controller.signal,
             onEvent: (event: AgentEvent) => {
               // The full, untruncated event always goes to the run log, regardless of what (or
               // whether) anything gets displayed - fire-and-forget, a logging failure shouldn't
@@ -344,8 +478,18 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
           });
           if (finalAnswer) responseLines.push({ kind: 'final', text: finalAnswer });
         } catch (err) {
-          responseLines.push({ kind: 'error', text: formatError(err) });
+          if (err instanceof AbortedError) {
+            // Escape while thinking: history was already rolled back inside loop.run() itself -
+            // just put the prompt that started this turn back in the input box, unedited, so the
+            // user can revise and resend it. Not an "error" line - a plain system note fits the
+            // deliberate, expected nature of a cancellation better than the red error styling.
+            responseLines.push({ kind: 'system', text: 'Cancelled - your message is back in the input box.' });
+            setPrefill({ token: nextPrefillToken++, text: err.prompt });
+          } else {
+            responseLines.push({ kind: 'error', text: formatError(err) });
+          }
         } finally {
+          abortControllerRef.current = null;
           if (responseLines.length > 0) pushBlock(responseLines);
           setLiveLines([]);
           setIsThinking(false);
@@ -356,7 +500,11 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
           const messages = loop.getMessages();
           if (messages.length > 0) {
             try {
-              currentSessionIdRef.current = await sessionStore.save(messages, currentSessionIdRef.current);
+              currentSessionIdRef.current = await sessionStore.save(
+                messages,
+                currentSessionIdRef.current,
+                inputHistoryRef.current,
+              );
             } catch (saveErr) {
               pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
             }
@@ -388,6 +536,32 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
     setModePicker(null);
   }, [modePicker]);
 
+  const handleSetPickerSelect = useCallback(
+    (command: CommandInfo) => {
+      setPicker?.resolve(command);
+      setSetPicker(null);
+    },
+    [setPicker],
+  );
+
+  const handleSetPickerCancel = useCallback(() => {
+    setPicker?.resolve(undefined);
+    setSetPicker(null);
+  }, [setPicker]);
+
+  const handleConfigPickerSelect = useCallback(
+    (command: CommandInfo) => {
+      configPicker?.resolve(command);
+      setConfigPicker(null);
+    },
+    [configPicker],
+  );
+
+  const handleConfigPickerCancel = useCallback(() => {
+    configPicker?.resolve(undefined);
+    setConfigPicker(null);
+  }, [configPicker]);
+
   const handlePickerSelect = useCallback(
     (id: string) => {
       resumePicker?.resolve(id);
@@ -416,6 +590,14 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
 
   const handlePaletteCancel = useCallback(() => {
     setPaletteDismissed(true);
+  }, []);
+
+  // Escape while a turn is in flight cancels it - a no-op otherwise (abortControllerRef is only
+  // non-null for the duration of processTurn's loop.run() call, see its own comment). Pickers
+  // (SessionPicker, ModePicker, CommandFamilyPicker, CommandPalette) handle Escape themselves via
+  // their own onCancel, independently of this.
+  const handleEscape = useCallback(() => {
+    abortControllerRef.current?.abort();
   }, []);
 
   const handleSubmit = useCallback(
@@ -462,9 +644,66 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
     [handleSubmit],
   );
 
+  // Live version of what /set's own Enter-triggered picker does - typing "/set-" (not yet
+  // submitted) reveals the same family list immediately, since matchCommands (by design) never
+  // shows a hidden /set-* command even once its own prefix is fully typed, so without this the
+  // palette would otherwise just show nothing for that input. Selecting an entry prefills the
+  // input box, the same way /set's picker does, rather than submitting it - these commands all
+  // take an argument. #6 (/config, per the checklist) needs the identical treatment for
+  // "/config-" once it exists.
+  const composingSetFamily = isComposingCommand(inputValue) && inputValue.toLowerCase().startsWith('/set-');
+  const setFamilyMatches = composingSetFamily
+    ? setCommands().filter((c) => c.name.toLowerCase().startsWith(inputValue.toLowerCase()))
+    : [];
+  const setFamilyOpen =
+    !paletteDismissed &&
+    !confirmDialog &&
+    !resumePicker &&
+    !modePicker &&
+    !setPicker &&
+    !configPicker &&
+    setFamilyMatches.length > 0;
+
+  const handleSetFamilySelect = useCallback((command: CommandInfo) => {
+    setInputValue(`${command.name} `);
+    setPrefill({ token: nextPrefillToken++, text: `${command.name} ` });
+  }, []);
+
+  // Live version of what /config's own Enter-triggered picker does - identical shape to
+  // composingSetFamily/setFamilyOpen above, just for "/config-" (#6). setFamilyOpen and
+  // configFamilyOpen can never both be true at once - inputValue can't start with both "/set-"
+  // and "/config-" simultaneously - so neither needs to reference the other to stay mutually
+  // exclusive; each only needs to exclude the *other's own* explicit picker state.
+  const composingConfigFamily =
+    isComposingCommand(inputValue) && inputValue.toLowerCase().startsWith('/config-');
+  const configFamilyMatches = composingConfigFamily
+    ? configCommands().filter((c) => c.name.toLowerCase().startsWith(inputValue.toLowerCase()))
+    : [];
+  const configFamilyOpen =
+    !paletteDismissed &&
+    !confirmDialog &&
+    !resumePicker &&
+    !modePicker &&
+    !setPicker &&
+    !configPicker &&
+    configFamilyMatches.length > 0;
+
+  const handleConfigFamilySelect = useCallback((command: CommandInfo) => {
+    setInputValue(`${command.name} `);
+    setPrefill({ token: nextPrefillToken++, text: `${command.name} ` });
+  }, []);
+
   const paletteMatches = isComposingCommand(inputValue) ? matchCommands(inputValue) : [];
   const paletteOpen =
-    !paletteDismissed && !confirmDialog && !resumePicker && !modePicker && paletteMatches.length > 0;
+    !paletteDismissed &&
+    !confirmDialog &&
+    !resumePicker &&
+    !modePicker &&
+    !setPicker &&
+    !configPicker &&
+    !setFamilyOpen &&
+    !configFamilyOpen &&
+    paletteMatches.length > 0;
 
   return (
     <Box flexDirection="column">
@@ -486,17 +725,21 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !resumePicker && !modePicker}
-        suppressNav={paletteOpen}
+        active={!confirmDialog && !resumePicker && !modePicker && !setPicker && !configPicker}
+        suppressNav={paletteOpen || setFamilyOpen || configFamilyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
+        prefill={prefill}
         onSubmit={handleSubmit}
+        onEscape={handleEscape}
+        initialHistory={initialSession?.inputHistory}
+        onHistoryChange={handleInputHistoryChange}
       />
       <Text color={modeInfo(mode).color}>
-        Mode: {modeInfo(mode).label}  (/mode or Shift+Tab to change)
+        Mode: {modeInfo(mode).label}  (/mode or Tab to change)
       </Text>
       {confirmDialog ? (
-        <ConfirmDialog message={confirmDialog.message} onResolve={handleConfirmResolve} />
+        <ConfirmDialog key={confirmDialog.id} message={confirmDialog.message} onResolve={handleConfirmResolve} />
       ) : resumePicker ? (
         <SessionPicker
           sessions={resumePicker.sessions}
@@ -505,6 +748,34 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
         />
       ) : modePicker ? (
         <ModePicker currentMode={mode} onSelect={handleModePickerSelect} onCancel={handleModePickerCancel} />
+      ) : setPicker ? (
+        <CommandFamilyPicker
+          title="Choose a setting (↑/↓ to choose, Enter to select, Esc to cancel):"
+          commands={setCommands()}
+          onSelect={handleSetPickerSelect}
+          onCancel={handleSetPickerCancel}
+        />
+      ) : setFamilyOpen ? (
+        <CommandFamilyPicker
+          title="Matching /set-* commands (↑/↓ to choose, Enter to select, Esc to dismiss):"
+          commands={setFamilyMatches}
+          onSelect={handleSetFamilySelect}
+          onCancel={handlePaletteCancel}
+        />
+      ) : configPicker ? (
+        <CommandFamilyPicker
+          title="Choose a setting (↑/↓ to choose, Enter to select, Esc to cancel):"
+          commands={configCommands()}
+          onSelect={handleConfigPickerSelect}
+          onCancel={handleConfigPickerCancel}
+        />
+      ) : configFamilyOpen ? (
+        <CommandFamilyPicker
+          title="Matching /config-* commands (↑/↓ to choose, Enter to select, Esc to dismiss):"
+          commands={configFamilyMatches}
+          onSelect={handleConfigFamilySelect}
+          onCancel={handlePaletteCancel}
+        />
       ) : paletteOpen ? (
         <CommandPalette commands={paletteMatches} onSelect={handlePaletteSelect} onCancel={handlePaletteCancel} />
       ) : null}

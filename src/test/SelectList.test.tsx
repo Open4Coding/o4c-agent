@@ -10,8 +10,12 @@ const ENTER = String.fromCharCode(13);
 const UP = ESC + '[A';
 const DOWN = ESC + '[B';
 
+// 30ms, not 10ms - React 19 + Ink 7's internal scheduling (useEffectEvent, discreteUpdates) takes
+// measurably longer to settle a keypress into a committed state update than the previous stack
+// did. Confirmed empirically: 10ms was flaky, 20ms was reliable in isolation: 30ms gives margin
+// for real test-runner contention.
 function tick(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 10));
+  return new Promise((resolve) => setTimeout(resolve, 30));
 }
 
 async function press(stdin: { write: (data: string) => void }, key: string): Promise<void> {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionStore, deriveTitle } from '../session/sessionStore.js';
@@ -58,6 +58,50 @@ test('save() creates a new session file and a manifest entry, and returns a usab
   });
 });
 
+test('save() persists inputHistory alongside messages, and load() returns it back', async () => {
+  await withTempStore(async (store) => {
+    const id = await store.save([userMsg('hello there')], undefined, ['first draft', 'second draft']);
+
+    const loaded = await store.load(id);
+    assert.ok(loaded);
+    assert.deepEqual(loaded.inputHistory, ['first draft', 'second draft']);
+  });
+});
+
+test('save() without inputHistory leaves it undefined in the loaded result, not an empty array', async () => {
+  await withTempStore(async (store) => {
+    const id = await store.save([userMsg('hello there')]);
+
+    const loaded = await store.load(id);
+    assert.ok(loaded);
+    assert.equal(loaded.inputHistory, undefined);
+  });
+});
+
+test('load() on a pre-existing session file saved before inputHistory existed still loads fine', async () => {
+  await withTempStore(async (store, dir) => {
+    // Simulates a real session file on disk from before this feature - no inputHistory key at
+    // all, not even set to undefined/null (JSON.stringify would have omitted it either way).
+    await writeFile(
+      join(dir, 'old-session.json'),
+      JSON.stringify({
+        id: 'old-session',
+        title: 'an old session',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        messageCount: 1,
+        messages: [userMsg('hello there')],
+      }),
+      'utf-8',
+    );
+
+    const loaded = await store.load('old-session');
+    assert.ok(loaded);
+    assert.deepEqual(loaded.messages, [userMsg('hello there')]);
+    assert.equal(loaded.inputHistory, undefined);
+  });
+});
+
 test('save() with an existing id updates in place instead of creating a second entry', async () => {
   await withTempStore(async (store) => {
     const id = await store.save([userMsg('first')]);
@@ -109,6 +153,25 @@ test('delete() on an id that does not exist is a harmless no-op', async () => {
   await withTempStore(async (store) => {
     await store.delete('never-existed'); // must not throw
     assert.deepEqual(await store.readManifest(), []);
+  });
+});
+
+test('rename() overwrites the title in both the manifest entry and the session file itself', async () => {
+  await withTempStore(async (store) => {
+    const id = await store.save([userMsg('original first message')]);
+
+    await store.rename(id, 'my custom name');
+
+    const data = await store.load(id);
+    assert.equal(data?.title, 'my custom name');
+    const manifest = await store.readManifest();
+    assert.equal(manifest.find((m) => m.id === id)?.title, 'my custom name');
+  });
+});
+
+test('rename() throws for an id that does not exist, unlike delete()\'s silent no-op', async () => {
+  await withTempStore(async (store) => {
+    await assert.rejects(() => store.rename('never-existed', 'anything'));
   });
 });
 

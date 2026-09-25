@@ -3,6 +3,11 @@ export interface CommandInfo {
   name: string;
   aliases?: string[];
   description: string;
+  /** Excluded from the main "/" palette (bare or narrowed) to avoid flooding it with narrow
+   * settings - still fully invocable by typing its exact name, and listed by its family's own
+   * picker (`/set` for every `/set-*`, `/config` for every `/config-*`). See docs/plans/
+   * 0001.FrontEndIDEChanges.plan.md item #1. */
+  hidden?: boolean;
 }
 
 // Single source of truth for the front end's own commands, used by both the "/" command palette
@@ -23,11 +28,42 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Show local token-usage for this session - no LLM call.',
   },
   {
+    name: '/keyboardcommands',
+    description: 'List input-box keybindings and OS-specific notes. Usage: /keyboardcommands [windows|mac|linux]',
+  },
+  {
     name: '/mode',
     description: 'Switch between Manual, Auto, Accept Edits, and Plan mode.',
   },
   { name: '/exit', aliases: ['/quit'], description: 'End the session.' },
+  { name: '/set', description: 'Browse and run a /set-* setting command.' },
+  {
+    name: '/set-sessionname',
+    description: 'Rename the current session (shown in /resume). Usage: /set-sessionname <name>',
+    hidden: true,
+  },
+  {
+    name: '/config',
+    description: 'Browse and run a /config-* plugin setting command.',
+  },
+  // No /config-<pluginname> entries yet - this round builds the frontend surface and the
+  // local/global config-store foundation only, not real plugin loading (see docs/plans/
+  // 0001.FrontEndIDEChanges.plan.md #6). configCommands() below returns [] until a real plugin
+  // registers one; /config's own handler already treats an empty family as "nothing to
+  // configure yet," the same way /set's does today.
 ];
+
+/** Every registered `/set-*` command, in the order they'd appear in `/set`'s own picker -
+ * includes hidden ones, since that picker is exactly how a hidden `/set-*` command gets found. */
+export function setCommands(): CommandInfo[] {
+  return COMMANDS.filter((c) => c.name.startsWith('/set-'));
+}
+
+/** Every registered `/config-*` command, in the order they'd appear in `/config`'s own picker -
+ * the plugin-config counterpart to `setCommands()` above, same shape. */
+export function configCommands(): CommandInfo[] {
+  return COMMANDS.filter((c) => c.name.startsWith('/config-'));
+}
 
 export const KNOWN_COMMANDS = COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]);
 
@@ -60,11 +96,15 @@ export function isComposingCommand(value: string): boolean {
 /**
  * Commands (matched by canonical name or any alias) whose name starts with `prefix`,
  * case-insensitively, sorted alphabetically ascending by canonical name - the live-filtered list
- * behind the "/" command palette. An empty or bare "/" prefix matches (and lists) everything.
+ * behind the "/" command palette. An empty or bare "/" prefix matches (and lists) everything
+ * *non-hidden* - a `hidden` command never appears here, in a narrowed search or not, by design
+ * (see `CommandInfo.hidden`'s doc comment): it's still directly invocable by its exact name, and
+ * discoverable via its own family's picker instead.
  */
 export function matchCommands(prefix: string): CommandInfo[] {
   const needle = prefix.toLowerCase();
-  return COMMANDS.filter((c) =>
-    [c.name, ...(c.aliases ?? [])].some((name) => name.toLowerCase().startsWith(needle)),
+  return COMMANDS.filter(
+    (c) =>
+      !c.hidden && [c.name, ...(c.aliases ?? [])].some((name) => name.toLowerCase().startsWith(needle)),
   ).sort((a, b) => a.name.localeCompare(b.name));
 }

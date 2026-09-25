@@ -24,6 +24,10 @@ export interface CompletionRequest {
   systemPrompt?: string;
   messages: Message[];
   tools: ToolDefinition[];
+  /** Lets the caller cancel an in-flight request (e.g. the user pressed Escape while the
+   * "Thinking..." spinner was showing). Providers that make a real network call should pass it
+   * straight through to that call's own cancellation mechanism. */
+  signal?: AbortSignal;
 }
 
 export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens';

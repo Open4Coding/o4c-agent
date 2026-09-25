@@ -56,9 +56,9 @@ class LiveSizeStdout extends MockStdout {
 
 const SETTLE = 20;
 
-// The real live region's shape: a full-width 3-line bordered box plus a 44-char mode line.
+// The real live region's shape: a full-width 3-line bordered box plus a 38-char mode line.
 const box = (w: number) => ['╭' + '─'.repeat(w - 2) + '╮', '│' + ' '.repeat(w - 2) + '│', '╰' + '─'.repeat(w - 2) + '╯'];
-const MODE = 'Mode: Manual  (/mode or Shift+Tab to change)';
+const MODE = 'Mode: Manual  (/mode or Tab to change)';
 const frameAt = (w: number) => [...box(w), MODE].join('\n');
 const spinnerFrameAt = (w: number) => ['⠙ Thinking...', ...box(w), MODE].join('\n');
 
@@ -134,8 +134,55 @@ test('intermediate live frames from a multi-step drag are skipped; only the fina
   stdout.write(f2);
 
   await tick(SETTLE * 3);
-  // f0 at width 40: three 100-wide lines -> 3 rows each, the mode line -> 2 rows = 11 rows.
-  assert.deepEqual(stdout.writes, [f0, `${CSI}11A${CSI}J\n\n\n\n`, f2]);
+  // f0 at width 40: three 100-wide lines -> 3 rows each, the mode line -> 1 row = 10 rows.
+  assert.deepEqual(stdout.writes, [f0, `${CSI}10A${CSI}J\n\n\n\n`, f2]);
+  uninstall();
+});
+
+test('Ink 7\'s synchronized-output toggles around each frame do not hide the genuinely-final one', async () => {
+  // Regression test for a real bug found live-testing the Ink 5->7 upgrade: Ink 7 wraps every
+  // frame in DEC synchronized-output mode - `ESC[?2026h` (begin), the frame, `ESC[?2026l` (end),
+  // each its own separate stdout.write call (confirmed by capturing raw bytes on both sides of
+  // this module during an actual shrink-then-expand-back in a real terminal). The old skip logic
+  // decided "is this frame superseded" by checking `i === chunks.length - 1` - literally the
+  // last queued write. With this wrapping, the last queued write during a drag is now the
+  // trailing `?2026l` toggle, not the frame content, so the genuinely-final frame was
+  // misclassified as skippable and never reached the screen at all - confirmed missing from
+  // `OUT` entirely in the captured log, not just delayed.
+  const SYNC_H = `${CSI}?2026h`;
+  const SYNC_L = `${CSI}?2026l`;
+  const stdout = new MockStdout();
+  const uninstall = installResizeReflowFix(stdout, { settleMs: SETTLE });
+  const f0 = inkFrame(frameAt(100));
+  stdout.write(f0);
+
+  stdout.columns = 60;
+  stdout.emit('resize');
+  stdout.write(SYNC_H);
+  stdout.write(inkFrame(frameAt(60), 4));
+  stdout.write(SYNC_L);
+  await tick(SETTLE / 2); // still within the settle window
+  stdout.columns = 40;
+  stdout.emit('resize');
+  const f2 = inkFrame(frameAt(40), 4);
+  stdout.write(SYNC_H);
+  stdout.write(f2);
+  stdout.write(SYNC_L);
+
+  await tick(SETTLE * 3);
+  // The final frame's content must actually appear in what was written - not just "eventually",
+  // at all - and exactly once (not dropped in favor of, or duplicated alongside, the
+  // intermediate one).
+  assert.equal(stdout.writes.filter((w) => w === f2).length, 1, 'the final, correctly-sized frame was never written');
+  // Still wrapped in its own SYNC_H/SYNC_L pair, in order - not stripped of its toggle bytes.
+  // (Not asserting exact adjacency: reconcile() may legitimately insert a correction chunk
+  // between SYNC_H and the frame itself, which is correct existing behavior, not something this
+  // test should assume away.)
+  const f2Index = stdout.writes.indexOf(f2);
+  const syncHIndex = stdout.writes.lastIndexOf(SYNC_H, f2Index);
+  const syncLIndex = stdout.writes.indexOf(SYNC_L, f2Index);
+  assert.ok(syncHIndex !== -1 && syncHIndex < f2Index, 'no SYNC_H before the final frame');
+  assert.ok(syncLIndex !== -1 && syncLIndex > f2Index, 'no SYNC_L after the final frame');
   uninstall();
 });
 

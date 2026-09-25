@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
@@ -19,6 +19,22 @@ class HangingProvider implements LLMProvider {
   readonly name = 'hanging';
   complete(_request: CompletionRequest): Promise<CompletionResponse> {
     return new Promise(() => {});
+  }
+}
+
+// Simulates a turn that hangs until cancelled - unlike HangingProvider (which never settles at
+// all, for the /exit-bypasses-the-queue test), this one respects the signal AgentLoop passes
+// through from App.tsx's Escape handler, the same way a real fetch/SDK call would reject once
+// aborted. Lets a test verify the actual UI wiring (Escape -> abort -> restored prompt), not just
+// AgentLoop's own rollback logic (already covered directly in loop.test.ts).
+class AbortAwareHangingProvider implements LLMProvider {
+  readonly name = 'abort-aware-hanging';
+  complete(request: CompletionRequest): Promise<CompletionResponse> {
+    return new Promise((_, reject) => {
+      request.signal?.addEventListener('abort', () =>
+        reject(new Error('simulated in-flight cancellation')),
+      );
+    });
   }
 }
 
@@ -84,10 +100,17 @@ class RunShellProvider implements LLMProvider {
 
 const ENTER = String.fromCharCode(13);
 const ESCAPE = String.fromCharCode(27);
+const UP = String.fromCharCode(27) + '[A';
 const DOWN = String.fromCharCode(27) + '[B';
-const SHIFT_TAB = String.fromCharCode(27) + '[Z';
+const TAB = String.fromCharCode(9);
 
-function tick(ms = 10): Promise<void> {
+// Default bumped from 10ms to 30ms - React 19 + Ink 7's internal scheduling (useEffectEvent,
+// discreteUpdates) takes measurably longer to settle a keypress into a committed state update
+// than the previous stack did. Confirmed empirically (SelectList): 10ms was flaky, 20ms was
+// reliable in isolation; 30ms gives margin for real test-runner contention. Explicit tick(N)
+// call sites below with N<30 (e.g. between a DOWN and the ENTER that follows it) are bumped to
+// match for the same reason - they hit the identical settle-time issue.
+function tick(ms = 30): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -111,13 +134,16 @@ async function type(stdin: { write: (data: string) => void }, text: string): Pro
 // keystroke - under tsx's on-the-fly transpilation that extra render cycle can occasionally take
 // longer to settle than any fixed delay reliably covers. Polling instead of sleeping a fixed
 // amount avoids that flakiness without just guessing at a bigger number.
-async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs = 2000,
+): Promise<void> {
   const start = Date.now();
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() - start > timeoutMs) {
       throw new Error('waitFor: condition was not met within the timeout');
     }
-    await tick(20);
+    await tick(100);
   }
 }
 
@@ -129,6 +155,19 @@ async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
 function anyFrameIncludes(frames: string[], text: string): boolean {
   return frames.some((f) => f.includes(text));
 }
+
+// Every render() left mounted for the rest of the process, across every test in this file - this
+// was harmless under the previous Ink 5/React 18 stack (each test's fake stdin/stdout are their
+// own separate objects) but causes real cross-test interference under Ink 7/React 19 (observed:
+// otherwise-correct DOWN/ENTER interactions in a later test failing only when the full suite
+// runs, never in isolation - dozens of accumulated live instances is the actual variable). Track
+// every instance `setup()` creates and unmount them all after each test via node:test's
+// `afterEach`, rather than touching every individual test to do it manually.
+let liveInstances: Array<{ unmount: () => void }> = [];
+afterEach(() => {
+  for (const instance of liveInstances) instance.unmount();
+  liveInstances = [];
+});
 
 async function setup(opts: {
   dir: string;
@@ -156,6 +195,7 @@ async function setup(opts: {
       restart,
     }),
   );
+  liveInstances.push(instance);
   await tick();
   return { ...instance, loop, store, runLogger, restartCalls };
 }
@@ -165,7 +205,12 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   try {
     await fn(dir);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // maxRetries/retryDelay (Node's own option, not hand-rolled): App.tsx's run-log write is
+    // intentionally fire-and-forget (`void runLogger.log(...)`), so a test can reach this
+    // cleanup before that last write has actually landed on disk - deleting the directory out
+    // from under an in-flight Windows file handle throws ENOTEMPTY, not ENOENT, so `force`
+    // alone doesn't cover it.
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -186,12 +231,40 @@ test('/exit bypasses the FIFO queue even while a turn is stuck processing, inste
   });
 });
 
+test('Escape while thinking cancels the turn and restores its prompt to the input box', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir, provider: new AbortAwareHangingProvider() });
+
+    await submit(stdin, 'this will hang until cancelled');
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Thinking...'));
+
+    stdin.write(ESCAPE);
+    await waitFor(() => anyFrameIncludes(frames, 'Cancelled'));
+
+    const last = frames[frames.length - 1] ?? '';
+    assert.equal(last.includes('Thinking...'), false);
+    assert.ok(last.includes('this will hang until cancelled'));
+
+    // Not just cosmetic text left sitting in the box - confirm the app is genuinely back to a
+    // normal, resumable state by actually resubmitting it (Enter, no retyping needed) and
+    // seeing a fresh turn start.
+    const framesBeforeResubmit = frames.length;
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok(frames.slice(framesBeforeResubmit).some((f) => f.includes('Thinking...')));
+  });
+});
+
 test('a turn with many tool calls collapses the display past the cap, but logs every event in full', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, runLogger } = await setup({ dir, provider: new ManyToolCallsProvider(15) });
 
     await submit(stdin, 'explore the codebase');
-    await tick(200);
+    // Polling, not a fixed delay - 15 rounds of tool_call/tool_result each trigger their own
+    // render, and React 19 + Ink 7 settles each one measurably slower than the previous stack
+    // did under node:test, so a fixed guess isn't reliable for a turn this long.
+    await waitFor(() => anyFrameIncludes(frames, 'done scanning'));
 
     assert.ok(anyFrameIncludes(frames, '[scan] '));
     assert.ok(anyFrameIncludes(frames, 'collapsed'));
@@ -199,8 +272,15 @@ test('a turn with many tool calls collapses the display past the cap, but logs e
 
     const logPath = runLogger.getFilePath();
     assert.ok(logPath);
-    const raw = await readFile(logPath as string, 'utf-8');
-    const lines = raw.trim().split('\n');
+    // Poll for all 31 lines to actually be on disk, not just read once - runLogger.log() is
+    // fire-and-forget (App.tsx never awaits it), so the UI showing "done scanning" only means
+    // the last event's *render* committed, not that its log write has necessarily landed yet.
+    let lines: string[] = [];
+    await waitFor(async () => {
+      const raw = await readFile(logPath as string, 'utf-8');
+      lines = raw.trim().split('\n');
+      return lines.length >= 31;
+    });
     // 15 rounds x (tool_call + tool_result) = 30, plus 1 final "text" event carrying the
     // answer = 31 logged events, all of them - the cap only affects what's displayed, never
     // what's logged.
@@ -266,17 +346,27 @@ test('Enter in the command palette selects and submits the highlighted command, 
 
 test('the command palette respects arrow-key navigation instead of falling through to input history', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, frames } = await setup({ dir });
+    const { stdin, frames, lastFrame } = await setup({ dir });
 
-    // /c matches /clear then /context, alphabetically - Down should move off /clear onto /context.
+    // /c matches /clear, /config, /context, alphabetically (#6 added /config) - two Downs move
+    // off /clear, past /config, onto /context.
     await type(stdin, '/c');
     await waitFor(() => anyFrameIncludes(frames, '/context'));
+    // The palette's content becoming visible and its own useInput actually finishing
+    // subscription are two different moments (the same "effect registers asynchronously after
+    // render" gap InputBox's own tests already account for) - a fixed buffer here, not another
+    // waitFor, since there's no visible signal for "input-ready" to poll on.
+    await tick(150);
     stdin.write(DOWN);
-    await tick(50);
+    await waitFor(() => (lastFrame() ?? '').includes('> /config'));
+    stdin.write(DOWN);
+    // Poll for the second DOWN to actually land (selection marker moved onto /context) rather
+    // than a fixed delay before ENTER - React 19 + Ink 7's scheduling settles a keypress into a
+    // committed state update measurably slower than the previous stack did under node:test
+    // specifically, and by how much varies per interaction, so a fixed guess isn't reliable here.
+    await waitFor(() => (lastFrame() ?? '').includes('> /context'));
     stdin.write(ENTER);
-    await tick(50);
-
-    assert.ok(anyFrameIncludes(frames, 'Session usage')); // /context's own output
+    await waitFor(() => anyFrameIncludes(frames, 'Session usage')); // /context's own output
   });
 });
 
@@ -362,15 +452,60 @@ test('/context reflects real usage after a turn has run', async () => {
   });
 });
 
+test('/keyboardcommands shows the keybinding table without ever touching conversation history', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop } = await setup({ dir });
+
+    await submit(stdin, '/keyboardcommands');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Ctrl+J'));
+    assert.ok(anyFrameIncludes(frames, 'Kitty terminals only'));
+    // Local/display-only, like /context - no loop.run() call means no LLM request and nothing
+    // added to history, so this is never sent to the model or persisted as part of the session.
+    assert.equal(loop.getMessages().length, 0);
+    assert.equal(loop.getUsage().requestCount, 0);
+  });
+});
+
+test('/keyboardcommands <os> shows that OS\'s notes, still without touching conversation history', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop } = await setup({ dir });
+
+    await submit(stdin, '/keyboardcommands windows');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Windows keyboard notes'));
+    assert.ok(anyFrameIncludes(frames, 'AltGr'));
+    assert.equal(loop.getMessages().length, 0);
+    assert.equal(loop.getUsage().requestCount, 0);
+  });
+});
+
+test('/keyboardcommands <bogus> shows a usage error instead of guessing an OS', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop } = await setup({ dir });
+
+    await submit(stdin, '/keyboardcommands nonsense');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Usage: /keyboardcommands [windows|mac|linux]'));
+    assert.equal(loop.getMessages().length, 0);
+    assert.equal(loop.getUsage().requestCount, 0);
+  });
+});
+
 test('a real turn autosaves the session, and /clear hands off to a restart with no resumeId', async () => {
   await withTempDir(async (dir) => {
     const { stdin, store, restartCalls } = await setup({ dir });
 
     await submit(stdin, 'first session message');
-    await tick(100);
 
+    // The autosave itself is a real async write to disk, after the turn finishes - a fixed tick
+    // raced it under load (confirmed: this test failed asserting manifest length 0 !== 1 on a
+    // slow run). Poll for the real manifest entry instead.
+    await waitFor(async () => (await store.readManifest()).length === 1);
     const manifestAfterFirst = await store.readManifest();
-    assert.equal(manifestAfterFirst.length, 1);
     const firstId = manifestAfterFirst[0].id;
 
     await submit(stdin, '/clear');
@@ -401,7 +536,7 @@ test('/resume shows a picker; Enter on the default (newest) selection hands off 
     // Seed two sessions directly via the store, independent of the running App instance.
     const seedStore = new SessionStore(dir);
     const olderId = await seedStore.save([{ role: 'user', content: 'older session' }]);
-    await tick(20); // ensure a distinct updatedAt so ordering is unambiguous
+    await tick(100); // ensure a distinct updatedAt so ordering is unambiguous
     const newerId = await seedStore.save([{ role: 'user', content: 'newer session' }]);
 
     const { stdin, frames, restartCalls } = await setup({ dir });
@@ -455,11 +590,52 @@ test('launched with an initialSession (as a /resume restart handoff would be), t
   });
 });
 
+test('a /resume restart handoff also restores the resumed session\'s own submit-history, and a later turn resaves it including the new submission', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    const id = await seedStore.save(
+      [{ role: 'user', content: 'what does this project do' }],
+      undefined,
+      ['old draft one', 'old draft two'],
+    );
+    const data = await seedStore.load(id);
+    assert.ok(data);
+
+    const { stdin, frames, store } = await setup({
+      dir,
+      initialSession: {
+        id: data!.id,
+        title: data!.title,
+        messages: data!.messages,
+        inputHistory: data!.inputHistory,
+      },
+    });
+
+    // The resumed session's own submit-history is immediately recallable, before any typing.
+    stdin.write(UP);
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'old draft two'));
+    // Back to the empty draft (there was nothing typed yet before UP) - otherwise the recalled
+    // text would still be sitting in the box and the next submission would append onto it.
+    stdin.write(DOWN);
+    await tick(50);
+
+    // A subsequent real turn's submission is appended to that same history, not replacing it -
+    // and the resave persists the combined list back into the resumed session's own file.
+    await submit(stdin, 'a brand new submission');
+    await tick(100);
+
+    const resaved = await store.load(id);
+    assert.ok(resaved);
+    assert.deepEqual(resaved.inputHistory, ['old draft one', 'old draft two', 'a brand new submission']);
+  });
+});
+
 test('/resume: pressing Down before Enter selects the older (second) entry instead of the default newest', async () => {
   await withTempDir(async (dir) => {
     const seedStore = new SessionStore(dir);
     const olderId = await seedStore.save([{ role: 'user', content: 'older session' }]);
-    await tick(20);
+    await tick(100);
     await seedStore.save([{ role: 'user', content: 'newer session' }]);
 
     const { stdin, restartCalls } = await setup({ dir });
@@ -467,7 +643,7 @@ test('/resume: pressing Down before Enter selects the older (second) entry inste
     await submit(stdin, '/resume');
     await tick(50);
     stdin.write(DOWN);
-    await tick(20);
+    await tick(100);
     stdin.write(ENTER);
     await tick(50);
 
@@ -525,21 +701,23 @@ test('/wipe: answering No on the first confirmation cancels immediately, nothing
 
 test('/wipe: Yes then No on the second confirmation still cancels, nothing deleted', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, frames, store } = await setup({ dir });
+    const { stdin, frames, store, lastFrame } = await setup({ dir });
 
     await submit(stdin, 'a message to create a session');
     await tick(100);
 
     await submit(stdin, '/wipe');
-    await tick(50);
+    await waitFor(() => (lastFrame() ?? '').includes('> No')); // first dialog has mounted
+    // The dialog's content becoming visible and its own useInput actually finishing
+    // subscription are two different moments - see the arrow-key navigation test's comment.
+    await tick(150);
     stdin.write(DOWN); // move to "Yes"
-    await tick(20);
+    await waitFor(() => (lastFrame() ?? '').includes('> Yes'));
     stdin.write(ENTER); // confirm first dialog as Yes
-    await tick(50);
+    await waitFor(() => (lastFrame() ?? '').includes('> No')); // second dialog has mounted, defaults to No
     stdin.write(ENTER); // second dialog still defaults to "No"
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Wipe cancelled'));
 
-    assert.ok(anyFrameIncludes(frames, 'Wipe cancelled'));
     const after = await store.readManifest();
     assert.equal(after.length, 1);
   });
@@ -547,23 +725,35 @@ test('/wipe: Yes then No on the second confirmation still cancels, nothing delet
 
 test('/wipe: Yes then Yes actually deletes the session from disk, then hands off to a restart with no resumeId', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, store, restartCalls } = await setup({ dir });
+    const { stdin, store, restartCalls, lastFrame } = await setup({ dir });
 
     await submit(stdin, 'a message to create a session');
-    await tick(100);
-    const before = await store.readManifest();
+    let before: Awaited<ReturnType<typeof store.readManifest>> = [];
+    await waitFor(async () => {
+      before = await store.readManifest();
+      return before.length > 0;
+    });
     const id = before[0].id;
 
     await submit(stdin, '/wipe');
-    await tick(50);
+    await waitFor(() => (lastFrame() ?? '').includes('> No')); // first dialog has mounted
+    // The dialog's content becoming visible and its own useInput actually finishing
+    // subscription are two different moments (the same "effect registers asynchronously after
+    // render" gap InputBox's own tests already account for) - a fixed buffer here, not another
+    // waitFor, since there's no visible signal for "input-ready" to poll on.
+    await tick(150);
     stdin.write(DOWN);
-    await tick(20);
+    // Poll for the DOWN to actually land (selection marker moved onto Yes) rather than a fixed
+    // delay before ENTER - same React 19 + Ink 7 settle-time reasoning as the arrow-key
+    // navigation test above.
+    await waitFor(() => (lastFrame() ?? '').includes('> Yes'));
     stdin.write(ENTER); // first: Yes
-    await tick(50);
+    await waitFor(() => (lastFrame() ?? '').includes('> No')); // second dialog has mounted
+    await tick(150);
     stdin.write(DOWN);
-    await tick(20);
+    await waitFor(() => (lastFrame() ?? '').includes('> Yes'));
     stdin.write(ENTER); // second: Yes
-    await tick(50);
+    await waitFor(() => restartCalls.length > 0);
 
     // The freshly spawned process starts blank (no resumeId), so it can't resurrect the just-
     // deleted session.
@@ -611,24 +801,170 @@ test('/mode opens a picker listing all four modes', async () => {
   });
 });
 
-test('Shift+Tab cycles through the four modes in order, independent of /mode', async () => {
+test('Tab cycles through the four modes in order, independent of /mode', async () => {
   await withTempDir(async (dir) => {
     const { stdin, lastFrame } = await setup({ dir });
 
     assert.ok((lastFrame() ?? '').includes('Mode: Manual'));
 
-    stdin.write(SHIFT_TAB);
+    stdin.write(TAB);
     await waitFor(() => (lastFrame() ?? '').includes('Mode: Auto'));
 
-    stdin.write(SHIFT_TAB);
+    stdin.write(TAB);
     await waitFor(() => (lastFrame() ?? '').includes('Mode: Accept Edits'));
 
-    stdin.write(SHIFT_TAB);
+    stdin.write(TAB);
     await waitFor(() => (lastFrame() ?? '').includes('Mode: Plan'));
 
     // Wraps back around to Manual after the last mode.
-    stdin.write(SHIFT_TAB);
+    stdin.write(TAB);
     await waitFor(() => (lastFrame() ?? '').includes('Mode: Manual'));
+  });
+});
+
+test('/set-sessionname with no active session says so instead of renaming', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir });
+
+    await submit(stdin, '/set-sessionname whatever');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'No active session yet'));
+  });
+});
+
+test('/set-sessionname with no argument shows a usage error instead of renaming', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, store } = await setup({ dir });
+
+    await submit(stdin, 'a message to create a session');
+    await tick(100);
+
+    await submit(stdin, '/set-sessionname');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Usage: /set-sessionname'));
+    const manifest = await store.readManifest();
+    assert.notEqual(manifest[0].title, ''); // untouched - still the auto-derived title
+  });
+});
+
+test('/set-sessionname renames the current session, persisted to both the manifest and the session file', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, store } = await setup({ dir });
+
+    await submit(stdin, 'a message to create a session');
+    await tick(100);
+    const before = await store.readManifest();
+    const id = before[0].id;
+
+    await submit(stdin, '/set-sessionname my custom title');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Session renamed to "my custom title".'));
+    const data = await store.load(id);
+    assert.equal(data?.title, 'my custom title');
+    const manifest = await store.readManifest();
+    assert.equal(manifest.find((m) => m.id === id)?.title, 'my custom title');
+  });
+});
+
+test('/set opens a picker of /set-* commands; selecting one prefills the input box instead of running it', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame, store } = await setup({ dir });
+
+    await submit(stdin, '/set');
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Choose a setting'));
+    assert.ok(anyFrameIncludes(frames, '/set-sessionname'));
+
+    stdin.write(ENTER); // only entry - selects /set-sessionname
+    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname'));
+
+    // The picker is gone and the command was NOT run yet - just handed to the input box for the
+    // user to finish typing the argument onto.
+    assert.equal((lastFrame() ?? '').includes('Choose a setting'), false);
+    assert.equal(anyFrameIncludes(frames, 'Session renamed'), false);
+    assert.deepEqual(await store.readManifest(), []);
+
+    // Finish typing the argument and submit for real, proving the prefilled text is genuinely
+    // live in the box (not just painted for one frame).
+    await type(stdin, 'finished typing');
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'No active session yet')); // no session exists in this test
+  });
+});
+
+test('/set: Escape cancels with no change', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir });
+
+    await submit(stdin, '/set');
+    await tick(50);
+    stdin.write(ESCAPE);
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Set cancelled'));
+  });
+});
+
+test('typing "/set-" (without submitting) live-reveals the /set-* family, which the main palette otherwise hides entirely', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    // "/set" alone matches only the (non-hidden) /set command itself - the hidden family member
+    // isn't shown yet.
+    await type(stdin, '/set');
+    await waitFor(() => (lastFrame() ?? '').includes('/set'));
+    assert.equal((lastFrame() ?? '').includes('/set-sessionname'), false);
+
+    // The trailing "-" is what flips it over to the family picker - matchCommands would show
+    // nothing at all for this prefix (the hidden command is excluded even once its own prefix is
+    // fully typed), so without this live picker the palette would just go blank here.
+    await type(stdin, '-');
+    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname'));
+    assert.ok((lastFrame() ?? '').includes('Matching /set-* commands'));
+
+    // Selecting it prefills the input box rather than submitting - same contract as /set's own
+    // Enter-triggered picker.
+    stdin.write(ENTER);
+    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname '));
+    assert.equal((lastFrame() ?? '').includes('Matching /set-* commands'), false);
+  });
+});
+
+test('/config says there is nothing to configure yet, with no /config-* commands registered (#6: frontend surface only, no real plugins this round)', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir });
+
+    await submit(stdin, '/config');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Nothing to configure yet'));
+    // No picker should ever open for an empty family - same "Nothing to X yet" short-circuit
+    // shape as /set's own empty-family branch.
+    assert.equal((lastFrame() ?? '').includes('Choose a setting'), false);
+  });
+});
+
+test('typing "/config-" live-reveals nothing while no /config-* commands are registered, rather than a spurious empty picker', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    await type(stdin, '/config-');
+    await tick(100);
+
+    assert.equal((lastFrame() ?? '').includes('Matching /config-* commands'), false);
+  });
+});
+
+test('/config itself (unlike hidden /config-* entries) shows up in the bare "/" palette', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    await type(stdin, '/');
+    await waitFor(() => (lastFrame() ?? '').includes('/config'));
   });
 });
 
@@ -656,11 +992,19 @@ test('Manual Mode: confirming yes actually runs write_file', async () => {
     await submit(stdin, 'please write the file');
     await tick(100);
     stdin.write(DOWN); // move from "No" to "Yes"
-    await tick(20);
-    stdin.write(ENTER);
     await tick(100);
+    stdin.write(ENTER);
 
-    assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
+    // The real fs write happens after the confirm dialog resolves, through toolPolicy ->
+    // tool execution -> the turn actually finishing - a fixed tick raced that chain under load
+    // (confirmed: this test failed with ENOENT on a slow run). Poll for the real file instead.
+    await waitFor(async () => {
+      try {
+        return (await readFile(targetPath, 'utf-8')) === 'hello';
+      } catch {
+        return false;
+      }
+    });
   });
 });
 
@@ -672,11 +1016,11 @@ test('Plan Mode blocks a real write_file call end-to-end - the file is never cre
     await submit(stdin, '/mode');
     await tick(50);
     stdin.write(DOWN);
-    await tick(20);
+    await tick(100);
     stdin.write(DOWN);
-    await tick(20);
+    await tick(100);
     stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan
-    await tick(20);
+    await tick(100);
     stdin.write(ENTER);
     await tick(50);
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan'));
@@ -697,7 +1041,7 @@ test('Auto Mode runs write_file with no confirmation prompt at all', async () =>
     await submit(stdin, '/mode');
     await tick(50);
     stdin.write(DOWN); // Manual -> Auto
-    await tick(20);
+    await tick(100);
     stdin.write(ENTER);
     await tick(50);
 
@@ -717,9 +1061,9 @@ test('Accept Edits mode auto-runs write_file but still confirms run_shell', asyn
     await submit(stdin, '/mode');
     await tick(50);
     stdin.write(DOWN);
-    await tick(20);
+    await tick(100);
     stdin.write(DOWN); // Manual -> Auto -> Accept Edits
-    await tick(20);
+    await tick(100);
     stdin.write(ENTER);
     await tick(50);
     assert.ok(anyFrameIncludes(frames, 'Mode set to Accept Edits'));
@@ -738,9 +1082,9 @@ test('Accept Edits mode still confirms run_shell even though write_file is autom
     await submit(stdin, '/mode');
     await tick(50);
     stdin.write(DOWN);
-    await tick(20);
+    await tick(100);
     stdin.write(DOWN);
-    await tick(20);
+    await tick(100);
     stdin.write(ENTER);
     await tick(50);
 

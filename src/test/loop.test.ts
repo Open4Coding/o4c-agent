@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentLoop, MaxIterationsError } from '../agent/loop.js';
+import { AgentLoop, AbortedError, MaxIterationsError } from '../agent/loop.js';
 import { FakeProvider } from './fakeProvider.js';
 import { makeFakeTool } from './fakeTool.js';
+import type { LLMProvider } from '../providers/types.js';
 
 test('returns immediately when the model ends the turn with no tool calls', async () => {
   const provider = new FakeProvider([
@@ -174,6 +175,54 @@ test('omitting toolPolicy runs every tool call unconditionally, as before', asyn
   await loop.run('write something');
 
   assert.equal(tool.calls.length, 1);
+});
+
+test('aborting the signal mid-turn rolls back history and throws AbortedError carrying the original prompt', async () => {
+  // Simulates what a real provider does when its own in-flight request is cancelled: the abort
+  // happens first (as it would from the UI's Escape handler racing the request), then the
+  // provider's own call rejects (however that specific provider spells it - loop.ts deliberately
+  // doesn't pattern-match the error, only `options.signal.aborted`, precisely so it doesn't need
+  // to care).
+  const controller = new AbortController();
+  const provider: LLMProvider = {
+    name: 'fake',
+    async complete() {
+      controller.abort();
+      throw new Error('simulated in-flight cancellation');
+    },
+  };
+  const loop = new AgentLoop(provider, [], 'system');
+
+  await assert.rejects(
+    () => loop.run('the prompt that got cancelled', { signal: controller.signal }),
+    (err: unknown) => err instanceof AbortedError && err.prompt === 'the prompt that got cancelled',
+  );
+  assert.deepEqual(loop.getMessages(), []);
+});
+
+test('an aborted turn does not disturb an earlier, already-completed turn in history', async () => {
+  let callCount = 0;
+  const controller = new AbortController();
+  const provider: LLMProvider = {
+    name: 'fake',
+    async complete() {
+      callCount += 1;
+      if (callCount === 1) {
+        return { content: 'first answer', toolCalls: [], stopReason: 'end_turn' };
+      }
+      controller.abort();
+      throw new Error('simulated in-flight cancellation');
+    },
+  };
+  const loop = new AgentLoop(provider, [], 'system');
+
+  await loop.run('first question');
+  await assert.rejects(() => loop.run('second question', { signal: controller.signal }), AbortedError);
+
+  assert.deepEqual(
+    loop.getMessages().map((m) => m.content),
+    ['first question', 'first answer'],
+  );
 });
 
 test('emits events for text, tool_call, and tool_result in order', async () => {

@@ -175,18 +175,33 @@ export function installResizeReflowFix(
     }
   };
 
+  const isFrame = (chunk: unknown): chunk is string =>
+    typeof chunk === 'string' && chunk.startsWith(ERASE_LINE) && chunk.endsWith('\n');
+
   const settle = () => {
     settleTimer = undefined;
     resizing = false;
     const chunks = held;
     held = [];
+    // Index of the last frame-shaped chunk in this batch, not the last array index - Ink 7 wraps
+    // every frame in DEC synchronized-output toggles (`ESC[?2026h` before, `ESC[?2026l` after,
+    // each its own separate stdout.write call), so the literal last queued item during a resize
+    // drag is now that trailing `?2026l`, not the frame content. Using `i === chunks.length - 1`
+    // as "is this superseded" misclassified the genuinely-final frame as skippable (it wasn't
+    // last - the toggle after it was), so it got thrown away instead of ever reaching the screen.
+    // Confirmed empirically: captured raw bytes on both sides of this module during a real
+    // shrink-then-expand-back showed the correctly-sized final frame queued, then never once
+    // appearing in what was actually written.
+    let lastFrameIndex = -1;
+    chunks.forEach(([chunk], i) => {
+      if (isFrame(chunk)) lastFrameIndex = i;
+    });
     chunks.forEach(([chunk, rest], i) => {
-      const last = i === chunks.length - 1;
-      // A live frame with an erase prefix that a later chunk supersedes never needs to reach the
-      // screen: the next chunk's prefix says what it expects, and reconcile matches the screen to
-      // that. Everything else (erase-only, static, post-static, and the final chunk) is replayed
-      // in order.
-      if (!last && typeof chunk === 'string' && chunk.startsWith(ERASE_LINE) && chunk.endsWith('\n')) {
+      // A live frame that a *later frame* supersedes never needs to reach the screen: the later
+      // one's own erase prefix says what it expects, and reconcile matches the screen to that.
+      // Everything else (erase-only, static, post-static, non-frame toggles, and the actual last
+      // frame regardless of what non-frame bytes trail it) is replayed in order.
+      if (isFrame(chunk) && i < lastFrameIndex) {
         return;
       }
       emit(chunk, rest);

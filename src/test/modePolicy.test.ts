@@ -46,12 +46,28 @@ test('plan mode blocks both write_file and run_shell outright', () => {
 });
 
 test('modeInfo returns the expected label and standard-palette color for each mode', () => {
-  assert.deepEqual(modeInfo('manual'), { mode: 'manual', label: 'Manual', color: 'white' });
-  assert.deepEqual(modeInfo('auto'), { mode: 'auto', label: 'Auto', color: 'yellow' });
+  assert.deepEqual(modeInfo('manual'), {
+    mode: 'manual',
+    label: 'Manual',
+    description: 'Confirms every file write and shell command before running it.',
+    color: 'white',
+  });
+  assert.deepEqual(modeInfo('auto'), {
+    mode: 'auto',
+    label: 'Auto',
+    description: 'Runs file writes and shell commands without asking.',
+    color: 'yellow',
+  });
   assert.deepEqual(modeInfo('acceptEdits'), {
     mode: 'acceptEdits',
     label: 'Accept Edits',
+    description: 'Writes files automatically; still confirms shell commands.',
     color: 'magenta',
   });
-  assert.deepEqual(modeInfo('plan'), { mode: 'plan', label: 'Plan', color: 'blue' });
+  assert.deepEqual(modeInfo('plan'), {
+    mode: 'plan',
+    label: 'Plan',
+    description: 'Blocks file writes and shell commands outright - read-only.',
+    color: 'blue',
+  });
 });

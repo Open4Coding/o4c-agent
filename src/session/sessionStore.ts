@@ -14,6 +14,13 @@ export interface SessionMeta {
 
 export interface SessionData extends SessionMeta {
   messages: Message[];
+  /** The input box's own submit-history (↑/↓ recall) at the time of the last save - optional so
+   * older session files saved before this existed still load fine (`InputBox` treats a missing
+   * value the same as an empty history). Kept per-session (not global/shell-style) deliberately:
+   * `/resume`-ing a session restores what you were typing back then alongside its conversation;
+   * `/clear`/`/wipe` start a genuinely fresh session with no id yet, so there's nothing to carry
+   * forward, consistent with the conversation itself also starting empty. */
+  inputHistory?: string[];
 }
 
 const MAX_SESSIONS = 20;
@@ -74,7 +81,7 @@ export class SessionStore {
    * Returns the session id - callers without one yet (a brand-new session) need it back to pass
    * into subsequent saves for the same session.
    */
-  async save(messages: readonly Message[], id?: string): Promise<string> {
+  async save(messages: readonly Message[], id?: string, inputHistory?: readonly string[]): Promise<string> {
     if (messages.length === 0) {
       throw new Error('SessionStore.save: refusing to persist a session with no messages');
     }
@@ -96,7 +103,7 @@ export class SessionStore {
     await mkdir(this.dir, { recursive: true });
     await writeFile(
       this.sessionPath(sessionId),
-      JSON.stringify({ ...meta, messages }, null, 2),
+      JSON.stringify({ ...meta, messages, inputHistory }, null, 2),
       'utf-8',
     );
 
@@ -130,5 +137,24 @@ export class SessionStore {
     if (updated.length !== manifest.length) {
       await this.writeManifest(updated);
     }
+  }
+
+  /**
+   * Overwrites a session's title (`/set-sessionname`), in both the manifest and the session's
+   * own file, so /resume's picker and the session's own on-disk record agree. Throws if `id`
+   * doesn't match any saved session - callers check that themselves (e.g. "nothing to rename
+   * yet") but a rename specifically targeting an id that's gone missing should still surface as
+   * an error, not silently no-op like `delete` does.
+   */
+  async rename(id: string, title: string): Promise<void> {
+    const data = await this.load(id);
+    if (!data) {
+      throw new Error(`No saved session with id "${id}" to rename.`);
+    }
+    await writeFile(this.sessionPath(id), JSON.stringify({ ...data, title }, null, 2), 'utf-8');
+
+    const manifest = await this.readManifest();
+    const updated = manifest.map((m) => (m.id === id ? { ...m, title } : m));
+    await this.writeManifest(updated);
   }
 }

@@ -61,17 +61,20 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    const response = await this.client.messages.create({
-      model: this.model,
-      max_tokens: 4096,
-      system: request.systemPrompt,
-      messages: toAnthropicMessages(request.messages),
-      tools: request.tools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
-      })),
-    });
+    const response = await this.client.messages.create(
+      {
+        model: this.model,
+        max_tokens: 4096,
+        system: request.systemPrompt,
+        messages: toAnthropicMessages(request.messages),
+        tools: request.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+        })),
+      },
+      { signal: request.signal },
+    );
 
     let content = '';
     const toolCalls: ToolCall[] = [];

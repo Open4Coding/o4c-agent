@@ -34,7 +34,20 @@ test('commandName extracts just the /word, ignoring anything after whitespace', 
 });
 
 test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - no /help, no /debug', () => {
-  assert.deepEqual(KNOWN_COMMANDS, ['/clear', '/resume', '/wipe', '/context', '/ctx', '/mode', '/exit', '/quit']);
+  assert.deepEqual(KNOWN_COMMANDS, [
+    '/clear',
+    '/resume',
+    '/wipe',
+    '/context',
+    '/ctx',
+    '/keyboardcommands',
+    '/mode',
+    '/exit',
+    '/quit',
+    '/set',
+    '/set-sessionname',
+    '/config',
+  ]);
 });
 
 test('isComposingCommand is true for a bare "/" or a partial command name, false once a space is typed', () => {
@@ -49,7 +62,7 @@ test('isComposingCommand is true for a bare "/" or a partial command name, false
 
 test('matchCommands filters by prefix (name or alias) case-insensitively, sorted alphabetically', () => {
   const matches = matchCommands('/c');
-  assert.deepEqual(matches.map((c) => c.name), ['/clear', '/context']);
+  assert.deepEqual(matches.map((c) => c.name), ['/clear', '/config', '/context']);
 });
 
 test('matchCommands matches on an alias even when the canonical name does not start with the prefix', () => {
@@ -57,9 +70,18 @@ test('matchCommands matches on an alias even when the canonical name does not st
   assert.deepEqual(matches.map((c) => c.name), ['/context']);
 });
 
-test('matchCommands with a bare "/" returns every command, alphabetically ascending by canonical name', () => {
+test('matchCommands with a bare "/" returns every non-hidden command, alphabetically ascending by canonical name', () => {
   const names = matchCommands('/').map((c) => c.name);
-  assert.deepEqual(names, [...COMMANDS.map((c) => c.name)].sort((a, b) => a.localeCompare(b)));
+  const expected = COMMANDS.filter((c) => !c.hidden)
+    .map((c) => c.name)
+    .sort((a, b) => a.localeCompare(b));
+  assert.deepEqual(names, expected);
+});
+
+test('matchCommands never returns a hidden command, even when its own name is typed as the prefix', () => {
+  // /set-sessionname is hidden - discoverable via /set's own picker, not the main palette, even
+  // once the prefix narrows down to exactly it.
+  assert.deepEqual(matchCommands('/set-sessionname'), []);
 });
 
 test('matchCommands returns nothing for a prefix no command matches', () => {

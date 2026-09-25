@@ -5,16 +5,39 @@ export type Mode = 'manual' | 'auto' | 'acceptEdits' | 'plan';
 export interface ModeInfo {
   mode: Mode;
   label: string;
+  /** Shown next to the label in /mode's picker - what this mode actually does to write_file and
+   * run_shell, kept in sync with classifyToolAccess below since that's the real behavior. */
+  description: string;
   /** Ink's standard named palette only (no hex) - yellow stands in for orange, magenta for
    * purple, since neither is in that named set. blue and white are exact matches. */
   color: string;
 }
 
 export const MODES: ModeInfo[] = [
-  { mode: 'manual', label: 'Manual', color: 'white' },
-  { mode: 'auto', label: 'Auto', color: 'yellow' },
-  { mode: 'acceptEdits', label: 'Accept Edits', color: 'magenta' },
-  { mode: 'plan', label: 'Plan', color: 'blue' },
+  {
+    mode: 'manual',
+    label: 'Manual',
+    description: 'Confirms every file write and shell command before running it.',
+    color: 'white',
+  },
+  {
+    mode: 'auto',
+    label: 'Auto',
+    description: 'Runs file writes and shell commands without asking.',
+    color: 'yellow',
+  },
+  {
+    mode: 'acceptEdits',
+    label: 'Accept Edits',
+    description: 'Writes files automatically; still confirms shell commands.',
+    color: 'magenta',
+  },
+  {
+    mode: 'plan',
+    label: 'Plan',
+    description: 'Blocks file writes and shell commands outright - read-only.',
+    color: 'blue',
+  },
 ];
 
 export function modeInfo(mode: Mode): ModeInfo {
