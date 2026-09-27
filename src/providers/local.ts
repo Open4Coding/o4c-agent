@@ -142,6 +142,13 @@ export class LocalProvider implements LLMProvider {
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
           })),
           max_tokens: 4096,
+          stream: true,
+          // Without this, a streaming response omits usage entirely (the standard OpenAI-API
+          // convention llama-server also implements - confirmed directly against its source,
+          // `tools/server/server-schema.cpp`'s `stream_options.include_usage` field) - losing
+          // token-usage reporting would be a real regression from the non-streaming behavior this
+          // replaces, not an acceptable side effect of adding streaming.
+          stream_options: { include_usage: true },
         }),
         // Without a timeout signal, a hung or runaway generation (e.g. a model stuck repeating
         // inside a <think> block) leaves the request in flight forever - nothing in AgentLoop or
@@ -173,28 +180,109 @@ export class LocalProvider implements LLMProvider {
       throw new Error(`Local server error (status ${response.status}): ${await response.text()}`);
     }
 
-    const data = (await response.json()) as {
-      choices: Array<{
-        finish_reason: string;
-        message: { content: string | null; tool_calls?: OpenAIToolCall[] };
-      }>;
-      usage?: { prompt_tokens: number; completion_tokens: number };
-    };
-
-    const choice = data.choices[0];
-    const toolCalls: ToolCall[] = (choice.message.tool_calls ?? []).map((call) => ({
-      id: call.id,
-      name: call.function.name,
-      input: JSON.parse(call.function.arguments) as Record<string, unknown>,
-    }));
+    if (!response.body) {
+      throw new Error('Local server returned no response body to stream from.');
+    }
+    const { content, toolCalls, finishReason, usage } = await parseSseStream(response.body, request.onToken);
 
     return {
-      content: choice.message.content ?? '',
+      content,
       toolCalls,
-      stopReason: mapStopReason(choice.finish_reason),
-      usage: data.usage
-        ? { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens }
-        : undefined,
+      stopReason: mapStopReason(finishReason),
+      usage,
     };
   }
+}
+
+interface StreamedOpenAIChunk {
+  choices?: Array<{
+    delta?: {
+      content?: string | null;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: { prompt_tokens: number; completion_tokens: number };
+}
+
+interface ParsedStream {
+  content: string;
+  toolCalls: ToolCall[];
+  finishReason: string;
+  usage: { inputTokens: number; outputTokens: number } | undefined;
+}
+
+/**
+ * Parses an OpenAI-compatible `text/event-stream` body (`data: {...}\n\n` lines, terminated by
+ * `data: [DONE]`) - llama-server's own streaming format. Tool calls arrive incrementally too,
+ * each fragment keyed by `index`; `id`/`function.name` typically only appear on that index's
+ * first fragment, and `function.arguments` arrives as string pieces to concatenate and parse only
+ * once the stream ends (a partial JSON fragment mid-stream isn't valid JSON on its own).
+ */
+export async function parseSseStream(
+  body: ReadableStream<Uint8Array>,
+  onToken?: (delta: string) => void,
+): Promise<ParsedStream> {
+  let content = '';
+  let finishReason = 'stop';
+  let usage: ParsedStream['usage'];
+  const toolCallsByIndex = new Map<number, { id: string; name: string; args: string }>();
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? ''; // keep a possibly-incomplete last line for the next read
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice('data:'.length).trim();
+        if (payload === '[DONE]') continue;
+
+        let chunk: StreamedOpenAIChunk;
+        try {
+          chunk = JSON.parse(payload) as StreamedOpenAIChunk;
+        } catch {
+          continue; // a malformed chunk shouldn't take down an otherwise-good stream
+        }
+
+        if (chunk.usage) {
+          usage = { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens };
+        }
+
+        const choice = chunk.choices?.[0];
+        if (!choice) continue;
+        if (choice.delta?.content) {
+          content += choice.delta.content;
+          onToken?.(choice.delta.content);
+        }
+        for (const call of choice.delta?.tool_calls ?? []) {
+          const existing = toolCallsByIndex.get(call.index) ?? { id: '', name: '', args: '' };
+          if (call.id) existing.id = call.id;
+          if (call.function?.name) existing.name = call.function.name;
+          if (call.function?.arguments) existing.args += call.function.arguments;
+          toolCallsByIndex.set(call.index, existing);
+        }
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const toolCalls: ToolCall[] = [...toolCallsByIndex.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, call]) => ({ id: call.id, name: call.name, input: JSON.parse(call.args || '{}') as Record<string, unknown> }));
+
+  return { content, toolCalls, finishReason, usage };
 }

@@ -36,5 +36,12 @@ export function formatEvent(event: AgentEvent): string | null {
   if (event.type === 'compaction') {
     return event.text ? `[compact] ${event.text}` : null;
   }
+  if (event.type === 'delta') {
+    // Raw, unprefixed, untruncated - callers that want the bracketed/truncated treatment other
+    // event types get should special-case 'delta' before reaching this function (both App.tsx's
+    // live region and cli.ts's printEvent do, since a delta is a streamed fragment of a line, not
+    // a line of its own).
+    return event.text || null;
+  }
   return null;
 }

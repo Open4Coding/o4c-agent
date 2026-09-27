@@ -70,22 +70,32 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    // Always requested via the SDK's streaming helper (`.stream()`, not `.create()`) - the only
+    // change from the non-streaming form is that `onToken` (when given) sees text as it arrives
+    // instead of only once the full message lands. `finalMessage()` still resolves to the exact
+    // same `Anthropic.Message` shape `.create()` used to return, so everything below this point
+    // is unchanged.
+    const stream = this.client.messages.stream(
+      {
+        model: this.model,
+        max_tokens: 4096,
+        system: request.systemPrompt,
+        messages: toAnthropicMessages(request.messages),
+        tools: request.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+        })),
+      },
+      { signal: request.signal },
+    );
+    if (request.onToken) {
+      stream.on('text', (delta) => request.onToken?.(delta));
+    }
+
     let response: Anthropic.Message;
     try {
-      response = await this.client.messages.create(
-        {
-          model: this.model,
-          max_tokens: 4096,
-          system: request.systemPrompt,
-          messages: toAnthropicMessages(request.messages),
-          tools: request.tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
-          })),
-        },
-        { signal: request.signal },
-      );
+      response = await stream.finalMessage();
     } catch (err) {
       if (err instanceof Anthropic.APIConnectionTimeoutError) {
         const timeoutMs = this.client.timeout;

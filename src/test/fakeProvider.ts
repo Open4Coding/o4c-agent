@@ -22,13 +22,21 @@ export class FakeProvider implements LLMProvider {
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     this.callCount++;
-    // Snapshot now: `request.messages` is a live reference to the caller's array,
-    // which gets mutated further after this call returns.
-    this.receivedRequests.push(structuredClone(request));
+    // Snapshot now: `request.messages` is a live reference to the caller's array, which gets
+    // mutated further after this call returns. `onToken`/`signal` are excluded - neither is
+    // structured-cloneable (a function and, depending on the runtime, an AbortSignal), and
+    // recording them was never the point; `receivedRequests` is for asserting on what was *asked*
+    // (messages, tools, systemPrompt), not on these two call-mechanics-only fields.
+    const { onToken, signal, ...cloneable } = request;
+    this.receivedRequests.push(structuredClone(cloneable) as CompletionRequest);
     const next = this.queue.shift();
     if (!next) {
       throw new Error('FakeProvider: no more scripted responses queued');
     }
+    // Simulates streaming for anything that cares to check it (AgentLoop's own 'delta' wiring),
+    // one call with the full content - not truly incremental, matching MockProvider's own
+    // simplification.
+    onToken?.(next.content);
     return next;
   }
 }

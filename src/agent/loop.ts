@@ -20,13 +20,20 @@ import {
   DEFAULT_COMPACTION_SETTINGS,
   type CompactionSettings,
 } from './compaction.js';
+import { createThinkTagStripper } from './streamFilter.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'delta';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
   toolOutput?: string;
+  /** `'think'`/`'text'` only - whether this call's content already streamed live via 'delta'
+   * events. A provider that doesn't implement `onToken` (optional on `LLMProvider`, e.g. a test
+   * fake, or a real provider that hasn't added streaming yet) still needs its content to reach the
+   * user somehow - consumers should only skip re-displaying 'think'/'text' when this is `true`;
+   * otherwise this event is the *only* place that content ever shows up. */
+  streamed?: boolean;
 }
 
 export interface RunOptions {
@@ -312,13 +319,26 @@ export class AgentLoop {
     for (let i = 0; i < maxIterations; i++) {
       checkAborted();
       let response;
+      // Fresh per provider call - `<think>` open/close state can't carry over between calls (each
+      // call is its own complete-or-not response). Strips literal <think>/</think> markers out of
+      // the live preview only (never the persisted record, which still goes through
+      // splitThinkBlock() on the complete text below) - a real invariant this codebase already
+      // guarantees for the final answer, extended here to cover the streamed preview too (see
+      // streamFilter.ts's own doc comment for why this needs to be stateful across chunks).
+      const thinkFilter = createThinkTagStripper((text) => onEvent({ type: 'delta', text }));
+      let streamed = false;
       try {
         response = await this.provider.complete({
           systemPrompt: systemPromptForRequest,
           messages: toWireMessages(this.entries),
           tools: toolDefs,
           signal: options.signal,
+          onToken: (delta) => {
+            streamed = true;
+            thinkFilter.feed(delta);
+          },
         });
+        thinkFilter.flush();
       } catch (err) {
         // Checked on the caller's own signal, not the error's name/type - a provider may wrap
         // or rename the underlying abort error (e.g. LocalProvider merges this signal with its
@@ -344,11 +364,11 @@ export class AgentLoop {
       // rather than swallowing the rest of the message).
       const { think, response: responseText } = splitThinkBlock(response.content);
       if (think) {
-        onEvent({ type: 'think', text: think });
+        onEvent({ type: 'think', text: think, streamed });
         this.appendEntry(aiThinkEntry(think), onEntry);
       }
       if (responseText) {
-        onEvent({ type: 'text', text: responseText });
+        onEvent({ type: 'text', text: responseText, streamed });
       }
 
       const isToolUse = response.stopReason === 'tool_use' && response.toolCalls.length > 0;

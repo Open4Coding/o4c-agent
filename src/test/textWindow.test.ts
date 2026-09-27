@@ -87,3 +87,50 @@ test('two independently-created windows never share ids - no module-level counte
   assert.equal(a.blocks[0].id, 0);
   assert.equal(b.blocks[0].id, 0);
 });
+
+test('appendDelta on an empty live region starts a new line', () => {
+  const state = textWindowReducer(initialTextWindow(), { type: 'appendDelta', text: 'Hel' });
+  assert.deepEqual(state.live, ['Hel']);
+  assert.equal(state.deltaActive, true);
+});
+
+test('appendDelta while active grows the same line instead of adding a new one', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'Hel' });
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'lo' });
+  state = textWindowReducer(state, { type: 'appendDelta', text: ', world' });
+  assert.deepEqual(state.live, ['Hello, world']);
+});
+
+test('appendLive after an active delta stream starts a fresh line, not a continuation', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'streamed' });
+  state = textWindowReducer(state, { type: 'appendLive', text: '[tool] read_file(...)' });
+  assert.deepEqual(state.live, ['streamed', '[tool] read_file(...)']);
+  assert.equal(state.deltaActive, false);
+});
+
+test('a second delta run (a new provider call) starts its own new line, not a continuation of the first', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'first call' });
+  state = textWindowReducer(state, { type: 'appendLive', text: '[tool] x()' }); // ends the first run
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'second call' });
+  assert.deepEqual(state.live, ['first call', '[tool] x()', 'second call']);
+});
+
+test('clearLive resets deltaActive - a delta right after starts a brand new line', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'turn 1' });
+  state = textWindowReducer(state, { type: 'clearLive' });
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'turn 2' });
+  assert.deepEqual(state.live, ['turn 2']);
+});
+
+test('updateScanSummary also ends an active delta run', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'streamed' });
+  state = textWindowReducer(state, { type: 'updateScanSummary', text: '[scan] 3 collapsed' });
+  assert.equal(state.deltaActive, false);
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'next' });
+  assert.deepEqual(state.live, ['streamed', '[scan] 3 collapsed', 'next']);
+});

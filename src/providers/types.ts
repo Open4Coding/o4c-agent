@@ -28,6 +28,13 @@ export interface CompletionRequest {
    * "Thinking..." spinner was showing). Providers that make a real network call should pass it
    * straight through to that call's own cancellation mechanism. */
   signal?: AbortSignal;
+  /** Called with each raw text chunk as it streams in, if the provider supports streaming (both
+   * real providers do). Purely a live-preview signal - undifferentiated (no `<think>` vs response
+   * split, which needs the complete text to detect reliably) and not a replacement for the
+   * final `CompletionResponse.content` this call still resolves to once the stream ends. Optional
+   * so a caller that doesn't care about live preview (or MockProvider in tests) can just ignore
+   * it - every provider must still fully resolve `complete()` normally either way. */
+  onToken?: (delta: string) => void;
 }
 
 export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens';

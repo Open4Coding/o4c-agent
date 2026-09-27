@@ -614,6 +614,17 @@ export function App({
             signal: controller.signal,
             contextWindow,
             onEvent: (event: AgentEvent) => {
+              // Raw streamed text - a live-preview-only signal, not logged (the run log already
+              // gets the complete, final 'think'/'text' events below once the stream ends) and
+              // not one of responseLines' permanent entries. Appends onto the current streaming
+              // line rather than starting a new one each time (textWindow.ts's own deltaActive
+              // tracking) - handled first and returned early since every other event type below
+              // means "a new, distinct line", the opposite of what a delta continuation needs.
+              if (event.type === 'delta') {
+                if (event.text) dispatchTextWindow({ type: 'appendDelta', text: event.text });
+                return;
+              }
+
               // The full, untruncated event always goes to the run log, regardless of what (or
               // whether) anything gets displayed - fire-and-forget, a logging failure shouldn't
               // interrupt the turn.
@@ -635,12 +646,17 @@ export function App({
                 return;
               }
 
+              // Already shown live via 'delta' events as they streamed in - re-appending the full,
+              // final text here would duplicate it. Only skipped when `streamed` is actually true
+              // though - a provider without onToken support (no real one lacks it, but a test
+              // fake or a future one might) never emitted any 'delta' for this call, so this event
+              // is the only place its content ever reaches the screen. The final answer is still
+              // committed to scrollback separately below, exactly once ('think' entries never were).
+              if ((event.type === 'think' || event.type === 'text') && event.streamed) return;
+
               const text = formatEvent(event);
               if (!text) return;
               dispatchTextWindow({ type: 'appendLive', text });
-              // Intermediate narration ("text" events) is shown live only - the
-              // final answer is committed separately below, exactly once, avoiding
-              // the duplicate-display bug this used to have.
               if (event.type === 'tool_call' || event.type === 'tool_result') {
                 responseLines.push({ kind: event.type, text });
               } else if (event.type === 'compaction') {

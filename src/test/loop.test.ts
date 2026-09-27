@@ -293,10 +293,25 @@ test('emits events for text, tool_call, and tool_result in order', async () => {
   ]);
   const loop = new AgentLoop(provider, [tool], 'system');
 
+  // 'delta' (the raw streamed-text preview, one per provider call - see loop.ts's onToken wiring)
+  // is filtered out here since it's not what this test is about; covered on its own below.
+  const events: string[] = [];
+  await loop.run('go', { onEvent: (e) => e.type !== 'delta' && events.push(e.type) });
+
+  assert.deepEqual(events, ['text', 'tool_call', 'tool_result', 'text']);
+});
+
+test('streams a "delta" event per provider call, ahead of that call\'s own "text"/"think" events', async () => {
+  const provider = new FakeProvider([
+    { content: 'checking', toolCalls: [{ id: 't1', name: 'read_file', input: { path: 'x' } }], stopReason: 'tool_use' },
+    { content: 'final', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [makeFakeTool('read_file', 'contents')], 'system');
+
   const events: string[] = [];
   await loop.run('go', { onEvent: (e) => events.push(e.type) });
 
-  assert.deepEqual(events, ['text', 'tool_call', 'tool_result', 'text']);
+  assert.deepEqual(events, ['delta', 'text', 'tool_call', 'tool_result', 'delta', 'text']);
 });
 
 test('a <think> block is split out: emitted as its own "think" event, and stripped from the final answer', async () => {
@@ -307,7 +322,7 @@ test('a <think> block is split out: emitted as its own "think" event, and stripp
 
   const events: Array<{ type: string; text?: string }> = [];
   const result = await loop.run('what is 2+2?', {
-    onEvent: (e) => events.push({ type: e.type, text: e.text }),
+    onEvent: (e) => e.type !== 'delta' && events.push({ type: e.type, text: e.text }),
   });
 
   assert.equal(result, 'The answer is 4.');
@@ -330,7 +345,7 @@ test('no <think> tag at all: no "think" event fires, behavior is unchanged from 
   const loop = new AgentLoop(provider, [], 'system');
 
   const events: string[] = [];
-  const result = await loop.run('hi', { onEvent: (e) => events.push(e.type) });
+  const result = await loop.run('hi', { onEvent: (e) => e.type !== 'delta' && events.push(e.type) });
 
   assert.equal(result, 'plain answer');
   assert.deepEqual(events, ['text']);

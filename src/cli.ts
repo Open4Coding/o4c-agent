@@ -58,6 +58,17 @@ software engineering tasks in their current directory. You have tools to read fi
 and run shell commands. Use them as needed to complete the user's request, then give a clear final answer.`;
 
 function printEvent(event: AgentEvent): void {
+  // Raw streamed text, written as-is with no line wrapping - the natural way to show streaming
+  // output in a plain terminal. 'think'/'text' (the same content, but complete and formatted)
+  // are skipped below since this already printed it live, character by character.
+  if (event.type === 'delta') {
+    if (event.text) process.stdout.write(event.text);
+    return;
+  }
+  // Only skipped when this call's content actually streamed live via 'delta' - see App.tsx's
+  // identical fallback reasoning for why `streamed` (not just the event type) gates this.
+  if ((event.type === 'think' || event.type === 'text') && event.streamed) return;
+
   const line = formatEvent(event);
   if (!line) return;
   // tool_result prints directly under its tool_call, no separating blank line.

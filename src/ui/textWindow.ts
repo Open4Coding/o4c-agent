@@ -25,11 +25,20 @@ export interface TextWindowState {
   readonly blocks: readonly TextBlock[];
   readonly live: readonly string[];
   readonly nextId: number;
+  /** Whether the last `live` line is an in-progress streamed-text line that the next
+   * `appendDelta` should keep growing, rather than a distinct line (a tool call/result, the scan
+   * summary, ...) that a delta should never be concatenated onto. Reset by everything else that
+   * touches `live` - only `appendDelta` itself sets it true. */
+  readonly deltaActive: boolean;
 }
 
 export type TextWindowAction =
   | { type: 'commit'; lines: Line[] }
   | { type: 'appendLive'; text: string }
+  /** Raw streamed text chunks (`AgentEvent.type === 'delta'`) - appended onto the current live
+   * line while a stream is in progress (`deltaActive`), or start a fresh line otherwise. This is
+   * the one `live`-mutating action that doesn't mean "a new, distinct line" - see `deltaActive`. */
+  | { type: 'appendDelta'; text: string }
   /** The `[scan] N more tool calls collapsed...` running summary line updates in place as the
    * count grows, rather than appending a new line per tool event once collapsing starts - the one
    * genuinely stateful (as opposed to append-only) update the live region needs. */
@@ -46,7 +55,7 @@ const SCAN_SUMMARY_PREFIX = '[scan] ';
  * even when starting from a non-empty list rather than always starting at 0. */
 export function initialTextWindow(blocks: readonly TextBlock[] = []): TextWindowState {
   const nextId = blocks.reduce((max, b) => Math.max(max, b.id + 1), 0);
-  return { blocks, live: [], nextId };
+  return { blocks, live: [], nextId, deltaActive: false };
 }
 
 export function makeBlock(id: number, lines: Line[]): TextBlock {
@@ -64,14 +73,23 @@ export function textWindowReducer(state: TextWindowState, action: TextWindowActi
       };
     }
     case 'appendLive':
-      return { ...state, live: [...state.live, action.text] };
+      return { ...state, live: [...state.live, action.text], deltaActive: false };
+    case 'appendDelta': {
+      if (state.live.length === 0 || !state.deltaActive) {
+        return { ...state, live: [...state.live, action.text], deltaActive: true };
+      }
+      const live = state.live.slice();
+      live[live.length - 1] += action.text;
+      return { ...state, live, deltaActive: true };
+    }
     case 'updateScanSummary':
       return {
         ...state,
         live: [...state.live.filter((l) => !l.startsWith(SCAN_SUMMARY_PREFIX)), action.text],
+        deltaActive: false,
       };
     case 'clearLive':
-      return state.live.length === 0 ? state : { ...state, live: [] };
+      return state.live.length === 0 && !state.deltaActive ? state : { ...state, live: [], deltaActive: false };
     case 'reset':
       return initialTextWindow(action.blocks);
     default:
