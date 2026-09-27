@@ -17,7 +17,7 @@ import { detectCurrentOs } from './platform.js';
 import type { Line } from './types.js';
 import { initialTextWindow, makeBlock, textWindowReducer, type TextBlock } from './textWindow.js';
 import { theme } from './theme.js';
-import { formatTokenCount, formatElapsed, renderProgressBar } from './statusBar.js';
+import { formatTokenCount, formatElapsed, renderProgressBar, progressBarFilledCells } from './statusBar.js';
 import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
@@ -116,9 +116,12 @@ function StatusBar({ loop, model, contextWindow }: { loop: AgentLoop; model: str
         {contextWindow ? `/${formatTokenCount(contextWindow)}` : ''}
       </Text>
       {fraction !== undefined && (
-        <Text color={theme.warn}>
-          {' '}
-          {renderProgressBar(fraction)} {Math.round(fraction * 100)}%
+        <Text>
+          {' ['}
+          <Text color={theme.warn}>{'█'.repeat(progressBarFilledCells(fraction))}</Text>
+          <Text color={theme.border}>{'░'.repeat(10 - progressBarFilledCells(fraction))}</Text>
+          {'] '}
+          <Text color={theme.text}>{Math.round(fraction * 100)}%</Text>
         </Text>
       )}
       <Text color={theme.border}> | </Text>

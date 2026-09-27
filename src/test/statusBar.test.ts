@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatTokenCount, formatElapsed, renderProgressBar } from '../ui/statusBar.js';
+import { formatTokenCount, formatElapsed, renderProgressBar, progressBarFilledCells } from '../ui/statusBar.js';
 
 test('formatTokenCount leaves sub-1000 values as-is', () => {
   assert.equal(formatTokenCount(0), '0');
@@ -47,4 +47,19 @@ test('renderProgressBar clamps fractions outside [0, 1]', () => {
 
 test('renderProgressBar at a partial fraction rounds to the nearest cell', () => {
   assert.equal(renderProgressBar(0.78, 10), '[████████░░]');
+});
+
+test('progressBarFilledCells agrees with renderProgressBar\'s own fill count', () => {
+  for (const fraction of [0, 0.00092, 0.5, 0.78, 1, -0.5, 1.5]) {
+    const filled = progressBarFilledCells(fraction, 10);
+    const rendered = renderProgressBar(fraction, 10);
+    assert.equal(rendered, `[${'█'.repeat(filled)}${'░'.repeat(10 - filled)}]`);
+  }
+});
+
+test('progressBarFilledCells shows an all-empty bar for a near-zero fraction, not a full-looking one', () => {
+  // Regression: 211/229376 tokens, the exact real-world case that surfaced this bug - the whole
+  // bar was rendered in one uniform bright color, making the empty cells look nearly as
+  // prominent as filled ones even though the fill count itself was already correct (0).
+  assert.equal(progressBarFilledCells(211 / 229376, 10), 0);
 });

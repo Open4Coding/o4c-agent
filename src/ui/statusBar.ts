@@ -18,11 +18,23 @@ export function formatElapsed(ms: number): string {
   return `${seconds}s`;
 }
 
-/** A fixed-width `[███░░░░░░░]`-style bar - `fraction` is clamped to [0, 1] so a token estimate
- * that overshoots a configured `contextWindow` (the chars/4 heuristic is approximate, per
- * `contextEntry.ts`'s own `estimateTokens`) never renders a bar wider than `width`. */
-export function renderProgressBar(fraction: number, width = 10): string {
+/** How many of `width` cells should render as "filled" - `fraction` clamped to [0, 1] so a token
+ * estimate that overshoots a configured `contextWindow` (the chars/4 heuristic is approximate,
+ * per `contextEntry.ts`'s own `estimateTokens`) never overflows the bar. Shared by
+ * `renderProgressBar()` (plain text) and the TUI's own two-color rendering (`App.tsx`'s
+ * `StatusBar`) so both always agree on where the fill line falls. */
+export function progressBarFilledCells(fraction: number, width = 10): number {
   const clamped = Math.max(0, Math.min(1, fraction));
-  const filled = Math.round(clamped * width);
+  return Math.round(clamped * width);
+}
+
+/** A fixed-width `[███░░░░░░░]`-style bar as one plain string - for `/context`'s plain-text
+ * output, which has no per-character coloring to lean on. The TUI's live status bar renders the
+ * same fill count as two separately-colored `<Text>` spans instead (see `progressBarFilledCells`)
+ * - real bug found via direct user report: one uniform color across the whole bar made the empty
+ * `░` cells nearly as visually prominent as the filled `█` ones, so the bar looked "full"
+ * regardless of actual usage. */
+export function renderProgressBar(fraction: number, width = 10): string {
+  const filled = progressBarFilledCells(fraction, width);
   return `[${'█'.repeat(filled)}${'░'.repeat(width - filled)}]`;
 }
