@@ -36,6 +36,9 @@ export function formatEvent(event: AgentEvent): string | null {
   if (event.type === 'compaction') {
     return event.text ? `[compact] ${event.text}` : null;
   }
+  if (event.type === 'warning') {
+    return event.text ? `[warning] ${event.text}` : null;
+  }
   if (event.type === 'delta') {
     // Raw, unprefixed, untruncated - callers that want the bracketed/truncated treatment other
     // event types get should special-case 'delta' before reaching this function (both App.tsx's

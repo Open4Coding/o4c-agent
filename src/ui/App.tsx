@@ -682,6 +682,11 @@ export function App({
                 // scrolling back should be able to see exactly when/why older history vanished
                 // from what the model sees.
                 responseLines.push({ kind: 'system', text });
+              } else if (event.type === 'warning') {
+                // Same permanent-record reasoning as compaction above - a truncated response is
+                // exactly the kind of thing that must not just scroll off with the live region and
+                // be lost (see loop.ts's own comment on the bug this replaces: a silent empty turn).
+                responseLines.push({ kind: 'error', text });
               }
             },
           });

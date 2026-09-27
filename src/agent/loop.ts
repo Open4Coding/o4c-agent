@@ -23,7 +23,7 @@ import {
 import { createThinkTagStripper } from './streamFilter.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'delta';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'delta' | 'warning';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -355,6 +355,19 @@ export class AgentLoop {
       if (response.usage) {
         this.usage.inputTokens += response.usage.inputTokens;
         this.usage.outputTokens += response.usage.outputTokens;
+      }
+
+      // Real bug found via direct reproduction: a response cut off by the provider's own
+      // max_tokens cap (most often mid-<think>, before the model ever reaches real content or a
+      // tool call) used to fall through silently - same code path as a normal finish, no
+      // indication anything was truncated. stopReason alone can't distinguish "hit the cap while
+      // thinking" from "hit it after a full, satisfying answer", so this always surfaces - better
+      // an occasional over-cautious note than another silent empty turn.
+      if (response.stopReason === 'max_tokens') {
+        onEvent({
+          type: 'warning',
+          text: 'Response cut off - the model hit its max_tokens output limit before finishing. Consider raising contextWindow in config.json (max_tokens is derived from it) or asking a narrower question.',
+        });
       }
 
       // Per direct instruction 2026-09-26: a local model's inline `<think>...</think>` reasoning

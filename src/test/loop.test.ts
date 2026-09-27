@@ -301,6 +301,33 @@ test('emits events for text, tool_call, and tool_result in order', async () => {
   assert.deepEqual(events, ['text', 'tool_call', 'tool_result', 'text']);
 });
 
+test('a response cut off by max_tokens emits a "warning" event, instead of silently returning nothing', async () => {
+  // Real bug this replaces: a provider reporting stopReason 'max_tokens' (the response got cut
+  // off, often mid-<think>) used to fall through the exact same path as a normal finish - no
+  // indication anything was truncated, sometimes an entirely empty final answer.
+  const provider = new FakeProvider([
+    { content: '<think>still reasoning, never finished', toolCalls: [], stopReason: 'max_tokens' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const events: Array<{ type: string; text?: string }> = [];
+  await loop.run('go', { onEvent: (e) => events.push({ type: e.type, text: e.text }) });
+
+  const warning = events.find((e) => e.type === 'warning');
+  assert.ok(warning, 'expected a "warning" event when stopReason is max_tokens');
+  assert.match(warning?.text ?? '', /max_tokens/);
+});
+
+test('a normal end_turn finish never emits a "warning" event', async () => {
+  const provider = new FakeProvider([{ content: 'all done', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const events: string[] = [];
+  await loop.run('go', { onEvent: (e) => events.push(e.type) });
+
+  assert.ok(!events.includes('warning'));
+});
+
 test('streams a "delta" event per provider call, ahead of that call\'s own "text"/"think" events', async () => {
   const provider = new FakeProvider([
     { content: 'checking', toolCalls: [{ id: 't1', name: 'read_file', input: { path: 'x' } }], stopReason: 'tool_use' },
