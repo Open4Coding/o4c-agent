@@ -95,7 +95,24 @@ function Spinner() {
  * a re-render once a second; `getVisibleTokenEstimate()` is read fresh on every render rather
  * than lifted into state, since `AgentLoop` already mutates it outside React's own state flow
  * (same reasoning as `getUsage()` elsewhere in this file). */
-function StatusBar({ loop, model, contextWindow }: { loop: AgentLoop; model: string; contextWindow?: number }) {
+function StatusBar({
+  loop,
+  model,
+  contextWindow,
+  liveText,
+}: {
+  loop: AgentLoop;
+  model: string;
+  contextWindow?: number;
+  /** The text currently streaming in (`textWindow.live`), not yet a committed `ContextEntry` -
+   * real bug found via direct user report: without this, the bar sat frozen at its pre-turn value
+   * for a response's entire generation time (`getVisibleTokenEstimate()` only updates once an
+   * entry is appended, which happens after a call fully completes, not as it streams), making a
+   * long turn look exactly like a hang even when it wasn't one. Included in the token count and
+   * fill fraction below as a rough estimate (chars/4, same heuristic `estimateTokens()` uses),
+   * never persisted anywhere - purely a live display adjustment. */
+  liveText: readonly string[];
+}) {
   const [, tick] = useState(0);
   const startRef = useRef(Date.now());
   useEffect(() => {
@@ -103,7 +120,8 @@ function StatusBar({ loop, model, contextWindow }: { loop: AgentLoop; model: str
     return () => clearInterval(id);
   }, []);
 
-  const tokens = loop.getVisibleTokenEstimate();
+  const liveTokens = Math.ceil(liveText.join('').length / 4);
+  const tokens = loop.getVisibleTokenEstimate() + liveTokens;
   const fraction = contextWindow ? tokens / contextWindow : undefined;
   const elapsed = formatElapsed(Date.now() - startRef.current);
 
@@ -954,7 +972,7 @@ export function App({
           </React.Fragment>
         ))}
       {isThinking && <Spinner />}
-      <StatusBar loop={loop} model={model} contextWindow={contextWindow} />
+      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} />
       <InputBox
         disabled={isProcessing}
         active={!confirmDialog && !resumePicker && !modePicker && !setPicker && !configPicker}
