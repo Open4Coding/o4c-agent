@@ -84,12 +84,17 @@ export class AnthropicProvider implements LLMProvider {
    * so multi-round tool use (the normal case in this harness) keeps working - see
    * `toAnthropicMessages()`'s own reasoning for why that replay isn't optional once thinking is on. */
   private thinkingEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined;
+  // Was a flat 4096 (+4096 more when thinking was on) regardless of the model's real context size -
+  // same latent bug as LocalProvider's own flat cap (see its own doc comment). Set from
+  // config.json's contextWindow (cli.ts), not guessed here.
+  private maxTokens: number;
 
   constructor(options: {
     apiKey?: string;
     model?: string;
     timeoutMs?: number;
     thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+    maxTokens?: number;
   } = {}) {
     const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
@@ -100,6 +105,7 @@ export class AnthropicProvider implements LLMProvider {
     this.client = new Anthropic({ apiKey, timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
     this.model = options.model ?? 'claude-opus-5';
     this.thinkingEffort = options.thinkingEffort;
+    this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
@@ -111,9 +117,10 @@ export class AnthropicProvider implements LLMProvider {
     const stream = this.client.messages.stream(
       {
         model: this.model,
-        // Adaptive thinking has no fixed budget to size max_tokens against - flat headroom
-        // instead, so a thinking-heavy response doesn't get cut off mid-thought.
-        max_tokens: this.thinkingEffort ? DEFAULT_MAX_TOKENS + THINKING_MAX_TOKENS_HEADROOM : DEFAULT_MAX_TOKENS,
+        // Adaptive thinking has no fixed budget to size max_tokens against - flat extra headroom
+        // on top of the configured cap instead, so a thinking-heavy response doesn't get cut off
+        // mid-thought.
+        max_tokens: this.thinkingEffort ? this.maxTokens + THINKING_MAX_TOKENS_HEADROOM : this.maxTokens,
         system: request.systemPrompt,
         messages: toAnthropicMessages(request.messages),
         tools: request.tools.map((t) => ({

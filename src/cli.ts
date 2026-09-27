@@ -223,6 +223,12 @@ program
     // percentage/bar.
     const contextWindow =
       typeof resolvedConfig.contextWindow === 'number' ? resolvedConfig.contextWindow : undefined;
+    // Half the configured context window, not the flat 4096 both providers used to hardcode -
+    // that flat cap was unrelated to the model's real budget and silently truncated any turn
+    // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
+    // PHOEBE: the turn just ended with an empty answer, no error). Undefined (no contextWindow
+    // configured) falls back to each provider's own pre-existing default.
+    const providerMaxTokens = contextWindow ? Math.floor(contextWindow / 2) : undefined;
     // Opt-in only, same "no CLI flag, config.json only" shape as localApiKey/contextWindow above -
     // extended thinking has a real token-cost impact (thinking tokens are billed as output), so
     // this is never turned on silently. Anthropic-only; harmless (just unread) for other providers.
@@ -249,10 +255,14 @@ program
     if (opts.provider === 'mock') {
       provider = new MockProvider();
     } else if (opts.provider === 'local') {
-      provider = new LocalProvider({ baseUrl: opts.baseUrl, apiKey: localApiKey });
+      provider = new LocalProvider({ baseUrl: opts.baseUrl, apiKey: localApiKey, maxTokens: providerMaxTokens });
     } else if (opts.provider === 'anthropic') {
       try {
-        provider = new AnthropicProvider({ model: opts.model, thinkingEffort: anthropicThinkingEffort });
+        provider = new AnthropicProvider({
+          model: opts.model,
+          thinkingEffort: anthropicThinkingEffort,
+          maxTokens: providerMaxTokens,
+        });
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

@@ -82,6 +82,9 @@ function mapStopReason(reason: string): StopReason {
 }
 
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
+// Only used when contextWindow isn't configured (no maxTokens override reaches the constructor) -
+// matches the flat cap this replaced, so an unconfigured setup behaves exactly as before.
+const DEFAULT_MAX_TOKENS = 4096;
 
 /**
  * Queries the server's own `/v1/models` for the id of whatever it actually has loaded - the
@@ -119,11 +122,17 @@ export class LocalProvider implements LLMProvider {
   // environment, so the env var survives a restart for free without needing to be threaded
   // through as an explicit arg.
   private apiKey: string | undefined;
+  // Per-request output cap - was a flat 4096 regardless of the model's real context size, which
+  // silently truncated any turn whose <think> reasoning alone ran past it (real bug, found via
+  // direct reproduction against PHOEBE: the turn just ended with an empty answer, no error, no
+  // work done). Set from config.json's own contextWindow (cli.ts), not guessed here.
+  private maxTokens: number;
 
-  constructor(options: { baseUrl?: string; timeoutMs?: number; apiKey?: string } = {}) {
+  constructor(options: { baseUrl?: string; timeoutMs?: number; apiKey?: string; maxTokens?: number } = {}) {
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.apiKey = options.apiKey ?? process.env.O4C_LOCAL_API_KEY;
+    this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
@@ -141,7 +150,7 @@ export class LocalProvider implements LLMProvider {
             type: 'function',
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
           })),
-          max_tokens: 4096,
+          max_tokens: this.maxTokens,
           stream: true,
           // Without this, a streaming response omits usage entirely (the standard OpenAI-API
           // convention llama-server also implements - confirmed directly against its source,
