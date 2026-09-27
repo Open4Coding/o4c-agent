@@ -49,6 +49,20 @@ test('aiThinkEntry produces an ai/think entry', () => {
   assert.equal(entry.type, 'ai');
   assert.equal(entry.sub_type, 'think');
   assert.equal(entry.content, 'reasoning here');
+  assert.equal(entry.thinking_signature, undefined);
+  assert.equal(entry.redacted_thinking, undefined);
+});
+
+test('aiThinkEntry carries an Anthropic thinking signature when given one', () => {
+  const entry = aiThinkEntry('reasoning here', 'sig-abc123');
+  assert.equal(entry.thinking_signature, 'sig-abc123');
+  assert.equal(entry.redacted_thinking, undefined);
+});
+
+test('aiThinkEntry carries redacted-thinking data when given it', () => {
+  const entry = aiThinkEntry('', undefined, 'opaque-encrypted-data');
+  assert.equal(entry.content, '');
+  assert.equal(entry.redacted_thinking, 'opaque-encrypted-data');
 });
 
 test('splitThinkBlock: a properly closed <think> block is extracted, however many lines it spans', () => {
@@ -94,6 +108,43 @@ test('toWireMessages: a think entry followed by a response entry join with a bla
     aiResponseEntry('4'),
   ]);
   assert.deepEqual(messages[1], { role: 'assistant', content: '2+2 is basic addition\n\n4', toolCalls: undefined });
+});
+
+test('toWireMessages: a thinking signature propagates onto the wire Message, separately from the merged content', () => {
+  const messages = toWireMessages([
+    userInputEntry('what is 2+2'),
+    aiThinkEntry('2+2 is basic addition', 'sig-abc123'),
+    aiResponseEntry('4'),
+  ]);
+  assert.deepEqual(messages[1], {
+    role: 'assistant',
+    content: '2+2 is basic addition\n\n4',
+    toolCalls: undefined,
+    thinkingText: '2+2 is basic addition',
+    thinkingSignature: 'sig-abc123',
+  });
+});
+
+test('toWireMessages: redacted thinking data propagates onto the wire Message even with no readable think text', () => {
+  const messages = toWireMessages([
+    userInputEntry('sensitive question'),
+    aiThinkEntry('', undefined, 'opaque-encrypted-data'),
+    aiResponseEntry('the answer'),
+  ]);
+  assert.deepEqual(messages[1], {
+    role: 'assistant',
+    content: 'the answer',
+    toolCalls: undefined,
+    redactedThinking: 'opaque-encrypted-data',
+  });
+});
+
+test('toWireMessages: no thinking fields at all when no think entry is present, unchanged shape from before', () => {
+  const messages = toWireMessages([userInputEntry('hi'), aiResponseEntry('hello')]);
+  assert.deepEqual(messages[1], { role: 'assistant', content: 'hello', toolCalls: undefined });
+  assert.ok(!('thinkingText' in messages[1]));
+  assert.ok(!('thinkingSignature' in messages[1]));
+  assert.ok(!('redactedThinking' in messages[1]));
 });
 
 test('toWireMessages: plain text turn, no tool calls', () => {

@@ -75,6 +75,16 @@ export interface ContextEntry {
    * both - no entry sets these yet (compaction itself isn't built), only the plumbing is here. */
   user_visible?: boolean;
   agent_visible?: boolean;
+  /** `sub_type='think'` only, Anthropic extended-thinking turns only - opaque pass-through data
+   * that must round-trip back to Anthropic unmodified on any later request in this same
+   * conversation (a hard API requirement once a thinking turn is followed by tool use, not just a
+   * quality nicety - see `providers/types.ts`'s `Message.thinkingSignature` for the full reasoning).
+   * `AgentLoop` never reads or interprets these itself, only stores and replays them. */
+  thinking_signature?: string;
+  /** `sub_type='think'` only - set instead of a readable `content` when Anthropic's safety system
+   * redacted this particular thinking block; `content` is empty (`''`) in that case, since there
+   * is nothing real to show. */
+  redacted_thinking?: string;
 }
 
 /**
@@ -104,8 +114,16 @@ export function aiResponseEntry(content: string): ContextEntry {
   return newEntry({ type: 'ai', sub_type: 'response', content });
 }
 
-export function aiThinkEntry(content: string): ContextEntry {
-  return newEntry({ type: 'ai', sub_type: 'think', content });
+/** `signature`/`redactedThinking` are Anthropic-only replay data (see `ContextEntry`'s own fields
+ * for why) - absent for every other provider, which just don't pass them. */
+export function aiThinkEntry(content: string, signature?: string, redactedThinking?: string): ContextEntry {
+  return newEntry({
+    type: 'ai',
+    sub_type: 'think',
+    content,
+    thinking_signature: signature,
+    redacted_thinking: redactedThinking,
+  });
 }
 
 const THINK_CLOSED = /<think>([\s\S]*?)<\/think>/i;
@@ -244,7 +262,13 @@ function formatCompactionForWire(content: string): string {
 
 export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
   const messages: Message[] = [];
-  let pending: { content: string; toolCalls: ToolCall[] } | null = null;
+  let pending: {
+    content: string;
+    toolCalls: ToolCall[];
+    thinkingText?: string;
+    thinkingSignature?: string;
+    redactedThinking?: string;
+  } | null = null;
 
   function flush(): void {
     if (!pending) return;
@@ -252,6 +276,12 @@ export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
       role: 'assistant',
       content: pending.content,
       toolCalls: pending.toolCalls.length > 0 ? pending.toolCalls : undefined,
+      // Only present at all when a thinking turn actually set one - keeps the overwhelmingly
+      // common (non-thinking) case's wire Message exactly as small as it always was, not padded
+      // with three always-undefined keys.
+      ...(pending.thinkingText !== undefined ? { thinkingText: pending.thinkingText } : {}),
+      ...(pending.thinkingSignature !== undefined ? { thinkingSignature: pending.thinkingSignature } : {}),
+      ...(pending.redactedThinking !== undefined ? { redactedThinking: pending.redactedThinking } : {}),
     });
     pending = null;
   }
@@ -282,6 +312,22 @@ export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
       // append onto the system prompt in loop.ts).
       else if (pending.content && text) pending.content += `\n\n${text}`;
       else pending.content += text;
+      if (entry.sub_type === 'think') {
+        // Kept separate from the merged `content` above - Anthropic's replay needs the raw
+        // thinking text and its signature reassembled into their own distinct content block, not
+        // folded into the response text (see Message.thinkingText's own doc comment). thinkingText
+        // is only meaningful paired with its signature (a `ThinkingBlockParam` needs both, per
+        // Anthropic's own type) - set only when there's actually a signature to pair it with, so a
+        // plain (non-Anthropic, unsigned) think entry's wire Message stays exactly as small as it
+        // always was, same reasoning as flush()'s own conditional spread below.
+        if (entry.thinking_signature) {
+          pending.thinkingText = entry.content;
+          pending.thinkingSignature = entry.thinking_signature;
+        }
+        if (entry.redacted_thinking) {
+          pending.redactedThinking = entry.redacted_thinking;
+        }
+      }
       continue;
     }
 

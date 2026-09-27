@@ -12,6 +12,22 @@ export interface Message {
   toolCalls?: ToolCall[];
   toolCallId?: string;
   images?: string[];
+  /** `role: 'assistant'` only, and only when extended thinking was used for that turn - the raw
+   * thinking text, kept *separate* from `content` (which merges think+response into one display
+   * string, per `toWireMessages()`) specifically because Anthropic's replay requirement needs the
+   * thinking text and its `thinkingSignature` reassembled into their own distinct content block,
+   * not folded into the response text. Other providers ignore this field entirely. */
+  thinkingText?: string;
+  /** Pass this exact value back to Anthropic, unmodified, when replaying a `thinking` block - a
+   * hard API requirement whenever a thinking turn is followed by tool use (the common case in an
+   * agentic loop), not just a quality nicety. Never fabricate or omit-when-present: a missing or
+   * altered signature on a turn that needs one is a 400 `invalid_request_error` from Anthropic,
+   * not a silent degradation. */
+  thinkingSignature?: string;
+  /** Pass this exact opaque value back unmodified when replaying a `redacted_thinking` block
+   * (Anthropic's safety system withheld the actual reasoning) - there is no readable text for
+   * this case, `thinkingText`/`thinkingSignature` are absent whenever this is set. */
+  redactedThinking?: string;
 }
 
 export interface ToolDefinition {
@@ -51,6 +67,12 @@ export interface CompletionResponse {
   stopReason: StopReason;
   /** Absent if the provider doesn't report usage (shouldn't happen for Anthropic/local, but keep it optional rather than fabricate zeros). */
   usage?: Usage;
+  /** Extended-thinking replay data, Anthropic-only (see `Message`'s matching fields for why these
+   * exist and why they must round-trip unmodified). `AgentLoop` stores these on the `think`
+   * `ContextEntry` it creates for this turn, purely as opaque pass-through data - it never reads
+   * or interprets them itself. */
+  thinkingSignature?: string;
+  redactedThinking?: string;
 }
 
 export interface LLMProvider {

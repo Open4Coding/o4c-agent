@@ -8,14 +8,26 @@ import type {
   ToolCall,
 } from './types.js';
 
-function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
+export function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
   const result: Anthropic.MessageParam[] = [];
 
   for (const msg of messages) {
     if (msg.role === 'user') {
       result.push({ role: 'user', content: msg.content });
     } else if (msg.role === 'assistant') {
-      const blocks: Array<Anthropic.TextBlockParam | Anthropic.ToolUseBlockParam> = [];
+      const blocks: Array<
+        Anthropic.TextBlockParam | Anthropic.ToolUseBlockParam | Anthropic.ThinkingBlockParam | Anthropic.RedactedThinkingBlockParam
+      > = [];
+      // A thinking (or redacted_thinking) block must be the *first* content block in the turn
+      // that produced it, and must round-trip back exactly as received - required by the API
+      // once a thinking turn is followed by tool use, which every multi-round tool-calling turn
+      // in this harness is. See Message.thinkingSignature's own doc comment for the full
+      // reasoning; this is what actually replays it, not just parses it on the way in.
+      if (msg.redactedThinking) {
+        blocks.push({ type: 'redacted_thinking', data: msg.redactedThinking });
+      } else if (msg.thinkingSignature && msg.thinkingText) {
+        blocks.push({ type: 'thinking', thinking: msg.thinkingText, signature: msg.thinkingSignature });
+      }
       if (msg.content) blocks.push({ type: 'text', text: msg.content });
       for (const call of msg.toolCalls ?? []) {
         blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input });
@@ -53,12 +65,32 @@ function mapStopReason(reason: string | null): StopReason {
 // only set when the user manually presses Escape/Ctrl+C) is the only other way out.
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 
+const DEFAULT_MAX_TOKENS = 4096;
+// Current Claude 5 models reject `thinking.type.enabled`/`budget_tokens` outright (confirmed via
+// a live 400: `"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive"
+// and "output_config.effort" to control thinking behavior.`). Adaptive mode has no fixed token
+// budget of its own - the model decides how much to think - so the extra headroom below is a
+// flat allowance rather than a budget-derived one.
+const THINKING_MAX_TOKENS_HEADROOM = 4096;
+
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic';
   private client: Anthropic;
   private model: string;
+  /** Opt-in, off by default - extended thinking has a real token-cost impact (thinking tokens are
+   * billed as output), so this is never silently turned on. When set, `complete()` requests
+   * `thinking: {type: 'adaptive', display: 'summarized'}` plus `output_config: {effort}` and
+   * correctly threads the resulting signature/redacted-data back through `Message`/`ContextEntry`
+   * so multi-round tool use (the normal case in this harness) keeps working - see
+   * `toAnthropicMessages()`'s own reasoning for why that replay isn't optional once thinking is on. */
+  private thinkingEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined;
 
-  constructor(options: { apiKey?: string; model?: string; timeoutMs?: number } = {}) {
+  constructor(options: {
+    apiKey?: string;
+    model?: string;
+    timeoutMs?: number;
+    thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  } = {}) {
     const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       throw new Error(
@@ -67,6 +99,7 @@ export class AnthropicProvider implements LLMProvider {
     }
     this.client = new Anthropic({ apiKey, timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
     this.model = options.model ?? 'claude-opus-5';
+    this.thinkingEffort = options.thinkingEffort;
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
@@ -78,7 +111,9 @@ export class AnthropicProvider implements LLMProvider {
     const stream = this.client.messages.stream(
       {
         model: this.model,
-        max_tokens: 4096,
+        // Adaptive thinking has no fixed budget to size max_tokens against - flat headroom
+        // instead, so a thinking-heavy response doesn't get cut off mid-thought.
+        max_tokens: this.thinkingEffort ? DEFAULT_MAX_TOKENS + THINKING_MAX_TOKENS_HEADROOM : DEFAULT_MAX_TOKENS,
         system: request.systemPrompt,
         messages: toAnthropicMessages(request.messages),
         tools: request.tools.map((t) => ({
@@ -86,11 +121,21 @@ export class AnthropicProvider implements LLMProvider {
           description: t.description,
           input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
         })),
+        ...(this.thinkingEffort
+          ? {
+              thinking: { type: 'adaptive' as const, display: 'summarized' as const },
+              output_config: { effort: this.thinkingEffort },
+            }
+          : {}),
       },
       { signal: request.signal },
     );
     if (request.onToken) {
       stream.on('text', (delta) => request.onToken?.(delta));
+      // Same live-preview treatment as regular text - real-time think/response labeling isn't
+      // attempted here either (AgentLoop's own `createThinkTagStripper` already made that call
+      // for every provider, not just this one).
+      stream.on('thinking', (delta) => request.onToken?.(delta));
     }
 
     let response: Anthropic.Message;
@@ -107,6 +152,9 @@ export class AnthropicProvider implements LLMProvider {
     }
 
     let content = '';
+    let thinking = '';
+    let thinkingSignature: string | undefined;
+    let redactedThinking: string | undefined;
     const toolCalls: ToolCall[] = [];
 
     for (const block of response.content) {
@@ -118,17 +166,30 @@ export class AnthropicProvider implements LLMProvider {
           name: block.name,
           input: block.input as Record<string, unknown>,
         });
+      } else if (block.type === 'thinking') {
+        thinking += block.thinking;
+        thinkingSignature = block.signature;
+      } else if (block.type === 'redacted_thinking') {
+        redactedThinking = block.data;
       }
     }
 
+    // Reassembled into the same `<think>...</think>` convention every other provider already
+    // produces - splitThinkBlock()/AgentLoop need no changes to handle a provider whose thinking
+    // arrives as structured content blocks instead of inline tags. The signature/redacted-data
+    // travel separately (below), for the exact replay toAnthropicMessages() needs later.
+    const fullContent = thinking ? `<think>${thinking}</think>${content}` : content;
+
     return {
-      content,
+      content: fullContent,
       toolCalls,
       stopReason: mapStopReason(response.stop_reason),
       usage: {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
       },
+      thinkingSignature,
+      redactedThinking,
     };
   }
 }

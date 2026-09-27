@@ -363,9 +363,12 @@ export class AgentLoop {
       // parsing rule (a closed block captured in full; an unclosed one cut at the next newline
       // rather than swallowing the rest of the message).
       const { think, response: responseText } = splitThinkBlock(response.content);
-      if (think) {
-        onEvent({ type: 'think', text: think, streamed });
-        this.appendEntry(aiThinkEntry(think), onEntry);
+      // A redacted thinking block (Anthropic-only) has no readable text at all - `think` stays
+      // empty in that case (there's nothing for splitThinkBlock() to find), but the opaque
+      // redacted_thinking data still needs an entry to carry it forward for replay, or it's lost.
+      if (think || response.redactedThinking) {
+        if (think) onEvent({ type: 'think', text: think, streamed });
+        this.appendEntry(aiThinkEntry(think ?? '', response.thinkingSignature, response.redactedThinking), onEntry);
       }
       if (responseText) {
         onEvent({ type: 'text', text: responseText, streamed });

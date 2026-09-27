@@ -223,6 +223,15 @@ program
     // percentage/bar.
     const contextWindow =
       typeof resolvedConfig.contextWindow === 'number' ? resolvedConfig.contextWindow : undefined;
+    // Opt-in only, same "no CLI flag, config.json only" shape as localApiKey/contextWindow above -
+    // extended thinking has a real token-cost impact (thinking tokens are billed as output), so
+    // this is never turned on silently. Anthropic-only; harmless (just unread) for other providers.
+    const validThinkingEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+    const anthropicThinkingEffort =
+      typeof resolvedConfig.anthropicThinkingEffort === 'string' &&
+      (validThinkingEfforts as readonly string[]).includes(resolvedConfig.anthropicThinkingEffort)
+        ? (resolvedConfig.anthropicThinkingEffort as (typeof validThinkingEfforts)[number])
+        : undefined;
 
     // The `-m`/`--model` value means nothing to LocalProvider - it never sends a `model` field
     // at all (llama-server only ever has one model loaded). Without this, the status bar and
@@ -243,7 +252,7 @@ program
       provider = new LocalProvider({ baseUrl: opts.baseUrl, apiKey: localApiKey });
     } else if (opts.provider === 'anthropic') {
       try {
-        provider = new AnthropicProvider({ model: opts.model });
+        provider = new AnthropicProvider({ model: opts.model, thinkingEffort: anthropicThinkingEffort });
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;
