@@ -13,15 +13,13 @@ export interface CommandInfo {
 // Single source of truth for the front end's own commands, used by both the "/" command palette
 // and the unknown-command check in App.tsx. Once the plugin-dispatch registry
 // (docs/frontend-design.md §6) exists, plugin-registered commands get merged in here rather than
-// replacing this list. There's no dedicated /help - typing "/" opens a live, searchable list of
-// everything here (CommandPalette.tsx), which makes a separate static listing redundant.
+// replacing this list. `/help` (below) is a static, scrollback-permanent listing of this same
+// data - complementary to the live "/" palette (CommandPalette.tsx), not redundant with it: the
+// palette exists only while typing and never shows descriptions for more than the currently
+// narrowed set, where `/help` is meant to be read as a single reference, in full, at once.
 export const COMMANDS: CommandInfo[] = [
   { name: '/clear', description: 'Clear the current session and start fresh (still resumable via /resume).' },
   { name: '/resume', description: 'Browse and resume one of the last 20 saved sessions.' },
-  {
-    name: '/wipe',
-    description: 'PERMANENTLY delete the current session from /resume (double confirmation required).',
-  },
   {
     name: '/context',
     aliases: ['/ctx'],
@@ -33,7 +31,12 @@ export const COMMANDS: CommandInfo[] = [
   },
   {
     name: '/mode',
-    description: 'Switch between Manual, Auto, Accept Edits, and Plan mode.',
+    description: 'Switch between Manual, Auto, Accept Edits, Plan, and Plan-Write mode.',
+  },
+  {
+    name: '/help',
+    description:
+      'List every command with a one-line description. Use /help-<command> for more detail on one, e.g. /help-mode.',
   },
   { name: '/exit', aliases: ['/quit'], description: 'End the session.' },
   { name: '/set', description: 'Browse and run a /set-* setting command.' },
@@ -107,4 +110,17 @@ export function matchCommands(prefix: string): CommandInfo[] {
     (c) =>
       !c.hidden && [c.name, ...(c.aliases ?? [])].some((name) => name.toLowerCase().startsWith(needle)),
   ).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Resolves `/help-<rest>`'s target - `rest` is the command name being asked about with its
+ * leading slash stripped (e.g. "mode" for `/help-mode`, "set-sessionname" for
+ * `/help-set-sessionname`) - matched by canonical name or alias. Deliberately not restricted to
+ * non-hidden commands: `/help-<name>` is a direct, exact-name lookup (like running the command
+ * itself), not a browseable listing, so a hidden command's own help is still reachable this way,
+ * matching how it's still directly invocable by typing its exact name.
+ */
+export function commandForHelpTarget(rest: string): CommandInfo | undefined {
+  const target = `/${rest}`;
+  return COMMANDS.find((c) => c.name === target || c.aliases?.includes(target));
 }

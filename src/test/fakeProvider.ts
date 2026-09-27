@@ -14,6 +14,12 @@ export class FakeProvider implements LLMProvider {
     this.queue = [...responses];
   }
 
+  /** Adds more scripted responses to the end of the queue - for tests that need to keep using
+   * the same instance (and its accumulating `receivedRequests`) across more than one batch. */
+  enqueue(...responses: CompletionResponse[]): void {
+    this.queue.push(...responses);
+  }
+
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     this.callCount++;
     // Snapshot now: `request.messages` is a live reference to the caller's array,

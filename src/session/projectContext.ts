@@ -21,6 +21,26 @@ export function logsDirFor(projectRoot: string | undefined): string {
   return projectRoot ? join(projectRoot, '.o4c', 'logs') : defaultLogsDir();
 }
 
+/**
+ * Where Plan-Write mode (`modePolicy.ts`) is allowed to write plan documents - project-only, no
+ * global fallback, since a plan document is inherently tied to the project it plans. Undefined in
+ * an untrusted/no-project run means Plan-Write has nowhere it's allowed to write, so it behaves
+ * exactly like plain Plan mode (deny) until a project exists.
+ */
+export function plansDirFor(projectRoot: string | undefined): string | undefined {
+  return projectRoot ? join(projectRoot, '.o4c', 'plans') : undefined;
+}
+
+/**
+ * Where §4's infinite-context SQLite store (`InfiniteContextStore`) lives - project-only, no
+ * global fallback, same reasoning as `plansDirFor`: the store indexes one project's own history,
+ * so it's meaningless without a trusted project root. `index.db` itself (plus its `-wal`/`-shm`
+ * sidecars) is created inside this directory by `InfiniteContextStore`, not here.
+ */
+export function infiniteContextDbDirFor(projectRoot: string | undefined): string | undefined {
+  return projectRoot ? join(projectRoot, '.o4c', 'data', 'infinitecontextwindow') : undefined;
+}
+
 async function directoryExists(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();

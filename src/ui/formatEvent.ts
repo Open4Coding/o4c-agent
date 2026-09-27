@@ -3,7 +3,13 @@ import type { AgentEvent } from '../agent/loop.js';
 const PREVIEW_LENGTH = 200;
 
 function truncate(text: string): string {
-  return text.length > PREVIEW_LENGTH ? `${text.slice(0, PREVIEW_LENGTH)}...` : text;
+  // Trailing whitespace/newlines are extremely common in real tool output (shell stdout/stderr,
+  // file reads almost always end in "\n") - left in, Ink renders that as its own blank row
+  // *inside* this one Line's content, on top of the real blank-line separator App.tsx now adds
+  // after every tool_call/tool_result line - a double gap the user actually saw on screen.
+  // Trimmed once here, at the single place every branch below funnels through.
+  const trimmed = text.replace(/\s+$/, '');
+  return trimmed.length > PREVIEW_LENGTH ? `${trimmed.slice(0, PREVIEW_LENGTH)}...` : trimmed;
 }
 
 /**
@@ -16,11 +22,19 @@ export function formatEvent(event: AgentEvent): string | null {
   if (event.type === 'text') {
     return event.text ? truncate(event.text) : null;
   }
+  if (event.type === 'think') {
+    // Per direct instruction: `[think]` label, no closing marker - the line just ends, same as
+    // every other bracketed-label line here (`[tool]`, `[result]`).
+    return event.text ? `[think] ${truncate(event.text)}` : null;
+  }
   if (event.type === 'tool_call') {
     return `[tool] ${event.toolName}(${JSON.stringify(event.toolInput)})`;
   }
   if (event.type === 'tool_result') {
     return `[result] ${truncate(event.toolOutput ?? '')}`;
+  }
+  if (event.type === 'compaction') {
+    return event.text ? `[compact] ${event.text}` : null;
   }
   return null;
 }

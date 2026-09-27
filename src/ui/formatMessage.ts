@@ -17,7 +17,13 @@ export function formatMessage(msg: Message): Line[] {
       lines.push({ kind: 'tool_call', text: `  [call] ${call.name}(${JSON.stringify(call.input)}) id=${call.id}` });
     }
   } else if (msg.role === 'tool') {
-    lines.push({ kind: 'tool_result', text: `  [return] (id=${msg.toolCallId}) ${msg.content}` });
+    // Trailing whitespace trimmed for the same reason as formatEvent.ts's truncate() - real tool
+    // output very often ends in "\n", which would otherwise render as its own blank row on top
+    // of App.tsx's separator row after every tool_call/tool_result line.
+    lines.push({
+      kind: 'tool_result',
+      text: `  [return] (id=${msg.toolCallId}) ${msg.content.replace(/\s+$/, '')}`,
+    });
   }
   return lines;
 }

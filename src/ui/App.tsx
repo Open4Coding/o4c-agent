@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
 import { InputBox } from './InputBox.js';
 import { SessionPicker } from './SessionPicker.js';
@@ -6,7 +6,8 @@ import { ConfirmDialog } from './ConfirmDialog.js';
 import { CommandPalette } from './CommandPalette.js';
 import { ModePicker } from './ModePicker.js';
 import { CommandFamilyPicker } from './CommandFamilyPicker.js';
-import { MODES, classifyToolAccess, modeInfo, type Mode } from './modePolicy.js';
+import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
+import { plansDirFor } from '../session/projectContext.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
 import { formatMessage } from './formatMessage.js';
@@ -14,17 +15,22 @@ import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
 import { parseOsArg } from './osKeyboardNotes.js';
 import { detectCurrentOs } from './platform.js';
 import type { Line } from './types.js';
+import { initialTextWindow, makeBlock, textWindowReducer, type TextBlock } from './textWindow.js';
+import { theme } from './theme.js';
+import { formatTokenCount, formatElapsed, renderProgressBar } from './statusBar.js';
 import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
 import {
+  COMMANDS,
   KNOWN_COMMANDS,
   looksLikeSlashCommand,
   isComposingCommand,
   matchCommands,
   commandName,
+  commandForHelpTarget,
   setCommands,
   configCommands,
   type CommandInfo,
@@ -39,11 +45,22 @@ export interface AppProps {
    * scrollback and currentSessionIdRef on mount, since a fresh process handoff (see `restart`
    * below) never gets a chance to append it mid-session. */
   initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] };
-  /** Requests that /clear, /wipe or /resume hand off to a brand-new process instead of resetting
+  /** Requests that /clear or /resume hand off to a brand-new process instead of resetting
    * state in-place - see cli.ts's spawnRestart for why. Call this, then exit() (as /exit does),
    * never both without the other: cli.ts only spawns the replacement after this process's Ink
    * instance has actually unmounted. */
   restart: (resumeId?: string) => void;
+  /** Undefined for an untrusted/no-project run. Only consulted to scope Plan-Write mode's
+   * write_file exception to `.o4c/plans/` - see modePolicy.ts's classifyToolAccess. */
+  projectRoot?: string;
+  /** The model id this session is running (`-m`/config.json's `model`, as passed to the
+   * provider) - display only, shown in the status bar. */
+  model: string;
+  /** The current model's max context size, in tokens - only known when set explicitly via
+   * config.json's `contextWindow` key (no per-model metadata registry exists yet, per
+   * docs/o4c-agent-design.md §2.3/§7.1 - this deliberately doesn't guess). Undefined hides the
+   * status bar's progress-bar/percentage, showing just the raw token estimate instead. */
+  contextWindow?: number;
 }
 
 // Above this many tool_call/tool_result events in a single turn, further ones collapse into a
@@ -53,13 +70,10 @@ export interface AppProps {
 // regardless of this cap.
 const MAX_VISIBLE_TOOL_EVENTS_PER_TURN = 10;
 
-interface HistoryBlock {
-  id: number;
-  lines: Line[];
-}
-
-let nextBlockId = 0;
 let nextPrefillToken = 0;
+// Unrelated to the text window's own block ids (textWindow.ts owns those internally now) - just a
+// second, independent React-key source for ConfirmDialog instances.
+let nextDialogId = 0;
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -70,8 +84,45 @@ function Spinner() {
     return () => clearInterval(id);
   }, []);
   return (
-    <Text color="cyan">
+    <Text color={theme.warn}>
       {SPINNER_FRAMES[frame]} Thinking...
+    </Text>
+  );
+}
+
+/** Session-elapsed-time ticker + the model/tokens/context-usage line shown above the input box -
+ * per direct instruction, matching Hermes Agent's own status bar. `tick` exists purely to force
+ * a re-render once a second; `getVisibleTokenEstimate()` is read fresh on every render rather
+ * than lifted into state, since `AgentLoop` already mutates it outside React's own state flow
+ * (same reasoning as `getUsage()` elsewhere in this file). */
+function StatusBar({ loop, model, contextWindow }: { loop: AgentLoop; model: string; contextWindow?: number }) {
+  const [, tick] = useState(0);
+  const startRef = useRef(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => tick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const tokens = loop.getVisibleTokenEstimate();
+  const fraction = contextWindow ? tokens / contextWindow : undefined;
+  const elapsed = formatElapsed(Date.now() - startRef.current);
+
+  return (
+    <Text>
+      <Text color={theme.accent}>◆ {model}</Text>
+      <Text color={theme.border}> | </Text>
+      <Text color={theme.text}>
+        {formatTokenCount(tokens)}
+        {contextWindow ? `/${formatTokenCount(contextWindow)}` : ''}
+      </Text>
+      {fraction !== undefined && (
+        <Text color={theme.warn}>
+          {' '}
+          {renderProgressBar(fraction)} {Math.round(fraction * 100)}%
+        </Text>
+      )}
+      <Text color={theme.border}> | </Text>
+      <Text color={theme.text}>{elapsed}</Text>
     </Text>
   );
 }
@@ -80,47 +131,60 @@ function LineText({ line }: { line: Line }) {
   switch (line.kind) {
     case 'user':
       return (
-        <Text bold color="cyan">
+        <Text bold color={theme.accent}>
           {line.text}
         </Text>
       );
     case 'tool_call':
     case 'tool_result':
-      return <Text dimColor>{line.text}</Text>;
+      return <Text color={theme.border}>{line.text}</Text>;
     case 'final':
-      return <Text bold>{line.text}</Text>;
+      return (
+        <Text bold color={theme.text}>
+          {line.text}
+        </Text>
+      );
     case 'error':
-      return <Text color="red">{line.text}</Text>;
+      return <Text color={theme.error}>{line.text}</Text>;
     default:
-      return <Text dimColor>{line.text}</Text>;
+      return <Text color={theme.border}>{line.text}</Text>;
   }
 }
 
-export function App({ loop, initialImage, sessionStore, runLogger, initialSession, restart }: AppProps) {
+export function App({
+  loop,
+  initialImage,
+  sessionStore,
+  runLogger,
+  initialSession,
+  restart,
+  projectRoot,
+  model,
+  contextWindow,
+}: AppProps) {
   const { exit } = useApp();
-  const [history, setHistory] = useState<HistoryBlock[]>(() => {
-    const banner: HistoryBlock = {
-      id: nextBlockId++,
-      lines: [
-        {
-          kind: 'system',
-          text: 'o4c interactive session. Type your request, or / to see available commands.',
-        },
-      ],
-    };
-    if (!initialSession) return [banner];
-    const blocks: HistoryBlock[] = [
+  const plansDir = plansDirFor(projectRoot);
+  const [textWindow, dispatchTextWindow] = useReducer(textWindowReducer, undefined, () => {
+    let id = 0;
+    const banner = makeBlock(id++, [
+      {
+        kind: 'system',
+        text: 'o4c interactive session. Type your request, or / to see available commands.',
+      },
+    ]);
+    if (!initialSession) return initialTextWindow([banner]);
+    const blocks: TextBlock[] = [
       banner,
-      { id: nextBlockId++, lines: [{ kind: 'system', text: `Resumed session: ${initialSession.title}` }] },
+      makeBlock(id++, [{ kind: 'system', text: `Resumed session: ${initialSession.title}` }]),
     ];
     const restoredLines = initialSession.messages.flatMap(formatMessage);
-    if (restoredLines.length > 0) blocks.push({ id: nextBlockId++, lines: restoredLines });
-    return blocks;
+    if (restoredLines.length > 0) blocks.push(makeBlock(id++, restoredLines));
+    return initialTextWindow(blocks);
   });
-  const [liveLines, setLiveLines] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   // Separate from isProcessing (which covers the whole turn, including waiting on /resume's
-  // picker or /wipe's confirmations) - this is only true while an actual LLM call is in flight,
+  // picker or a write_file/run_shell confirmation) - this is only true while an actual LLM call
+  // is in flight,
   // so the "Thinking..." spinner doesn't run during a turn that's really just waiting on the user.
   const [isThinking, setIsThinking] = useState(false);
   const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
@@ -151,7 +215,7 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
   // Mirrors InputBox's own submit-history array (kept there, not lifted into React state here -
   // it only needs to be read at autosave time, not drive any render) so it can be persisted
   // alongside the conversation. Seeded from a /resume restart handoff exactly like `messages`
-  // is; a fresh session (no initialSession, or /clear/wipe's restart with none) starts empty,
+  // is; a fresh session (no initialSession, or /clear's restart with none) starts empty,
   // matching the conversation itself also starting empty.
   const inputHistoryRef = useRef<string[]>(initialSession?.inputHistory ?? []);
   const handleInputHistoryChange = useCallback((history: string[]) => {
@@ -162,6 +226,18 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
   // (see handleEscape below). Null the rest of the time, so an Escape press with nothing running
   // is a safe no-op rather than needing its own isThinking check.
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Bumped only by handleForceRecover (Ctrl+C) - lets a processTurn invocation that's still
+  // stuck in flight when the user force-recovers recognize, whenever it eventually does settle,
+  // that it's been abandoned and a newer turn already owns the visible UI state. Every provider
+  // and tool call already has a real timeout backstop (LocalProvider/AnthropicProvider: 5min,
+  // run_shell: 60s), so an abandoned call is never *eternally* stuck - just slower to give up
+  // than the user wants to wait - but it can still append late entries to AgentLoop's own entry
+  // log if the user has already started a new turn by the time it finally settles. Known,
+  // accepted, bounded limitation: AgentLoop was designed for one turn at a time, not real
+  // concurrent turns; a full fix would mean the loop itself tracking/rejecting overlapping calls,
+  // a bigger change than this recovery button needs to solve today.
+  const turnGenerationRef = useRef(0);
 
   // Non-null while /resume's picker is showing. `resolve` is the pending Promise's resolver
   // that processTurn is awaiting on - selecting or cancelling calls it, which is what lets
@@ -201,14 +277,16 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
   const [prefill, setPrefill] = useState<{ token: number; text: string } | undefined>(undefined);
 
   // Same pending-Promise-resolver pattern as resumePicker, generic to any yes/no confirmation
-  // (run_shell execution, write_file overwrite, /wipe). /wipe chains two of these in sequence by
+  // (run_shell execution, write_file overwrite). A caller can chain two of these in sequence by
   // calling askConfirm twice, awaiting each in turn - no special "double confirm" logic needed.
-  // `id` exists purely to be passed as <ConfirmDialog>'s `key` (below) - without it, /wipe's two
-  // sequential dialogs are the same component instance (no key change, same JSX type), so
-  // ConfirmDialog's own internal `selected` state can carry over from the first dialog's "Yes"
-  // into the second instead of resetting to its documented "always defaults to No" - previously
-  // masked by exactly how React happened to batch the null-then-new setConfirmDialog calls
-  // across the intervening microtask, which changed on the React 19 upgrade.
+  // `id` exists purely to be passed as <ConfirmDialog>'s `key` (below) - without it, two sequential
+  // dialogs would be the same component instance (no key change, same JSX type), so
+  // ConfirmDialog's own internal `selected` state could carry over from the first dialog's "Yes"
+  // into the second instead of resetting to its documented "always defaults to No" - a real bug
+  // found via the now-removed /wipe command (which used to chain two confirmations), masked by
+  // exactly how React happened to batch the null-then-new setConfirmDialog calls across the
+  // intervening microtask, which changed on the React 19 upgrade. Kept even with no current
+  // sequential-confirm caller, since the underlying key-reuse bug applies to any future one too.
   const [confirmDialog, setConfirmDialog] = useState<{
     id: number;
     message: string;
@@ -217,29 +295,86 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
 
   const askConfirm = useCallback((message: string): Promise<boolean> => {
     return new Promise((resolve) => {
-      setConfirmDialog({ id: nextBlockId++, message, resolve });
+      setConfirmDialog({ id: nextDialogId++, message, resolve });
     });
   }, []);
 
+  // Real bug found via hands-on testing, 2026-09-26: switching to Auto mid-turn (Tab or /mode,
+  // while a long multi-tool-call turn was already running) kept confirming every remaining
+  // run_shell call in that turn instead of taking effect immediately. Root cause: `loop.run()`
+  // captures one `toolPolicy` function *reference* for the whole turn (every iteration's tool
+  // call awaits that same reference, per loop.ts), so a plain closure over `mode` only ever sees
+  // whatever `mode` was at the moment the turn started - a later `setMode` doesn't retroactively
+  // reach an already-passed closure. Refs sidestep this: the closure itself can stay the same,
+  // but reading `.current` on each call picks up whatever `setMode` most recently wrote,
+  // including mid-turn, since the ref is mutated directly in the render body below (not via
+  // useEffect - there's no external side effect to defer, just keeping a plain mutable cache in
+  // sync every render, the same pattern this file already uses for currentSessionIdRef/
+  // inputHistoryRef).
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const plansDirRef = useRef(plansDir);
+  plansDirRef.current = plansDir;
+
   // Passed into loop.run() as RunOptions.toolPolicy - the current mode decides whether a
-  // mutating tool call runs silently, needs a yes/no first (via the same ConfirmDialog /wipe
-  // uses), or is refused outright (Plan Mode).
+  // mutating tool call runs silently, needs a yes/no first (via the same generic ConfirmDialog
+  // above), or is refused outright (Plan/Plan-Write modes). Reads modeRef/plansDirRef (not the
+  // mode/plansDir variables directly) so a mode change takes effect on the very next tool call,
+  // even mid-turn - see the comment on those refs above for why that distinction matters.
   const toolPolicy = useCallback(
     async (tool: Tool, input: Record<string, unknown>): Promise<'allow' | 'deny'> => {
-      const access = classifyToolAccess(mode, tool);
+      const access = classifyToolAccess(modeRef.current, tool, input, plansDirRef.current);
       if (access === 'allow') return 'allow';
       if (access === 'deny') return 'deny';
       const ok = await askConfirm(`Allow ${tool.name}(${JSON.stringify(input)})?`);
       return ok ? 'allow' : 'deny';
     },
-    [mode, askConfirm],
+    [askConfirm],
   );
 
   const pushBlock = useCallback((lines: Line[]) => {
-    setHistory((h) => [...h, { id: nextBlockId++, lines }]);
+    dispatchTextWindow({ type: 'commit', lines });
   }, []);
 
-  // Tab cycles through the 4 modes in order, in addition to (not instead of) /mode's picker - a
+  // Ctrl+C: force-recover, not exit - revised per direct instruction 2026-09-26 ("I do not want
+  // to exit the app just stop background processing, and get the text entry window working again
+  // after a fail"). An earlier version of this called process.exit() directly; reverted before it
+  // shipped. This is the real gap Escape alone doesn't cover: Escape (handleEscape, below) only
+  // ever *asks* the in-flight call to stop via its AbortController, which does nothing if that
+  // signal never reaches whatever's actually stuck (every provider and run_shell already have
+  // their own real timeout backstops - LocalProvider/AnthropicProvider: 5min, run_shell: 60s - so
+  // this is a "faster than waiting out the timeout" button, not the only way out). Ctrl+C instead
+  // unconditionally resets the visible UI state right away - the abort is still attempted
+  // (best-effort, same as Escape), but the input box becomes usable again immediately regardless
+  // of whether that abort actually lands. Bumps turnGenerationRef so a still-stuck call that
+  // eventually does settle later recognizes it's stale (see that ref's own comment above) instead
+  // of clobbering whatever's happened since. Checked in this same always-active hook (not buried
+  // in InputBox) so it fires no matter what has focus - a picker, a confirm dialog, or an
+  // unresponsive turn.
+  const handleForceRecover = useCallback(() => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    turnGenerationRef.current += 1;
+    queuedInputsRef.current = [];
+    setQueuedPreview([]);
+    dispatchTextWindow({ type: 'clearLive' });
+    setIsThinking(false);
+    setIsProcessing(false);
+    pushBlock([
+      { kind: 'system', text: 'Stopped (Ctrl+C) - background processing cancelled, input is available again.' },
+    ]);
+  }, [pushBlock]);
+
+  useInput(
+    (input, key) => {
+      if (key.ctrl && input === 'c') {
+        handleForceRecover();
+      }
+    },
+    { isActive: true },
+  );
+
+  // Tab cycles through the 5 modes in order, in addition to (not instead of) /mode's picker - a
   // quick keyboard-only path for the same switch. Originally plain Tab only, not Shift+Tab:
   // without the Kitty keyboard protocol, Windows Terminal sends the identical byte (0x09) for
   // both, with no way to tell them apart (confirmed with a raw-input probe - ConPTY only
@@ -296,34 +431,25 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
             pushBlock([{ kind: 'system', text: 'Resume cancelled.' }]);
           }
         }
-      } else if (input === '/wipe') {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
-        if (!currentSessionIdRef.current) {
-          pushBlock([{ kind: 'system', text: 'Nothing to wipe - no session has been saved yet.' }]);
-        } else {
-          const firstOk = await askConfirm(
-            'This will permanently delete this session and remove it from /resume. This cannot be undone. Continue?',
-          );
-          if (!firstOk) {
-            pushBlock([{ kind: 'system', text: 'Wipe cancelled.' }]);
-          } else {
-            const secondOk = await askConfirm(
-              'Are you absolutely sure? This is the last chance to cancel.',
-            );
-            if (!secondOk) {
-              pushBlock([{ kind: 'system', text: 'Wipe cancelled.' }]);
-            } else {
-              await sessionStore.delete(currentSessionIdRef.current);
-              restart();
-              setTimeout(() => exit(), 0);
-            }
-          }
-        }
       } else if (input === '/context' || input === '/ctx') {
         const usage = loop.getUsage();
         const totalTokens = usage.inputTokens + usage.outputTokens;
+        const visible = loop.getVisibleTokenEstimate();
+        // The fill graph - only when contextWindow is known (config.json's opt-in key, per
+        // StatusBar's own reasoning: no per-model max-context registry exists yet, so this
+        // never guesses a number). estimateTokens() is a chars/4 heuristic (contextEntry.ts),
+        // not exact - labeled "estimated" rather than presented as a hard count.
+        const graphLines = contextWindow
+          ? [
+              `  Context window: ${formatTokenCount(visible)} / ${formatTokenCount(contextWindow)} estimated (${Math.round(
+                (visible / contextWindow) * 100,
+              )}%)`,
+              `  ${renderProgressBar(visible / contextWindow, 30)}`,
+            ]
+          : [`  Context window: ${formatTokenCount(visible)} estimated (max unknown - set "contextWindow" in config.json to see %)`];
         const text = [
           'Session usage (local only, no LLM call):',
+          ...graphLines,
           `  Requests sent: ${usage.requestCount}`,
           `  Input tokens:  ${usage.inputTokens}`,
           `  Output tokens: ${usage.outputTokens}`,
@@ -416,6 +542,42 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
         }
+      } else if (input === '/help') {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const lines = COMMANDS.map(
+          (c) => `${c.name}${c.aliases?.length ? ` (${c.aliases.join(', ')})` : ''} — ${c.description}`,
+        );
+        pushBlock([
+          {
+            kind: 'system',
+            text: [
+              'Available commands:',
+              ...lines,
+              '',
+              'Use /help-<command> for more detail on one, e.g. /help-mode.',
+            ].join('\n'),
+          },
+        ]);
+        void runLogger.log({ type: 'system', sub_type: 'info', command: '/help' });
+      } else if (commandName(input).startsWith('/help-')) {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const rest = commandName(input).slice('/help-'.length);
+        const target = commandForHelpTarget(rest);
+        if (!target) {
+          pushBlock([{ kind: 'error', text: `No such command: /${rest}. Try /help for the full list.` }]);
+        } else {
+          const detailLines = [`${target.name}${target.aliases?.length ? ` (${target.aliases.join(', ')})` : ''} — ${target.description}`];
+          // /help-mode's actual point (per direct instruction) - explain what each of the five
+          // modes does, not just repeat /mode's own one-line summary. MODES is the single source
+          // of truth (modePolicy.ts) both /mode's picker and this reuse the same way, so this
+          // can't drift from what /mode itself actually shows.
+          if (target.name === '/mode') {
+            detailLines.push('', 'Modes:');
+            for (const m of MODES) detailLines.push(`  ${m.label} — ${m.description}`);
+          }
+          pushBlock([{ kind: 'system', text: detailLines.join('\n') }]);
+          void runLogger.log({ type: 'system', sub_type: 'info', command: `/help-${rest}` });
+        }
       } else if (looksLikeSlashCommand(input) && !KNOWN_COMMANDS.includes(commandName(input))) {
         pushBlock([
           { kind: 'user', text: `> ${input}` },
@@ -430,19 +592,24 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
 
         const responseLines: Line[] = [];
-        setLiveLines([]);
+        dispatchTextWindow({ type: 'clearLive' });
         setIsThinking(true);
         let toolEventCount = 0;
         let summaryLine: Line | undefined;
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
+        // Captured now, checked after the await settles (whenever that is) - see
+        // turnGenerationRef's own comment above for why this exists.
+        const myGeneration = turnGenerationRef.current;
 
         try {
           const finalAnswer = await loop.run(input, {
             images: initialImage ? [initialImage] : undefined,
             toolPolicy,
+            modeInstruction: modeSystemPrompt(mode, plansDir),
             signal: controller.signal,
+            contextWindow,
             onEvent: (event: AgentEvent) => {
               // The full, untruncated event always goes to the run log, regardless of what (or
               // whether) anything gets displayed - fire-and-forget, a logging failure shouldn't
@@ -461,18 +628,23 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
                   summaryLine = { kind: 'system', text };
                   responseLines.push(summaryLine);
                 }
-                setLiveLines((prev) => [...prev.filter((l) => !l.startsWith('[scan] ')), text]);
+                dispatchTextWindow({ type: 'updateScanSummary', text });
                 return;
               }
 
               const text = formatEvent(event);
               if (!text) return;
-              setLiveLines((prev) => [...prev, text]);
+              dispatchTextWindow({ type: 'appendLive', text });
               // Intermediate narration ("text" events) is shown live only - the
               // final answer is committed separately below, exactly once, avoiding
               // the duplicate-display bug this used to have.
               if (event.type === 'tool_call' || event.type === 'tool_result') {
                 responseLines.push({ kind: event.type, text });
+              } else if (event.type === 'compaction') {
+                // Rare and worth a permanent record, unlike plain "text" narration - a user
+                // scrolling back should be able to see exactly when/why older history vanished
+                // from what the model sees.
+                responseLines.push({ kind: 'system', text });
               }
             },
           });
@@ -489,26 +661,58 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
             responseLines.push({ kind: 'error', text: formatError(err) });
           }
         } finally {
-          abortControllerRef.current = null;
-          if (responseLines.length > 0) pushBlock(responseLines);
-          setLiveLines([]);
-          setIsThinking(false);
+          // Whenever this call actually settles: if the generation has moved on (the user
+          // force-recovered via Ctrl+C, and possibly already started a newer turn), this
+          // invocation is stale - abandoned, not cancelled, since whatever it was stuck on may
+          // never have honored the abort signal. Skip every visible-state mutation below (a
+          // newer generation already owns isThinking/isProcessing/liveLines/scrollback, and
+          // clobbering them with a late result would be actively wrong, not just redundant) -
+          // but still let the entries this call already produced get persisted (below), since
+          // that data is real and there's no reason to throw it away.
+          const stale = turnGenerationRef.current !== myGeneration;
+          if (abortControllerRef.current === controller) abortControllerRef.current = null;
+          if (!stale) {
+            if (responseLines.length > 0) pushBlock(responseLines);
+            dispatchTextWindow({ type: 'clearLive' });
+            setIsThinking(false);
+          }
+
+          // The [scan] collapse itself is a real event worth finding later (e.g. "how often does
+          // this project's turns get big enough to truncate the display"), not just the raw
+          // tool_call/tool_result events it collapsed - those are already logged individually,
+          // unconditionally, above. Logged once per turn (not once per collapsed event, which
+          // would just be noise) using the same {type, sub_type} shape /help's own invocation
+          // logging already established, so this is ready to backfill into §7's infinite-context
+          // store under the same taxonomy once that plugin exists.
+          if (toolEventCount > MAX_VISIBLE_TOOL_EVENTS_PER_TURN) {
+            void runLogger.log({
+              type: 'system',
+              sub_type: 'info',
+              tag: 'scan-collapse',
+              collapsedCount: toolEventCount - MAX_VISIBLE_TOOL_EVENTS_PER_TURN,
+              toolEventTotal: toolEventCount,
+            });
+          }
 
           // Autosave after every completed turn, success or error - even a failed turn already
           // pushed the user's message into loop's history (AgentLoop.run pushes it before calling
           // the provider), so it's worth persisting rather than losing on a crash or network error.
-          const messages = loop.getMessages();
-          if (messages.length > 0) {
+          // Proceeds even when stale (see above) - the data's real regardless of whether anyone's
+          // still watching for it.
+          const entries = loop.getEntries();
+          if (entries.length > 0) {
             try {
               currentSessionIdRef.current = await sessionStore.save(
-                messages,
+                entries,
                 currentSessionIdRef.current,
                 inputHistoryRef.current,
               );
             } catch (saveErr) {
-              pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
+              if (!stale) pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
             }
           }
+
+          if (stale) return;
         }
       }
 
@@ -520,7 +724,7 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy],
+    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir],
   );
 
   const handleModePickerSelect = useCallback(
@@ -707,22 +911,31 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
 
   return (
     <Box flexDirection="column">
-      <Static items={history}>
+      <Static items={textWindow.blocks as TextBlock[]}>
         {(block) => (
           <Box key={block.id} flexDirection="column" marginBottom={1}>
             {block.lines.map((line, i) => (
-              <LineText key={i} line={line} />
+              <React.Fragment key={i}>
+                <LineText line={line} />
+                {/* A blank row after every tool_call/tool_result line, per direct instruction -
+                    otherwise a turn with several tool calls renders as one dense, hard-to-scan
+                    block with no visual boundary between "here's the call" and "here's what it
+                    returned." */}
+                {(line.kind === 'tool_call' || line.kind === 'tool_result') && <Text> </Text>}
+              </React.Fragment>
             ))}
           </Box>
         )}
       </Static>
       {isThinking &&
-        liveLines.map((line, i) => (
-          <Text key={i} dimColor>
-            {line}
-          </Text>
+        textWindow.live.map((line, i) => (
+          <React.Fragment key={i}>
+            <Text color={theme.border}>{line}</Text>
+            <Text> </Text>
+          </React.Fragment>
         ))}
       {isThinking && <Spinner />}
+      <StatusBar loop={loop} model={model} contextWindow={contextWindow} />
       <InputBox
         disabled={isProcessing}
         active={!confirmDialog && !resumePicker && !modePicker && !setPicker && !configPicker}
@@ -738,8 +951,14 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
       <Text color={modeInfo(mode).color}>
         Mode: {modeInfo(mode).label}  (/mode or Tab to change)
       </Text>
+      <Text color={theme.border}>Esc interrupt · type to queue · Ctrl+C reset</Text>
       {confirmDialog ? (
-        <ConfirmDialog key={confirmDialog.id} message={confirmDialog.message} onResolve={handleConfirmResolve} />
+        <ConfirmDialog
+          key={confirmDialog.id}
+          message={confirmDialog.message}
+          onResolve={handleConfirmResolve}
+          onEscape={handleEscape}
+        />
       ) : resumePicker ? (
         <SessionPicker
           sessions={resumePicker.sessions}
@@ -780,7 +999,7 @@ export function App({ loop, initialImage, sessionStore, runLogger, initialSessio
         <CommandPalette commands={paletteMatches} onSelect={handlePaletteSelect} onCancel={handlePaletteCancel} />
       ) : null}
       {queuedPreview.map((q, i) => (
-        <Text key={i} dimColor>
+        <Text key={i} color={theme.border}>
           Queued #{i + 1}: {q}
         </Text>
       ))}

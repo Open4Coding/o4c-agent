@@ -11,6 +11,7 @@ import { MockProvider } from '../providers/mock.js';
 import { defaultTools } from '../tools/index.js';
 import { SessionStore } from '../session/sessionStore.js';
 import { RunLogger } from '../session/runLog.js';
+import { userInputEntry, aiResponseEntry, toWireMessages } from '../agent/contextEntry.js';
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 
 // Simulates a turn that never comes back (a hung/runaway local-model generation) so tests can
@@ -35,6 +36,19 @@ class AbortAwareHangingProvider implements LLMProvider {
         reject(new Error('simulated in-flight cancellation')),
       );
     });
+  }
+}
+
+// Ignores any abort signal entirely and just resolves normally after a fixed delay - simulates
+// the exact case Escape/Ctrl+C's abort attempt can't help with (whatever's stuck never actually
+// checks the signal), used to prove the turnGenerationRef guard: an abandoned call settling late
+// must never clobber a newer generation's visible state.
+class DelayedAnswerProvider implements LLMProvider {
+  readonly name = 'delayed-test';
+  constructor(private delayMs: number) {}
+  async complete(_request: CompletionRequest): Promise<CompletionResponse> {
+    await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    return { content: 'stale answer, arrived too late', toolCalls: [], stopReason: 'end_turn' };
   }
 }
 
@@ -78,6 +92,67 @@ class WriteFileProvider implements LLMProvider {
       };
     }
     return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
+// Calls write_file twice, sequentially, across two separate provider responses (not two calls in
+// one response) - lets a test switch mode in the gap between them, simulating a real mid-turn
+// mode change during a long multi-iteration turn.
+class TwoWriteFileProvider implements LLMProvider {
+  readonly name = 'two-write-file-test';
+  private step = 0;
+  constructor(private path1: string, private path2: string) {}
+  async complete(_request: CompletionRequest): Promise<CompletionResponse> {
+    if (this.step === 0) {
+      this.step = 1;
+      return {
+        content: '',
+        toolCalls: [{ id: 'w1', name: 'write_file', input: { path: this.path1, content: 'first' } }],
+        stopReason: 'tool_use',
+      };
+    }
+    if (this.step === 1) {
+      this.step = 2;
+      return {
+        content: '',
+        toolCalls: [{ id: 'w2', name: 'write_file', input: { path: this.path2, content: 'second' } }],
+        stopReason: 'tool_use',
+      };
+    }
+    return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
+// Captures the systemPrompt actually sent on the most recent request, then ends the turn - lets a
+// test verify modeInstruction really reaches the provider through App.tsx's real wiring, not just
+// AgentLoop's own unit tests (loop.test.ts already covers the string-concatenation logic itself).
+class RecordingProvider implements LLMProvider {
+  readonly name = 'recording';
+  lastSystemPrompt = '';
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    this.lastSystemPrompt = request.systemPrompt;
+    return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
+// Returns a <think> block plus a tool call first, then the final answer (no think) on the second
+// response - the real await on tool execution in between (loop.ts) gives React/Ink an actual
+// yield point to commit the intermediate "[think] .../[tool] ..." live frame before the turn
+// finishes, unlike a single-response think+answer turn where both onEvent calls fire
+// back-to-back with nothing async between them to force a separate render commit.
+class ThinkingWithToolProvider implements LLMProvider {
+  readonly name = 'thinking-tool-test';
+  private step = 0;
+  async complete(_request: CompletionRequest): Promise<CompletionResponse> {
+    if (this.step === 0) {
+      this.step = 1;
+      return {
+        content: '<think>let me check the file first</think>',
+        toolCalls: [{ id: 't1', name: 'read_file', input: { path: 'x' } }],
+        stopReason: 'tool_use',
+      };
+    }
+    return { content: 'The answer is 4.', toolCalls: [], stopReason: 'end_turn' };
   }
 }
 
@@ -175,11 +250,15 @@ async function setup(opts: {
   // As if this process had been launched via `--resume <id>` (a /resume restart handoff) -
   // see the "launched with an initial session" test below for what this actually covers.
   initialSession?: { id: string; title: string; messages: Message[] };
+  // Only relevant to Plan-Write mode tests - scopes its write_file exception to
+  // `<projectRoot>/.o4c/plans/`. Omitted (as every non-Plan-Write test does) means Plan-Write
+  // behaves exactly like plain Plan (see modePolicy.ts's plansDirFor(undefined) fallback).
+  projectRoot?: string;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
   const loop = new AgentLoop(opts.provider ?? new MockProvider(), defaultTools, 'test system prompt');
-  // /clear, /wipe and /resume now hand off to a brand-new process instead of resetting state
+  // /clear and /resume now hand off to a brand-new process instead of resetting state
   // in-place (see AppProps.restart's doc comment) - nothing to actually spawn in a test, so this
   // just records what App asked for.
   const restartCalls: Array<string | undefined> = [];
@@ -193,6 +272,8 @@ async function setup(opts: {
       runLogger,
       initialSession: opts.initialSession,
       restart,
+      projectRoot: opts.projectRoot,
+      model: 'test-model',
     }),
   );
   liveInstances.push(instance);
@@ -272,20 +353,76 @@ test('a turn with many tool calls collapses the display past the cap, but logs e
 
     const logPath = runLogger.getFilePath();
     assert.ok(logPath);
-    // Poll for all 31 lines to actually be on disk, not just read once - runLogger.log() is
+    // Poll for all 32 lines to actually be on disk, not just read once - runLogger.log() is
     // fire-and-forget (App.tsx never awaits it), so the UI showing "done scanning" only means
     // the last event's *render* committed, not that its log write has necessarily landed yet.
     let lines: string[] = [];
     await waitFor(async () => {
       const raw = await readFile(logPath as string, 'utf-8');
       lines = raw.trim().split('\n');
-      return lines.length >= 31;
+      return lines.length >= 32;
     });
     // 15 rounds x (tool_call + tool_result) = 30, plus 1 final "text" event carrying the
-    // answer = 31 logged events, all of them - the cap only affects what's displayed, never
-    // what's logged.
-    assert.equal(lines.length, 31);
+    // answer = 31 raw AgentEvents, all of them logged regardless of what got collapsed on
+    // screen - the cap only affects what's displayed, never what's logged. Plus 1 more: the
+    // [scan] collapse itself is now also a distinct, findable log entry (not just implicit in
+    // the raw event count), logged once per turn, not once per collapsed event.
+    assert.equal(lines.length, 32);
     assert.ok(lines.every((l) => JSON.parse(l).ts));
+
+    const parsed = lines.map((l) => JSON.parse(l));
+    const scanEntry = parsed.find((e) => e.tag === 'scan-collapse');
+    assert.ok(scanEntry);
+    assert.equal(scanEntry.type, 'system');
+    assert.equal(scanEntry.sub_type, 'info');
+    // 15 rounds x 2 events (tool_call + tool_result) = 30 tool events total, cap is 10, so 20 over.
+    assert.equal(scanEntry.collapsedCount, 20);
+    assert.equal(scanEntry.toolEventTotal, 30);
+  });
+});
+
+test('a <think> block shows live as [think], is logged as its own event, and never leaks into the final answer', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop, runLogger } = await setup({ dir, provider: new ThinkingWithToolProvider() });
+
+    await submit(stdin, 'what is 2+2?');
+    await waitFor(() => anyFrameIncludes(frames, 'The answer is 4.'));
+
+    assert.ok(anyFrameIncludes(frames, '[think] let me check the file first'));
+    // The final answer committed to permanent scrollback must be the clean text only - no raw
+    // <think> tags leaking through anywhere.
+    assert.ok(anyFrameIncludes(frames, 'The answer is 4.'));
+    assert.ok(!anyFrameIncludes(frames, '<think>'));
+
+    // Only type/sub_type checked for the tool-call/result pair - their exact content (the
+    // read_file error text for a nonexistent path) isn't what this test is about. The 3rd entry
+    // is the empty-content `response` AgentLoop.run() still logs for the first (tool-use)
+    // provider call, same as any tool-call-only turn - see contextEntry.test.ts's own coverage
+    // of that.
+    assert.deepEqual(
+      loop.getEntries().map((e) => ({ type: e.type, sub_type: e.sub_type })),
+      [
+        { type: 'user', sub_type: 'input' },
+        { type: 'ai', sub_type: 'think' },
+        { type: 'ai', sub_type: 'response' },
+        { type: 'ai', sub_type: 'toolcall' },
+        { type: 'ai', sub_type: 'toolcallresponse' },
+        { type: 'ai', sub_type: 'response' },
+      ],
+    );
+    assert.equal(loop.getEntries()[1].content, 'let me check the file first');
+    assert.equal(loop.getEntries()[5].content, 'The answer is 4.');
+
+    const logPath = runLogger.getFilePath();
+    assert.ok(logPath);
+    let lines: string[] = [];
+    await waitFor(async () => {
+      lines = (await readFile(logPath as string, 'utf-8')).trim().split('\n');
+      return lines.length >= 4;
+    });
+    const events = lines.map((l) => JSON.parse(l).event);
+    assert.ok(events.some((e) => e.type === 'think' && e.text === 'let me check the file first'));
+    assert.ok(events.some((e) => e.type === 'text' && e.text === 'The answer is 4.'));
   });
 });
 
@@ -297,11 +434,11 @@ test('typing "/" opens a command palette listing every command, alphabetically a
     await tick(50);
 
     assert.ok(anyFrameIncludes(frames, '/clear'));
-    assert.ok(anyFrameIncludes(frames, '/wipe'));
-    // /clear must appear before /wipe in the same frame - alphabetical order.
-    const frame = frames.find((f) => f.includes('/clear') && f.includes('/wipe'));
+    assert.ok(anyFrameIncludes(frames, '/resume'));
+    // /clear must appear before /resume in the same frame - alphabetical order.
+    const frame = frames.find((f) => f.includes('/clear') && f.includes('/resume'));
     assert.ok(frame);
-    assert.ok(frame.indexOf('/clear') < frame.indexOf('/wipe'));
+    assert.ok(frame.indexOf('/clear') < frame.indexOf('/resume'));
   });
 });
 
@@ -316,12 +453,15 @@ test('the command palette narrows as more is typed', async () => {
     // narrowing the palette costs one extra render cycle after the keystroke - waitFor polls
     // until that's actually settled instead of gambling on a fixed delay.
     await type(stdin, '/c');
-    await waitFor(() => !(lastFrame() ?? '').includes('/wipe'));
+    // Not "/mode" - App.tsx's always-visible "Mode: Manual (/mode or Tab to change)" status line
+    // contains that substring regardless of the palette, so it would never disappear. "/set" has
+    // no such collision anywhere else on screen.
+    await waitFor(() => !(lastFrame() ?? '').includes('/set'));
 
     const frame = lastFrame() ?? '';
     assert.ok(frame.includes('/clear'));
     assert.ok(frame.includes('/context'));
-    assert.equal(frame.includes('/wipe'), false);
+    assert.equal(frame.includes('/set'), false);
     // A bare substring check for "/resume" would false-positive here - /clear's own
     // description literally says "...still resumable via /resume)." Check for the actual
     // list-entry pattern (name immediately followed by the palette's " — " separator) instead.
@@ -388,17 +528,13 @@ test('Escape dismisses the command palette without submitting, and typing again 
   });
 });
 
-test('/debug and /help no longer exist - both are treated as unknown commands', async () => {
+test('/debug no longer exists - treated as an unknown command', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/debug');
     await tick(50);
     assert.ok(anyFrameIncludes(frames, 'Unknown command: /debug'));
-
-    await submit(stdin, '/help');
-    await tick(50);
-    assert.ok(anyFrameIncludes(frames, 'Unknown command: /help'));
   });
 });
 
@@ -495,6 +631,71 @@ test('/keyboardcommands <bogus> shows a usage error instead of guessing an OS', 
   });
 });
 
+test('/help lists every command with its description, and logs itself under [info]', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop, runLogger } = await setup({ dir });
+
+    await submit(stdin, '/help');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'Available commands:'));
+    assert.ok(anyFrameIncludes(frames, '/mode'));
+    assert.ok(anyFrameIncludes(frames, '/keyboardcommands'));
+    assert.ok(anyFrameIncludes(frames, 'Use /help-<command> for more detail'));
+    assert.equal(loop.getMessages().length, 0);
+    assert.equal(loop.getUsage().requestCount, 0);
+
+    const logPath = runLogger.getFilePath();
+    assert.ok(logPath);
+    let lines: string[] = [];
+    await waitFor(async () => {
+      lines = (await readFile(logPath as string, 'utf-8')).trim().split('\n');
+      return lines.length >= 1;
+    });
+    const parsed = lines.map((l) => JSON.parse(l));
+    assert.ok(parsed.some((e) => e.type === 'system' && e.sub_type === 'info' && e.command === '/help'));
+  });
+});
+
+test('/help-mode explains what /mode does and breaks down all five modes', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop } = await setup({ dir });
+
+    await submit(stdin, '/help-mode');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, '/mode —'));
+    assert.ok(anyFrameIncludes(frames, 'Modes:'));
+    assert.ok(anyFrameIncludes(frames, 'Manual —'));
+    assert.ok(anyFrameIncludes(frames, 'Plan-Write —'));
+    assert.equal(loop.getMessages().length, 0);
+  });
+});
+
+test('/help-<hidden command> still works by exact name, e.g. /help-set-sessionname', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir });
+
+    await submit(stdin, '/help-set-sessionname');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, '/set-sessionname —'));
+    assert.ok(anyFrameIncludes(frames, 'Rename the current session'));
+  });
+});
+
+test('/help-<unknown> shows an error instead of a blank or crashed response', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir });
+
+    await submit(stdin, '/help-bogus');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'No such command: /bogus'));
+    assert.ok(anyFrameIncludes(frames, 'Try /help for the full list'));
+  });
+});
+
 test('a real turn autosaves the session, and /clear hands off to a restart with no resumeId', async () => {
   await withTempDir(async (dir) => {
     const { stdin, store, restartCalls } = await setup({ dir });
@@ -535,9 +736,9 @@ test('/resume shows a picker; Enter on the default (newest) selection hands off 
   await withTempDir(async (dir) => {
     // Seed two sessions directly via the store, independent of the running App instance.
     const seedStore = new SessionStore(dir);
-    const olderId = await seedStore.save([{ role: 'user', content: 'older session' }]);
+    const olderId = await seedStore.save([userInputEntry('older session')]);
     await tick(100); // ensure a distinct updatedAt so ordering is unambiguous
-    const newerId = await seedStore.save([{ role: 'user', content: 'newer session' }]);
+    const newerId = await seedStore.save([userInputEntry('newer session')]);
 
     const { stdin, frames, restartCalls } = await setup({ dir });
 
@@ -561,15 +762,15 @@ test('launched with an initialSession (as a /resume restart handoff would be), t
   await withTempDir(async (dir) => {
     const seedStore = new SessionStore(dir);
     const id = await seedStore.save([
-      { role: 'user', content: 'what does this project do' },
-      { role: 'assistant', content: 'it is a CLI coding harness' },
+      userInputEntry('what does this project do'),
+      aiResponseEntry('it is a CLI coding harness'),
     ]);
     const data = await seedStore.load(id);
     assert.ok(data);
 
     const { stdin, frames, loop, store } = await setup({
       dir,
-      initialSession: { id: data!.id, title: data!.title, messages: data!.messages },
+      initialSession: { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries) },
     });
 
     assert.deepEqual(loop.getMessages(), []); // loadMessages() happens in cli.ts, before App mounts
@@ -594,7 +795,7 @@ test('a /resume restart handoff also restores the resumed session\'s own submit-
   await withTempDir(async (dir) => {
     const seedStore = new SessionStore(dir);
     const id = await seedStore.save(
-      [{ role: 'user', content: 'what does this project do' }],
+      [userInputEntry('what does this project do')],
       undefined,
       ['old draft one', 'old draft two'],
     );
@@ -606,7 +807,7 @@ test('a /resume restart handoff also restores the resumed session\'s own submit-
       initialSession: {
         id: data!.id,
         title: data!.title,
-        messages: data!.messages,
+        messages: toWireMessages(data!.entries),
         inputHistory: data!.inputHistory,
       },
     });
@@ -634,9 +835,9 @@ test('a /resume restart handoff also restores the resumed session\'s own submit-
 test('/resume: pressing Down before Enter selects the older (second) entry instead of the default newest', async () => {
   await withTempDir(async (dir) => {
     const seedStore = new SessionStore(dir);
-    const olderId = await seedStore.save([{ role: 'user', content: 'older session' }]);
+    const olderId = await seedStore.save([userInputEntry('older session')]);
     await tick(100);
-    await seedStore.save([{ role: 'user', content: 'newer session' }]);
+    await seedStore.save([userInputEntry('newer session')]);
 
     const { stdin, restartCalls } = await setup({ dir });
 
@@ -654,7 +855,7 @@ test('/resume: pressing Down before Enter selects the older (second) entry inste
 test('/resume: Escape cancels with no change and no session loaded', async () => {
   await withTempDir(async (dir) => {
     const seedStore = new SessionStore(dir);
-    await seedStore.save([{ role: 'user', content: 'a saved session' }]);
+    await seedStore.save([userInputEntry('a saved session')]);
 
     const { stdin, frames, loop } = await setup({ dir });
 
@@ -668,121 +869,7 @@ test('/resume: Escape cancels with no change and no session loaded', async () =>
   });
 });
 
-test('/wipe with no active session says there is nothing to wipe', async () => {
-  await withTempDir(async (dir) => {
-    const { stdin, frames } = await setup({ dir });
-
-    await submit(stdin, '/wipe');
-    await tick(50);
-
-    assert.ok(anyFrameIncludes(frames, 'Nothing to wipe'));
-  });
-});
-
-test('/wipe: answering No on the first confirmation cancels immediately, nothing deleted', async () => {
-  await withTempDir(async (dir) => {
-    const { stdin, frames, store } = await setup({ dir });
-
-    await submit(stdin, 'a message to create a session');
-    await tick(100);
-    const before = await store.readManifest();
-    assert.equal(before.length, 1);
-
-    await submit(stdin, '/wipe');
-    await tick(50);
-    stdin.write(ENTER); // default selection is "No"
-    await tick(50);
-
-    assert.ok(anyFrameIncludes(frames, 'Wipe cancelled'));
-    const after = await store.readManifest();
-    assert.equal(after.length, 1);
-  });
-});
-
-test('/wipe: Yes then No on the second confirmation still cancels, nothing deleted', async () => {
-  await withTempDir(async (dir) => {
-    const { stdin, frames, store, lastFrame } = await setup({ dir });
-
-    await submit(stdin, 'a message to create a session');
-    await tick(100);
-
-    await submit(stdin, '/wipe');
-    await waitFor(() => (lastFrame() ?? '').includes('> No')); // first dialog has mounted
-    // The dialog's content becoming visible and its own useInput actually finishing
-    // subscription are two different moments - see the arrow-key navigation test's comment.
-    await tick(150);
-    stdin.write(DOWN); // move to "Yes"
-    await waitFor(() => (lastFrame() ?? '').includes('> Yes'));
-    stdin.write(ENTER); // confirm first dialog as Yes
-    await waitFor(() => (lastFrame() ?? '').includes('> No')); // second dialog has mounted, defaults to No
-    stdin.write(ENTER); // second dialog still defaults to "No"
-    await waitFor(() => anyFrameIncludes(frames, 'Wipe cancelled'));
-
-    const after = await store.readManifest();
-    assert.equal(after.length, 1);
-  });
-});
-
-test('/wipe: Yes then Yes actually deletes the session from disk, then hands off to a restart with no resumeId', async () => {
-  await withTempDir(async (dir) => {
-    const { stdin, store, restartCalls, lastFrame } = await setup({ dir });
-
-    await submit(stdin, 'a message to create a session');
-    let before: Awaited<ReturnType<typeof store.readManifest>> = [];
-    await waitFor(async () => {
-      before = await store.readManifest();
-      return before.length > 0;
-    });
-    const id = before[0].id;
-
-    await submit(stdin, '/wipe');
-    await waitFor(() => (lastFrame() ?? '').includes('> No')); // first dialog has mounted
-    // The dialog's content becoming visible and its own useInput actually finishing
-    // subscription are two different moments (the same "effect registers asynchronously after
-    // render" gap InputBox's own tests already account for) - a fixed buffer here, not another
-    // waitFor, since there's no visible signal for "input-ready" to poll on.
-    await tick(150);
-    stdin.write(DOWN);
-    // Poll for the DOWN to actually land (selection marker moved onto Yes) rather than a fixed
-    // delay before ENTER - same React 19 + Ink 7 settle-time reasoning as the arrow-key
-    // navigation test above.
-    await waitFor(() => (lastFrame() ?? '').includes('> Yes'));
-    stdin.write(ENTER); // first: Yes
-    await waitFor(() => (lastFrame() ?? '').includes('> No')); // second dialog has mounted
-    await tick(150);
-    stdin.write(DOWN);
-    await waitFor(() => (lastFrame() ?? '').includes('> Yes'));
-    stdin.write(ENTER); // second: Yes
-    await waitFor(() => restartCalls.length > 0);
-
-    // The freshly spawned process starts blank (no resumeId), so it can't resurrect the just-
-    // deleted session.
-    assert.deepEqual(restartCalls, [undefined]);
-    const after = await store.readManifest();
-    assert.equal(after.some((m) => m.id === id), false);
-    assert.equal(await store.load(id), undefined);
-  });
-});
-
-test('/wipe: Escape on the first confirmation cancels the same as answering No', async () => {
-  await withTempDir(async (dir) => {
-    const { stdin, frames, store } = await setup({ dir });
-
-    await submit(stdin, 'a message to create a session');
-    await tick(100);
-
-    await submit(stdin, '/wipe');
-    await tick(50);
-    stdin.write(ESCAPE);
-    await tick(50);
-
-    assert.ok(anyFrameIncludes(frames, 'Wipe cancelled'));
-    const after = await store.readManifest();
-    assert.equal(after.length, 1);
-  });
-});
-
-test('/mode opens a picker listing all four modes', async () => {
+test('/mode opens a picker listing all five modes', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames } = await setup({ dir });
 
@@ -793,6 +880,7 @@ test('/mode opens a picker listing all four modes', async () => {
     assert.ok(anyFrameIncludes(frames, 'Auto'));
     assert.ok(anyFrameIncludes(frames, 'Accept Edits'));
     assert.ok(anyFrameIncludes(frames, 'Plan'));
+    assert.ok(anyFrameIncludes(frames, 'Plan-Write'));
 
     // Cancel rather than leaving the picker's pending promise (and processTurn) dangling
     // unresolved after the test ends.
@@ -801,7 +889,53 @@ test('/mode opens a picker listing all four modes', async () => {
   });
 });
 
-test('Tab cycles through the four modes in order, independent of /mode', async () => {
+test('Ctrl+C force-recovers the UI (not exit) even when the stuck turn never actually settles', async () => {
+  await withTempDir(async (dir) => {
+    // Real bug reported 2026-09-26: a genuinely hung session had no way to be stopped from the
+    // keyboard at all (exitOnCtrlC: false + InputBox's own key.ctrl catch-all made Ctrl+C a
+    // complete no-op). Escape alone doesn't cover this case either - it only *asks* the in-flight
+    // call to abort, which does nothing if that signal never reaches whatever's actually stuck.
+    // HangingProvider's promise never settles at all, so this proves the recovery is real and
+    // unconditional - not just "the abort happened to work this time."
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new HangingProvider() });
+
+    await submit(stdin, 'this will hang forever');
+    await waitFor(() => (lastFrame() ?? '').includes('Thinking...'));
+
+    stdin.write('\u0003'); // Ctrl+C's raw byte
+    await tick(100);
+
+    assert.ok(anyFrameIncludes(frames, 'Stopped (Ctrl+C)'));
+    assert.ok(!(lastFrame() ?? '').includes('Thinking...'));
+
+    // Input must genuinely work again, not just look reset - submit a real new message and
+    // confirm a fresh turn actually starts (the input box isn't still disabled underneath).
+    const framesBeforeResubmit = frames.length;
+    await submit(stdin, 'are you responsive now');
+    await waitFor(() => frames.slice(framesBeforeResubmit).some((f) => f.includes('Thinking...')));
+  });
+});
+
+test('a stale, force-recovered turn that eventually settles anyway never shows its late answer', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new DelayedAnswerProvider(150) });
+
+    await submit(stdin, 'first message');
+    await waitFor(() => (lastFrame() ?? '').includes('Thinking...'));
+
+    stdin.write('\u0003');
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Stopped (Ctrl+C)'));
+
+    // Wait past the provider's own delay so the abandoned call actually settles in the
+    // background - its answer must never reach the screen, and it must not re-disable input.
+    await tick(300);
+    assert.ok(!anyFrameIncludes(frames, 'stale answer, arrived too late'));
+    assert.ok(!(lastFrame() ?? '').includes('Thinking...'));
+  });
+});
+
+test('Tab cycles through the five modes in order, independent of /mode', async () => {
   await withTempDir(async (dir) => {
     const { stdin, lastFrame } = await setup({ dir });
 
@@ -815,6 +949,9 @@ test('Tab cycles through the four modes in order, independent of /mode', async (
 
     stdin.write(TAB);
     await waitFor(() => (lastFrame() ?? '').includes('Mode: Plan'));
+
+    stdin.write(TAB);
+    await waitFor(() => (lastFrame() ?? '').includes('Mode: Plan-Write'));
 
     // Wraps back around to Manual after the last mode.
     stdin.write(TAB);
@@ -984,6 +1121,32 @@ test('Manual Mode (the default) prompts before write_file, and declining leaves 
   });
 });
 
+test('Escape on a write_file confirmation stops the whole turn, not just that one call - real bug 2026-09-26', async () => {
+  await withTempDir(async (dir) => {
+    // Real bug found via hands-on testing: Escape on a tool confirmation dialog only ever
+    // declined that one call (ConfirmDialog's own Escape-cancels-as-No behavior), never actually
+    // stopping the turn - so the model just tried again with its next write_file call, opening a
+    // second confirm dialog right behind it ("hitting Esc here just lets every other next window
+    // open"). TwoWriteFileProvider makes two sequential write_file calls across two provider
+    // rounds, so this proves the second one never even gets attempted.
+    const path1 = join(dir, 'first.txt');
+    const path2 = join(dir, 'second.txt');
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new TwoWriteFileProvider(path1, path2) });
+
+    await submit(stdin, 'write two files');
+    await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
+
+    stdin.write(ESCAPE);
+    await tick(150);
+
+    assert.ok(anyFrameIncludes(frames, 'Cancelled - your message is back in the input box'));
+    // The second confirm dialog must never appear - the whole turn stopped, not just call #1.
+    assert.ok(!anyFrameIncludes(frames, path2));
+    await assert.rejects(() => readFile(path1, 'utf-8'));
+    await assert.rejects(() => readFile(path2, 'utf-8'));
+  });
+});
+
 test('Manual Mode: confirming yes actually runs write_file', async () => {
   await withTempDir(async (dir) => {
     const targetPath = join(dir, 'manual-yes.txt');
@@ -1005,6 +1168,49 @@ test('Manual Mode: confirming yes actually runs write_file', async () => {
         return false;
       }
     });
+  });
+});
+
+test('switching to Auto mid-turn (Tab) takes effect on the very next tool call, not just the next turn', async () => {
+  // Real bug found via hands-on testing, 2026-09-26: in a long turn with several sequential tool
+  // calls, switching to Auto partway through kept confirming every remaining call anyway, as if
+  // still in Manual mode, until a brand-new turn was started. Root cause was a stale closure over
+  // `mode` inside toolPolicy - fixed via modeRef/plansDirRef in App.tsx. This test reproduces the
+  // exact scenario: two write_file calls in one turn, mode switched to Auto in the gap between
+  // them (while the first call's confirm dialog is still showing), and asserts the second call
+  // runs with no confirmation prompt at all.
+  await withTempDir(async (dir) => {
+    const path1 = join(dir, 'first.txt');
+    const path2 = join(dir, 'second.txt');
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new TwoWriteFileProvider(path1, path2) });
+
+    await submit(stdin, 'write two files');
+    // First write_file call: Manual mode (the default) confirms it, as always.
+    await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
+
+    // Switch to Auto while that confirm dialog is still pending - Tab's mode-cycle handler is
+    // always active regardless of what else is showing (App.tsx), so this is a real, reachable
+    // sequence, not a contrived one.
+    stdin.write(TAB);
+    await tick(100);
+    assert.ok(anyFrameIncludes(frames, 'Mode set to Auto'));
+
+    // Approve the already-pending first confirmation (it started under Manual, so it's still a
+    // real dialog) to let the turn continue into its second tool call.
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(ENTER);
+
+    // The second write_file call must now run with zero confirmation - before the fix, this
+    // would hang here waiting on a second "Allow write_file...?" dialog nothing ever answers.
+    await waitFor(async () => {
+      try {
+        return (await readFile(path2, 'utf-8')) === 'second';
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(await readFile(path1, 'utf-8'), 'first');
   });
 });
 
@@ -1030,6 +1236,104 @@ test('Plan Mode blocks a real write_file call end-to-end - the file is never cre
 
     assert.ok(anyFrameIncludes(frames, 'Blocked by the current mode'));
     await assert.rejects(() => readFile(targetPath, 'utf-8'));
+  });
+});
+
+test('Plan-Write mode allows write_file inside .o4c/plans/, end-to-end', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, '.o4c', 'plans', 'roadmap.md');
+    const { stdin, frames } = await setup({
+      dir,
+      provider: new WriteFileProvider(targetPath),
+      projectRoot: dir,
+    });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan -> Plan-Write
+    await tick(100);
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
+
+    await submit(stdin, 'please write the plan');
+    await tick(100);
+
+    assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
+  });
+});
+
+test('Plan-Write mode still blocks write_file outside .o4c/plans/, end-to-end', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, 'blocked.txt');
+    const { stdin, frames } = await setup({
+      dir,
+      provider: new WriteFileProvider(targetPath),
+      projectRoot: dir,
+    });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan -> Plan-Write
+    await tick(100);
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
+
+    await submit(stdin, 'please write the file');
+    await tick(100);
+
+    assert.ok(anyFrameIncludes(frames, 'Blocked by the current mode'));
+    await assert.rejects(() => readFile(targetPath, 'utf-8'));
+  });
+});
+
+test('the current mode is actually told to the model, not just enforced at the tool gate', async () => {
+  await withTempDir(async (dir) => {
+    const provider = new RecordingProvider();
+    const { stdin, frames } = await setup({ dir, provider, projectRoot: dir });
+
+    await submit(stdin, '/mode');
+    await tick(50);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan
+    await tick(100);
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Mode set to Plan'));
+
+    await submit(stdin, 'hello');
+    await tick(100);
+
+    assert.match(provider.lastSystemPrompt, /Current mode: Plan\./);
+    assert.match(provider.lastSystemPrompt, /write_file and run_shell are both hard-disabled/);
+
+    // Switching mode again changes the very next request's instruction too - proves this is
+    // computed fresh per-turn from live state, not captured once at mount.
+    stdin.write(TAB);
+    await tick(200);
+    assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
+
+    await submit(stdin, 'hello again');
+    await tick(100);
+
+    assert.match(provider.lastSystemPrompt, /Current mode: Plan-Write\./);
+    assert.ok(provider.lastSystemPrompt.includes(join(dir, '.o4c', 'plans')));
   });
 });
 

@@ -187,6 +187,47 @@ test('down arrow past the newest history entry restores the in-progress draft, n
   assert.deepEqual(submitted, ['submitted once', 'draft in progress']);
 });
 
+test('down arrow on a fresh draft (not browsing history) clears the box and stores the draft into history', async () => {
+  // Real bug found via hands-on testing, 2026-09-26: down-arrow while not already browsing
+  // history (nothing recalled via up-arrow yet) and already on the box's last line used to just
+  // do nothing - typed text got stuck with no way to clear it this way. Fixed to clear the box,
+  // but not silently: the cleared text is pushed into history first (same push + onHistoryChange
+  // call a real Enter-submit makes), so it's recallable later and reaches session persistence
+  // the same way a submission would, rather than being discarded.
+  const submitted: string[] = [];
+  const historySnapshots: string[][] = [];
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, {
+      onSubmit: (v) => submitted.push(v),
+      onHistoryChange: (h) => historySnapshots.push([...h]),
+    }),
+  );
+  await tick();
+
+  await type(stdin, 'an unsent draft');
+  await press(stdin, DOWN);
+
+  assert.equal(lastFrame()?.includes('an unsent draft'), false);
+  assert.deepEqual(historySnapshots, [['an unsent draft']]);
+
+  // Stored, not just cleared - recallable via up-arrow afterward like any other history entry.
+  await press(stdin, UP);
+  await press(stdin, ENTER);
+  assert.deepEqual(submitted, ['an unsent draft']);
+});
+
+test('down arrow on an already-empty box (not browsing history) is a harmless no-op', async () => {
+  const historySnapshots: string[][] = [];
+  const { stdin } = render(
+    React.createElement(InputBox, { onSubmit: () => {}, onHistoryChange: (h) => historySnapshots.push([...h]) }),
+  );
+  await tick();
+
+  await press(stdin, DOWN);
+
+  assert.deepEqual(historySnapshots, []);
+});
+
 test('Ctrl+A/E jump to the start/end of the buffer, Ctrl+U clears it entirely', async () => {
   const submitted: string[] = [];
   const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
@@ -505,7 +546,7 @@ test('a long pasted word repeated many times wraps at spaces in the rendered fra
   // whitespace-separated token on every line must be either empty or the whole word "motherfather"
   // - if it were still splitting mid-word, some token would be a bare fragment like "mot".
   for (const l of contentLines) {
-    const stripped = l.replace(/\x1B\[\d+m/g, '').replace(/^│/, '').replace(/│$/, '').trim();
+    const stripped = l.replace(/\x1B\[[\d;]+m/g, '').replace(/^│/, '').replace(/│$/, '').trim();
     const tokens = stripped.split(/\s+/).filter(Boolean);
     for (const token of tokens) {
       // '>' is the box's own prompt marker (line 0 only), not a word-wrap fragment.
@@ -690,7 +731,7 @@ test('the cursor cell renders on the content row, not spliced into the border be
   // Ink/chalk versions detect terminal color support differently in this test harness. What
   // this is actually checking is that nothing else (like the cursor's cell) got spliced into
   // the border row.
-  const borderLine = (lines[2] ?? '').replace(/\x1B\[\d+m/g, '');
+  const borderLine = (lines[2] ?? '').replace(/\x1B\[[\d;]+m/g, '');
   // The border row must be untouched box-drawing characters only - no inverse-video escape
   // code and no bare space breaking up the run of dashes.
   assert.equal(/^╰─+╯$/.test(borderLine), true);

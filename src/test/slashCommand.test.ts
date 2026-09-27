@@ -5,6 +5,7 @@ import {
   commandName,
   isComposingCommand,
   matchCommands,
+  commandForHelpTarget,
   KNOWN_COMMANDS,
   COMMANDS,
 } from '../ui/slashCommand.js';
@@ -33,15 +34,15 @@ test('commandName extracts just the /word, ignoring anything after whitespace', 
   assert.equal(commandName('/foo bar baz'), '/foo');
 });
 
-test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - no /help, no /debug', () => {
+test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is real now, /debug still is not', () => {
   assert.deepEqual(KNOWN_COMMANDS, [
     '/clear',
     '/resume',
-    '/wipe',
     '/context',
     '/ctx',
     '/keyboardcommands',
     '/mode',
+    '/help',
     '/exit',
     '/quit',
     '/set',
@@ -86,4 +87,14 @@ test('matchCommands never returns a hidden command, even when its own name is ty
 
 test('matchCommands returns nothing for a prefix no command matches', () => {
   assert.deepEqual(matchCommands('/zzz'), []);
+});
+
+test('commandForHelpTarget resolves a canonical name, an alias, and a hidden command by exact name', () => {
+  assert.equal(commandForHelpTarget('mode')?.name, '/mode');
+  assert.equal(commandForHelpTarget('ctx')?.name, '/context'); // alias
+  assert.equal(commandForHelpTarget('set-sessionname')?.name, '/set-sessionname'); // hidden
+});
+
+test('commandForHelpTarget returns undefined for a name nothing registers', () => {
+  assert.equal(commandForHelpTarget('bogus'), undefined);
 });

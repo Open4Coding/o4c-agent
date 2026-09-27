@@ -83,6 +83,29 @@ function mapStopReason(reason: string): StopReason {
 
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * Queries the server's own `/v1/models` for the id of whatever it actually has loaded - the
+ * `-m`/`--model` CLI value means nothing to `LocalProvider.complete()` (it never sends a `model`
+ * field at all, since llama-server only ever has one model loaded and doesn't need one), so
+ * without this, the status bar/`/context` display would show a meaningless default model name
+ * (e.g. the CLI's hardcoded Anthropic default) instead of what's actually being talked to.
+ * Best-effort: returns undefined on any failure (server down, non-OpenAI-compatible response,
+ * timeout) so a display-only lookup never blocks startup or crashes it.
+ */
+export async function fetchLocalModelId(baseUrl: string, apiKey?: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(`${baseUrl}/v1/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return undefined;
+    const data = (await response.json()) as { data?: Array<{ id?: string }> };
+    return data.data?.[0]?.id;
+  } catch {
+    return undefined;
+  }
+}
+
 export class LocalProvider implements LLMProvider {
   readonly name = 'local';
   private baseUrl: string;
@@ -92,7 +115,7 @@ export class LocalProvider implements LLMProvider {
   // server running without --api-key is unaffected either way. Env-var fallback only, no CLI
   // flag - matches ANTHROPIC_API_KEY's own convention, and keeps the key out of process.argv
   // (visible to anything that can list processes on the machine) and out of the args rebuilt by
-  // cli.ts's spawnRestart for /clear, /wipe, /resume - those already inherit the parent's full
+  // cli.ts's spawnRestart for /clear, /resume - those already inherit the parent's full
   // environment, so the env var survives a restart for free without needing to be threaded
   // through as an explicit arg.
   private apiKey: string | undefined;

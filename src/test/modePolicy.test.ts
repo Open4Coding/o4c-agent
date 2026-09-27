@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyToolAccess, modeInfo, MODES } from '../ui/modePolicy.js';
+import { classifyToolAccess, modeInfo, modeSystemPrompt, MODES } from '../ui/modePolicy.js';
 import type { Tool } from '../tools/types.js';
 
 function fakeTool(name: string, mutating: boolean): Tool {
@@ -45,6 +45,60 @@ test('plan mode blocks both write_file and run_shell outright', () => {
   assert.equal(classifyToolAccess('plan', runShell), 'deny');
 });
 
+test('planWrite mode blocks run_shell outright, like plan', () => {
+  assert.equal(classifyToolAccess('planWrite', runShell, {}, '/proj/.o4c/plans'), 'deny');
+});
+
+test('planWrite mode allows write_file only inside plansDir', () => {
+  const plansDir = '/proj/.o4c/plans';
+  assert.equal(
+    classifyToolAccess('planWrite', writeFile, { path: '/proj/.o4c/plans/roadmap.md' }, plansDir),
+    'allow',
+  );
+  assert.equal(
+    classifyToolAccess('planWrite', writeFile, { path: '/proj/.o4c/plans/sub/roadmap.md' }, plansDir),
+    'allow',
+  );
+  assert.equal(
+    classifyToolAccess('planWrite', writeFile, { path: '/proj/src/index.ts' }, plansDir),
+    'deny',
+  );
+  // A sibling directory that merely shares the "plans" prefix must not match via naive string
+  // prefixing - relative()/resolve() based scoping is exactly what rules this out.
+  assert.equal(
+    classifyToolAccess('planWrite', writeFile, { path: '/proj/.o4c/plans-archive/x.md' }, plansDir),
+    'deny',
+  );
+});
+
+test('planWrite mode denies all writes when plansDir is undefined (no trusted project)', () => {
+  assert.equal(classifyToolAccess('planWrite', writeFile, { path: '/anything.md' }, undefined), 'deny');
+});
+
+test('modeSystemPrompt gives every mode a distinct instruction naming itself', () => {
+  for (const { mode, label } of MODES) {
+    const text = modeSystemPrompt(mode, '/proj/.o4c/plans');
+    assert.match(text, new RegExp(`Current mode: ${label}`));
+  }
+});
+
+test('modeSystemPrompt tells the model plan/run_shell are hard-disabled in plan mode', () => {
+  const text = modeSystemPrompt('plan');
+  assert.match(text, /write_file and run_shell are both hard-disabled/);
+});
+
+test('modeSystemPrompt scopes planWrite\'s write_file allowance to the given plansDir by name', () => {
+  const text = modeSystemPrompt('planWrite', '/proj/.o4c/plans');
+  assert.match(text, /run_shell is hard-disabled/);
+  assert.ok(text.includes('/proj/.o4c/plans'));
+});
+
+test('modeSystemPrompt for planWrite with no plansDir says nothing is writable, not a broken path', () => {
+  const text = modeSystemPrompt('planWrite', undefined);
+  assert.match(text, /no project is trusted yet/);
+  assert.match(text, /write_file and run_shell are both hard-disabled/);
+});
+
 test('modeInfo returns the expected label and standard-palette color for each mode', () => {
   assert.deepEqual(modeInfo('manual'), {
     mode: 'manual',
@@ -69,5 +123,11 @@ test('modeInfo returns the expected label and standard-palette color for each mo
     label: 'Plan',
     description: 'Blocks file writes and shell commands outright - read-only.',
     color: 'blue',
+  });
+  assert.deepEqual(modeInfo('planWrite'), {
+    mode: 'planWrite',
+    label: 'Plan-Write',
+    description: 'Like Plan, but allows writing to plan documents under .o4c/plans/.',
+    color: 'green',
   });
 });

@@ -3,22 +3,27 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { Message } from '../providers/types.js';
+import { liftLegacyMessages, toWireMessages, type ContextEntry } from '../agent/contextEntry.js';
 
 export interface SessionMeta {
   id: string;
   title: string;
   createdAt: string;
   updatedAt: string;
+  /** Wire-format message count (`toWireMessages(entries).length`), not the raw entry count -
+   * keeps this number's meaning stable across the §5.1 refactor (a tool-heavy turn now logs
+   * several `ContextEntry` rows per assistant turn, which would otherwise inflate this past what
+   * "N messages" has always meant to whoever's reading `/resume`'s picker, SessionPicker.tsx). */
   messageCount: number;
 }
 
 export interface SessionData extends SessionMeta {
-  messages: Message[];
+  entries: ContextEntry[];
   /** The input box's own submit-history (↑/↓ recall) at the time of the last save - optional so
    * older session files saved before this existed still load fine (`InputBox` treats a missing
    * value the same as an empty history). Kept per-session (not global/shell-style) deliberately:
    * `/resume`-ing a session restores what you were typing back then alongside its conversation;
-   * `/clear`/`/wipe` start a genuinely fresh session with no id yet, so there's nothing to carry
+   * `/clear` starts a genuinely fresh session with no id yet, so there's nothing to carry
    * forward, consistent with the conversation itself also starting empty. */
   inputHistory?: string[];
 }
@@ -81,29 +86,32 @@ export class SessionStore {
    * Returns the session id - callers without one yet (a brand-new session) need it back to pass
    * into subsequent saves for the same session.
    */
-  async save(messages: readonly Message[], id?: string, inputHistory?: readonly string[]): Promise<string> {
-    if (messages.length === 0) {
-      throw new Error('SessionStore.save: refusing to persist a session with no messages');
+  async save(entries: readonly ContextEntry[], id?: string, inputHistory?: readonly string[]): Promise<string> {
+    if (entries.length === 0) {
+      throw new Error('SessionStore.save: refusing to persist a session with no entries');
     }
 
     const now = new Date().toISOString();
     const manifest = await this.readManifest();
     const existing = id ? manifest.find((m) => m.id === id) : undefined;
     const sessionId = existing?.id ?? id ?? randomUUID();
-    const firstUserMessage = messages.find((m) => m.role === 'user')?.content ?? '';
+    const firstUserEntry = entries.find((e) => e.type === 'user' && e.sub_type === 'input');
+    // Stamped in here, not at entry-creation time - AgentLoop itself has no concept of "which
+    // session this is" (§5.1, §8.1's "no session created until the first real message").
+    const stampedEntries = entries.map((e) => ({ ...e, session_id: sessionId }));
 
     const meta: SessionMeta = {
       id: sessionId,
-      title: existing?.title ?? deriveTitle(firstUserMessage),
+      title: existing?.title ?? deriveTitle(firstUserEntry?.content ?? ''),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
-      messageCount: messages.length,
+      messageCount: toWireMessages(entries).length,
     };
 
     await mkdir(this.dir, { recursive: true });
     await writeFile(
       this.sessionPath(sessionId),
-      JSON.stringify({ ...meta, messages, inputHistory }, null, 2),
+      JSON.stringify({ ...meta, entries: stampedEntries, inputHistory }, null, 2),
       'utf-8',
     );
 
@@ -118,11 +126,20 @@ export class SessionStore {
     return sessionId;
   }
 
-  /** Full session content (metadata + messages), or undefined if no session has this id. */
+  /**
+   * Full session content (metadata + entries), or undefined if no session has this id. A session
+   * file saved before the §5.1 refactor (plain `messages: Message[]`, no `entries`) is lifted into
+   * minimal `ContextEntry` objects on the way out - a one-way upgrade path, not a migration that
+   * needs to run anywhere (§5.1). The on-disk file itself is left untouched until next saved.
+   */
   async load(id: string): Promise<SessionData | undefined> {
     try {
       const raw = await readFile(this.sessionPath(id), 'utf-8');
-      return JSON.parse(raw) as SessionData;
+      const parsed = JSON.parse(raw) as SessionData & { messages?: Message[] };
+      if (!parsed.entries && parsed.messages) {
+        return { ...parsed, entries: liftLegacyMessages(parsed.messages) };
+      }
+      return parsed;
     } catch (err) {
       if (isNotFound(err)) return undefined;
       throw err;

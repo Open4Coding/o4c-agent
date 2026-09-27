@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionStore, deriveTitle } from '../session/sessionStore.js';
-import type { Message } from '../providers/types.js';
+import { userInputEntry, aiResponseEntry, type ContextEntry } from '../agent/contextEntry.js';
 
 // Every test gets its own real temp directory - never touches the actual ~/.o4c/sessions.
 async function withTempStore(fn: (store: SessionStore, dir: string) => Promise<void>): Promise<void> {
@@ -16,8 +16,10 @@ async function withTempStore(fn: (store: SessionStore, dir: string) => Promise<v
   }
 }
 
-function userMsg(content: string): Message {
-  return { role: 'user', content };
+// `id`/`created_at`/`session_id` are generated/stamped, not meaningful to compare exactly -
+// strips them down to the fields a test actually cares about.
+function summarize(entries: readonly ContextEntry[]) {
+  return entries.map((e) => ({ type: e.type, sub_type: e.sub_type, content: e.content }));
 }
 
 test('deriveTitle uses the message as-is when short enough', () => {
@@ -43,7 +45,7 @@ test('readManifest is empty before any session is ever saved', async () => {
 
 test('save() creates a new session file and a manifest entry, and returns a usable id', async () => {
   await withTempStore(async (store) => {
-    const id = await store.save([userMsg('hello there')]);
+    const id = await store.save([userInputEntry('hello there')]);
     assert.ok(id);
 
     const manifest = await store.readManifest();
@@ -54,13 +56,15 @@ test('save() creates a new session file and a manifest entry, and returns a usab
 
     const loaded = await store.load(id);
     assert.ok(loaded);
-    assert.deepEqual(loaded.messages, [userMsg('hello there')]);
+    assert.deepEqual(summarize(loaded.entries), [{ type: 'user', sub_type: 'input', content: 'hello there' }]);
+    // session_id is stamped in at save time, not left blank as AgentLoop originally created it.
+    assert.equal(loaded.entries[0].session_id, id);
   });
 });
 
-test('save() persists inputHistory alongside messages, and load() returns it back', async () => {
+test('save() persists inputHistory alongside entries, and load() returns it back', async () => {
   await withTempStore(async (store) => {
-    const id = await store.save([userMsg('hello there')], undefined, ['first draft', 'second draft']);
+    const id = await store.save([userInputEntry('hello there')], undefined, ['first draft', 'second draft']);
 
     const loaded = await store.load(id);
     assert.ok(loaded);
@@ -70,7 +74,7 @@ test('save() persists inputHistory alongside messages, and load() returns it bac
 
 test('save() without inputHistory leaves it undefined in the loaded result, not an empty array', async () => {
   await withTempStore(async (store) => {
-    const id = await store.save([userMsg('hello there')]);
+    const id = await store.save([userInputEntry('hello there')]);
 
     const loaded = await store.load(id);
     assert.ok(loaded);
@@ -78,10 +82,10 @@ test('save() without inputHistory leaves it undefined in the loaded result, not 
   });
 });
 
-test('load() on a pre-existing session file saved before inputHistory existed still loads fine', async () => {
+test('load() on a pre-existing session file saved before this project used entries at all still loads fine', async () => {
   await withTempStore(async (store, dir) => {
-    // Simulates a real session file on disk from before this feature - no inputHistory key at
-    // all, not even set to undefined/null (JSON.stringify would have omitted it either way).
+    // Simulates a real session file from before the §5.1 ContextEntry refactor - plain
+    // `messages: Message[]`, no `entries` key at all. `load()` must lift it, not just fail.
     await writeFile(
       join(dir, 'old-session.json'),
       JSON.stringify({
@@ -90,22 +94,22 @@ test('load() on a pre-existing session file saved before inputHistory existed st
         createdAt: '2026-01-01T00:00:00.000Z',
         updatedAt: '2026-01-01T00:00:00.000Z',
         messageCount: 1,
-        messages: [userMsg('hello there')],
+        messages: [{ role: 'user', content: 'hello there' }],
       }),
       'utf-8',
     );
 
     const loaded = await store.load('old-session');
     assert.ok(loaded);
-    assert.deepEqual(loaded.messages, [userMsg('hello there')]);
+    assert.deepEqual(summarize(loaded.entries), [{ type: 'user', sub_type: 'input', content: 'hello there' }]);
     assert.equal(loaded.inputHistory, undefined);
   });
 });
 
 test('save() with an existing id updates in place instead of creating a second entry', async () => {
   await withTempStore(async (store) => {
-    const id = await store.save([userMsg('first')]);
-    const secondId = await store.save([userMsg('first'), { role: 'assistant', content: 'reply' }], id);
+    const id = await store.save([userInputEntry('first')]);
+    const secondId = await store.save([userInputEntry('first'), aiResponseEntry('reply')], id);
 
     assert.equal(secondId, id);
     const manifest = await store.readManifest();
@@ -118,10 +122,10 @@ test('save() with an existing id updates in place instead of creating a second e
 
 test('saving an existing session bubbles it back to the front of the manifest', async () => {
   await withTempStore(async (store) => {
-    const idA = await store.save([userMsg('session A')]);
-    const idB = await store.save([userMsg('session B')]);
+    const idA = await store.save([userInputEntry('session A')]);
+    const idB = await store.save([userInputEntry('session B')]);
     // idB is currently newest. Now touch A again - it should become newest.
-    await store.save([userMsg('session A'), { role: 'assistant', content: 'more' }], idA);
+    await store.save([userInputEntry('session A'), aiResponseEntry('more')], idA);
 
     const manifest = await store.readManifest();
     assert.deepEqual(
@@ -139,7 +143,7 @@ test('load() returns undefined for an id that was never saved', async () => {
 
 test('delete() removes both the session file and its manifest entry', async () => {
   await withTempStore(async (store) => {
-    const id = await store.save([userMsg('to be deleted')]);
+    const id = await store.save([userInputEntry('to be deleted')]);
     assert.ok(await store.load(id));
 
     await store.delete(id);
@@ -158,7 +162,7 @@ test('delete() on an id that does not exist is a harmless no-op', async () => {
 
 test('rename() overwrites the title in both the manifest entry and the session file itself', async () => {
   await withTempStore(async (store) => {
-    const id = await store.save([userMsg('original first message')]);
+    const id = await store.save([userInputEntry('original first message')]);
 
     await store.rename(id, 'my custom name');
 
@@ -175,7 +179,7 @@ test('rename() throws for an id that does not exist, unlike delete()\'s silent n
   });
 });
 
-test('save() refuses to persist a session with zero messages', async () => {
+test('save() refuses to persist a session with zero entries', async () => {
   await withTempStore(async (store) => {
     await assert.rejects(() => store.save([]));
   });
@@ -185,7 +189,7 @@ test('the manifest is capped at 20 entries, oldest pruned first, and its file is
   await withTempStore(async (store, dir) => {
     const ids: string[] = [];
     for (let i = 0; i < 21; i++) {
-      ids.push(await store.save([userMsg(`session ${i}`)]));
+      ids.push(await store.save([userInputEntry(`session ${i}`)]));
     }
 
     const manifest = await store.readManifest();

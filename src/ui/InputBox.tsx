@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import { moveVisualRow, rowStart, rowEnd } from './inputBoxLayout.js';
+import { theme } from './theme.js';
 
 export interface InputBoxProps {
   prompt?: string;
@@ -212,7 +213,23 @@ export function InputBox({
             return;
           }
         }
-        if (historyIndexRef.current === -1) return;
+        // Real bug found via hands-on testing, 2026-09-26: not browsing history yet (nothing
+        // recalled via up-arrow) and already on the last line used to just do nothing here -
+        // whatever was typed stayed stuck in the box with no way to clear it via down-arrow.
+        // Fixed to clear the box, exactly like this - but not silently: the cleared text is
+        // pushed into history first (the same push+onHistoryChange call Enter's own submit path
+        // already makes), so it's stored and recallable via up-arrow later, and reaches the
+        // session's persisted inputHistory the same way a real submission would, instead of
+        // being discarded.
+        if (historyIndexRef.current === -1) {
+          if (value) {
+            historyRef.current.push(value);
+            onHistoryChange?.(historyRef.current);
+          }
+          setValue('');
+          setCursor(0);
+          return;
+        }
         const hist = historyRef.current;
         if (historyIndexRef.current < hist.length - 1) {
           historyIndexRef.current += 1;
@@ -360,8 +377,10 @@ export function InputBox({
   const line = `${prompt}${before}${cursorCell}${after}`;
 
   return (
-    <Box borderStyle="round" borderColor={disabled ? 'gray' : 'white'} paddingX={1}>
-      <Text wrap="wrap">{line}</Text>
+    <Box borderStyle="round" borderColor={disabled ? 'gray' : theme.border} paddingX={1}>
+      <Text wrap="wrap" color={disabled ? 'gray' : theme.text}>
+        {line}
+      </Text>
     </Box>
   );
 }

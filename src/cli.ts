@@ -5,11 +5,12 @@ import { render } from 'ink';
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
 import { AnthropicProvider } from './providers/anthropic.js';
-import { LocalProvider } from './providers/local.js';
+import { LocalProvider, fetchLocalModelId } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider, Message } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
 import { AgentLoop, type AgentEvent } from './agent/loop.js';
+import { toWireMessages } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
@@ -27,7 +28,7 @@ interface RestartableOpts {
 }
 
 /**
- * /clear, /wipe and /resume all hand off to a brand-new process instead of resetting state
+ * /clear and /resume both hand off to a brand-new process instead of resetting state
  * in-place - the only way to get a genuinely clear screen. A real ESC[2J mid-session was tried
  * and rejected (see resizeReflowFix.ts's doc comment): on Windows Terminal it scrolls the stale
  * frame into scrollback instead of erasing it. Done once at a fresh process's cold start, before
@@ -72,6 +73,7 @@ async function runRepl(
   projectRoot: string | undefined,
   sessionStore: SessionStore,
   opts: RestartableOpts,
+  contextWindow: number | undefined,
   initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] },
 ): Promise<void> {
   if (!process.stdin.isTTY) {
@@ -104,6 +106,9 @@ async function runRepl(
       runLogger,
       initialSession,
       restart,
+      projectRoot,
+      model: opts.model,
+      contextWindow,
     }),
     {
       // Opt-in, off by default (confirmed in ink's own source: does nothing unless set). 'auto'
@@ -115,12 +120,15 @@ async function runRepl(
       // to send identical bytes without this) and, later, Ctrl+Enter/Alt+Enter/Shift+Enter
       // apart from plain Enter for #4a's newline-insertion keybinding.
       kittyKeyboard: { mode: 'auto' },
-      // Ctrl+C is no longer a way to exit - it was landing inconsistently (reports of the
-      // process surviving it instead of actually terminating) and collided with a still-running
-      // turn's request being in flight with no coordinated cleanup between Ink's own exit path
-      // and cli.ts's process.exit() below. /exit (and Escape, for a running turn specifically -
-      // see App.tsx's handleEscape) are now the only ways to stop something; Ctrl+C is a fully
-      // inert no-op (already safely swallowed by InputBox's own `key.ctrl` catch-all).
+      // Ink's own graceful Ctrl+C exit is still off - it was landing inconsistently (reports of
+      // the process surviving it instead of actually terminating) and collided with a still-
+      // running turn's request being in flight with no coordinated cleanup between Ink's own exit
+      // path and cli.ts's process.exit() below. /exit and Escape (for a running turn specifically
+      // - see App.tsx's handleEscape) remain the graceful ways to stop something. Ctrl+C itself is
+      // NOT a no-op though (re-added 2026-09-26, App.tsx's own always-active hook): it's now a
+      // hard, unconditional `process.exit()` - the deliberate difference from Ink's removed
+      // mechanism is that it doesn't try to shut down gracefully at all, so there's nothing left
+      // to race against a still-running turn.
       exitOnCtrlC: false,
     },
   );
@@ -198,6 +206,24 @@ program
     // this, never the shared config.json.
     const localApiKey =
       typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined;
+    // No per-model context-size registry exists yet (docs/o4c-agent-design.md §2.3/§7.1) - this
+    // is a plain opt-in config key rather than a guess, same "no CLI flag, config.json only"
+    // shape as localApiKey above. Unset, the status bar just shows a raw token estimate with no
+    // percentage/bar.
+    const contextWindow =
+      typeof resolvedConfig.contextWindow === 'number' ? resolvedConfig.contextWindow : undefined;
+
+    // The `-m`/`--model` value means nothing to LocalProvider - it never sends a `model` field
+    // at all (llama-server only ever has one model loaded). Without this, the status bar and
+    // `/context` would display whatever opts.model happened to default to (the CLI's hardcoded
+    // Anthropic default, unrelated to what's actually being talked to) instead of the real
+    // served model - real bug, found via direct user report. Best-effort: on any failure to
+    // reach the server, opts.model (whatever it already was) is left unchanged rather than
+    // blocking startup on it.
+    if (opts.provider === 'local') {
+      const detected = await fetchLocalModelId(opts.baseUrl, localApiKey);
+      if (detected) opts = { ...opts, model: detected };
+    }
 
     let provider: LLMProvider;
     if (opts.provider === 'mock') {
@@ -230,10 +256,15 @@ program
           process.exitCode = 1;
           return;
         }
-        loop.loadMessages(data.messages);
-        initialSession = { id: data.id, title: data.title, messages: data.messages, inputHistory: data.inputHistory };
+        loop.loadEntries(data.entries);
+        initialSession = {
+          id: data.id,
+          title: data.title,
+          messages: toWireMessages(data.entries),
+          inputHistory: data.inputHistory,
+        };
       }
-      await runRepl(loop, projectRoot, sessionStore, opts, initialSession);
+      await runRepl(loop, projectRoot, sessionStore, opts, contextWindow, initialSession);
       return;
     }
 
