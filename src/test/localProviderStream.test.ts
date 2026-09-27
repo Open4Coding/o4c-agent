@@ -24,6 +24,57 @@ function sse(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`;
 }
 
+test('reasoning_content deltas (llama-server\'s reasoning_format: "deepseek" extension) are wrapped into <think>...</think> and prefixed onto content', async () => {
+  const stream = sseStream([
+    sse({ choices: [{ delta: { reasoning_content: 'The user ' } }] }),
+    sse({ choices: [{ delta: { reasoning_content: 'wants a greeting' } }] }),
+    sse({ choices: [{ delta: { content: 'Hello!' } }] }),
+    sse({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+  ]);
+
+  const result = await parseSseStream(stream);
+
+  assert.equal(result.content, '<think>The user wants a greeting</think>Hello!');
+});
+
+test('reasoning_content deltas stream through onToken as they arrive, same as content', async () => {
+  const stream = sseStream([
+    sse({ choices: [{ delta: { reasoning_content: 'thinking...' } }] }),
+    sse({ choices: [{ delta: { content: 'answer' } }] }),
+  ]);
+
+  const seen: string[] = [];
+  await parseSseStream(stream, (delta) => seen.push(delta));
+
+  assert.deepEqual(seen, ['thinking...', 'answer']);
+});
+
+test('no reasoning_content at all leaves content unwrapped, unchanged from before', async () => {
+  const stream = sseStream([sse({ choices: [{ delta: { content: 'plain answer' } }] })]);
+
+  const result = await parseSseStream(stream);
+
+  assert.equal(result.content, 'plain answer');
+});
+
+test('reasoning_content followed directly by a tool call (no regular content at all) - the exact real case that surfaced this bug', async () => {
+  const stream = sseStream([
+    sse({ choices: [{ delta: { reasoning_content: 'let me check the directory' } }] }),
+    sse({
+      choices: [
+        { delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'run_shell', arguments: '{"command":"dir"}' } }] } },
+      ],
+    }),
+    sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+  ]);
+
+  const result = await parseSseStream(stream);
+
+  assert.equal(result.content, '<think>let me check the directory</think>');
+  assert.deepEqual(result.toolCalls, [{ id: 'call_1', name: 'run_shell', input: { command: 'dir' } }]);
+  assert.equal(result.finishReason, 'tool_calls');
+});
+
 test('accumulates plain text content across multiple chunks', async () => {
   const stream = sseStream([
     sse({ choices: [{ delta: { content: 'Hello' } }] }),

@@ -198,6 +198,15 @@ interface StreamedOpenAIChunk {
   choices?: Array<{
     delta?: {
       content?: string | null;
+      // llama-server's own reasoning-model extension (`reasoning_format: "deepseek"`, confirmed
+      // directly against a real streamed response from this project's own PHOEBE server) - this
+      // model's `<think>...</think>` reasoning arrives through this separate field entirely, not
+      // inline in `content` the way `splitThinkBlock()` (contextEntry.ts) expects. Real bug found
+      // via direct user report ("thinking seems to stop"): every reasoning token was silently
+      // dropped before this field was read at all, which for a model that reasons at length
+      // before its first real content/tool call meant long stretches of genuine work produced
+      // zero visible output - indistinguishable from a hang.
+      reasoning_content?: string | null;
       tool_calls?: Array<{
         index: number;
         id?: string;
@@ -228,6 +237,7 @@ export async function parseSseStream(
   onToken?: (delta: string) => void,
 ): Promise<ParsedStream> {
   let content = '';
+  let reasoning = '';
   let finishReason = 'stop';
   let usage: ParsedStream['usage'];
   const toolCallsByIndex = new Map<number, { id: string; name: string; args: string }>();
@@ -262,6 +272,10 @@ export async function parseSseStream(
 
         const choice = chunk.choices?.[0];
         if (!choice) continue;
+        if (choice.delta?.reasoning_content) {
+          reasoning += choice.delta.reasoning_content;
+          onToken?.(choice.delta.reasoning_content);
+        }
         if (choice.delta?.content) {
           content += choice.delta.content;
           onToken?.(choice.delta.content);
@@ -284,5 +298,9 @@ export async function parseSseStream(
     .sort(([a], [b]) => a - b)
     .map(([, call]) => ({ id: call.id, name: call.name, input: JSON.parse(call.args || '{}') as Record<string, unknown> }));
 
-  return { content, toolCalls, finishReason, usage };
+  // Reassembled into the same `<think>...</think>` convention `splitThinkBlock()` already expects
+  // from every other provider - the rest of the pipeline (AgentLoop, ContextEntry) needs no
+  // changes to handle a model whose reasoning arrives via this separate API field instead of
+  // inline tags in `content`.
+  return { content: reasoning ? `<think>${reasoning}</think>${content}` : content, toolCalls, finishReason, usage };
 }
