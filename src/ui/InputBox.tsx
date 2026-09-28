@@ -50,6 +50,20 @@ function contentWidth(columns: number | undefined): number {
   return Math.max(1, (columns ?? 80) - 4);
 }
 
+// SGR 48;2 (truecolor background) on, then SGR 49 (default background) off - deliberately not a
+// full reset (`\x1B[0m`): background-only codes compose safely inside the single already-colored
+// string this cursor cell gets spliced into (see cursorCell's own comment), leaving whatever
+// foreground Ink already applied around the whole line untouched. `theme.accent` is amber
+// (`#FFBF00`) - the cursor color requested directly, not the user's configurable highlightColor,
+// since the caret is core chrome rather than a themeable accent.
+const [CURSOR_R, CURSOR_G, CURSOR_B] = [
+  Number.parseInt(theme.accent.slice(1, 3), 16),
+  Number.parseInt(theme.accent.slice(3, 5), 16),
+  Number.parseInt(theme.accent.slice(5, 7), 16),
+];
+const CURSOR_BG_ON = `\x1B[48;2;${CURSOR_R};${CURSOR_G};${CURSOR_B}m`;
+const CURSOR_BG_OFF = '\x1B[49m';
+
 /**
  * A bordered, auto-growing, genuinely multi-line-capable input box. `value` may contain real
  * embedded `\n` characters (Ctrl+J/Alt+Enter/a Kitty-reported Enter combo insert one - see #4a)
@@ -79,6 +93,31 @@ export function InputBox({
 }: InputBoxProps) {
   const [value, setValue] = useState('');
   const [cursor, setCursor] = useState(0);
+
+  // Blinking cursor: toggles visibility on a timer, matching a real terminal caret rather than a
+  // static highlight - only while this box is actually focused and enabled, since a blinking
+  // cursor on an inactive/disabled box would be misleading (nothing typed here would go anywhere).
+  // 530ms matches common terminal-emulator cursor blink rates (e.g. Windows Terminal's own
+  // default). Resets to visible on every focus/enable change AND on every edit or cursor move
+  // (depends on `value`/`cursor` too, not just `active`/`disabled`) - matching real terminal
+  // behavior, where typing or moving the caret always shows it solid and restarts the blink phase
+  // rather than leaving it to coincidentally land visible or not. Also what makes this
+  // deterministic for tests that type/move and assert right after: without the reset, a test
+  // whose own real elapsed time happened to cross a 530ms boundary since mount could catch the
+  // cursor mid-"off" and see no highlight at all - a real flake found running this file's own
+  // suite, not hypothetical.
+  const [cursorVisible, setCursorVisible] = useState(true);
+  useEffect(() => {
+    if (!active || disabled) return;
+    setCursorVisible(true);
+    const id = setInterval(() => setCursorVisible((v) => !v), 530);
+    // A cosmetic blink must never be a reason the process won't exit - real bug found running
+    // this file's own test suite: none of these tests unmount their rendered InputBox, so a
+    // plain (ref'd) interval from every single test accumulated and kept the whole test process
+    // alive past every test actually finishing, hanging indefinitely instead of exiting.
+    id.unref?.();
+    return () => clearInterval(id);
+  }, [active, disabled, value, cursor]);
 
   useEffect(() => {
     onChange?.(value);
@@ -373,7 +412,7 @@ export function InputBox({
   // border row below instead of the content row. Concatenating first and giving <Text> a
   // single string child measures correctly. `\x1B[7m`/`\x1B[27m` are exactly what Ink's own
   // `inverse` prop emits, so this is visually identical to the original nested-<Text> version.
-  const cursorCell = disabled ? at : `\x1B[7m${at}\x1B[27m`;
+  const cursorCell = disabled || !cursorVisible ? at : `${CURSOR_BG_ON}${at}${CURSOR_BG_OFF}`;
   const line = `${prompt}${before}${cursorCell}${after}`;
 
   return (

@@ -18,6 +18,11 @@ const CTRL_E = String.fromCharCode(5);
 const CTRL_U = String.fromCharCode(21);
 const CTRL_J = String.fromCharCode(10);
 const ALT_ENTER = ESC + ENTER;
+// The cursor cell's own SGR pair (InputBox.tsx's CURSOR_BG_ON/CURSOR_BG_OFF) - amber truecolor
+// background (`theme.accent` = #FFBF00 = rgb(255,191,0)) on, default-background off. Named here
+// rather than inlined at each call site so a future color/approach change only needs updating once.
+const CURSOR_ON = `${ESC}[48;2;255;191;0m`;
+const CURSOR_OFF = `${ESC}[49m`;
 // Kitty keyboard protocol CSI-u form for codepoint 13 (return) with a modifier: parsing is
 // purely pattern-based in Ink (see node_modules/ink/build/parse-keypress.js), independent of
 // whether the app actually negotiated the protocol with a real terminal - so these bytes are
@@ -735,8 +740,8 @@ test('the cursor cell renders on the content row, not spliced into the border be
   // The border row must be untouched box-drawing characters only - no inverse-video escape
   // code and no bare space breaking up the run of dashes.
   assert.equal(/^╰─+╯$/.test(borderLine), true);
-  // The cursor's inverse cell belongs on the content row, right after "> /".
-  assert.ok(contentLine.includes('> /\x1B[7m \x1B[27m'));
+  // The cursor's highlighted cell belongs on the content row, right after "> /".
+  assert.ok(contentLine.includes(`> /${CURSOR_ON} ${CURSOR_OFF}`));
 });
 
 test('the cursor stays visible at the end of a non-final line, instead of vanishing on the invisible newline', async () => {
@@ -744,9 +749,9 @@ test('the cursor stays visible at the end of a non-final line, instead of vanish
   // disappears, it re-appears when you down arrow to the text moved down." Root cause:
   // highlighting the character AT the cursor is how this box fakes a cursor, and there's no
   // visible glyph to invert when that character is a real `\n` (end of a non-final logical
-  // line) - the inverse-video SGR codes end up wrapping an invisible character, so the frame
-  // has no visible highlight anywhere at all. Reproduced directly against the pre-fix code:
-  // `frame.includes('\x1B[7m')` was false the moment the cursor landed at the end of "line one",
+  // line) - the highlight SGR codes end up wrapping an invisible character, so the frame has no
+  // visible highlight anywhere at all. Reproduced directly against the pre-fix code:
+  // `frame.includes(CURSOR_ON)` was false the moment the cursor landed at the end of "line one",
   // even before pressing Ctrl+J again.
   const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
   await tick();
@@ -762,9 +767,12 @@ test('the cursor stays visible at the end of a non-final line, instead of vanish
   // it, so "line one" still ends its own row and "line two" still starts a fresh one below it.
   const lines = frame.split('\n');
   const lineOneRow = lines.find((l) => l.includes('line one'));
-  assert.ok(lineOneRow?.includes('line one\x1B[7m \x1B[27m'), `cursor not shown at end of line one: "${lineOneRow}"`);
+  assert.ok(
+    lineOneRow?.includes(`line one${CURSOR_ON} ${CURSOR_OFF}`),
+    `cursor not shown at end of line one: "${lineOneRow}"`,
+  );
   const lineTwoRow = lines.find((l) => l.includes('line two'));
-  assert.ok(lineTwoRow && !lineTwoRow.includes('\x1B[7m'), 'line two should not carry the highlight');
+  assert.ok(lineTwoRow && !lineTwoRow.includes(CURSOR_ON), 'line two should not carry the highlight');
 });
 
 test('the cursor stays on its own (empty) line, not several rows away, when several newlines are inserted in a row', async () => {
@@ -793,7 +801,7 @@ test('the cursor stays on its own (empty) line, not several rows away, when seve
   const lines = frame.split('\n');
   // Exactly one content row carries the highlight, and it must not be "original"'s own row -
   // the cursor is two rows above that, on an empty line with nothing else on it.
-  const highlighted = lines.filter((l) => l.includes('\x1B[7m'));
+  const highlighted = lines.filter((l) => l.includes(CURSOR_ON));
   assert.equal(highlighted.length, 1, `expected exactly one highlighted row, got: ${JSON.stringify(lines)}`);
   assert.ok(!highlighted[0].includes('original'), 'the highlight must not have jumped down to "original"');
 });
