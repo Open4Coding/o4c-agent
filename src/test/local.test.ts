@@ -91,6 +91,55 @@ test('a 401 with no API key configured gives an actionable error naming O4C_LOCA
   );
 });
 
+test('an idle gap mid-stream (not just a slow connect) aborts with its own friendly message', async () => {
+  // Regression test for a real bug found live: a single flat timeout covering the whole request
+  // meant real generation (which happens while parseSseStream reads the response body, well after
+  // fetch() itself resolves) could get killed - or, once that call moved outside any try/catch
+  // entirely to "fix" it, surface a raw unhandled error - just for legitimately running long. The
+  // replacement (withIdleTimeout) only reacts to silence between chunks, so a stream that starts
+  // fine but then never produces a second chunk is exactly what should trip it.
+  function neverStreamsResponse(): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => {}); // never resolves - simulates a stalled connection
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  }
+  const provider = new LocalProvider({ idleTimeoutMs: 30 });
+  await assert.rejects(
+    withMockedFetch(neverStreamsResponse, () => provider.complete(baseRequest)),
+    (err: Error) => {
+      assert.match(err.message, /produced no output for/);
+      assert.doesNotMatch(err.message, /Unexpected error|aborted due to timeout|did not respond within/);
+      return true;
+    },
+  );
+});
+
+test('a connect-phase timeout (server never even responds) gives the "busy" message, not a generic one', async () => {
+  // Different phase, different wording: this is the OTHER half of the split - a server that never
+  // starts responding at all (e.g. queued behind another tool's request against the same PHOEBE
+  // instance, which only serves one at a time) should read as "busy," not "stuck generating."
+  // withMockedFetch's handler always returns a Response synchronously, so this one replaces
+  // globalThis.fetch directly with something that only ever settles via the abort signal.
+  const original = globalThis.fetch;
+  globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+    })) as typeof fetch;
+  try {
+    const provider = new LocalProvider({ connectTimeoutMs: 30 });
+    await assert.rejects(provider.complete(baseRequest), (err: Error) => {
+      assert.match(err.message, /did not respond within/);
+      assert.match(err.message, /busy with another request/);
+      return true;
+    });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('a 401 with an API key already configured suggests it may be wrong, not "set" it', async () => {
   const provider = new LocalProvider({ apiKey: 'stale-key' });
   await assert.rejects(

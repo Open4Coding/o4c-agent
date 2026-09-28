@@ -17,8 +17,56 @@ import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './sessi
 import { ConfigStore } from './session/configStore.js';
 import { App } from './ui/App.js';
 import { installResizeReflowFix } from './ui/resizeReflowFix.js';
+import { theme } from './ui/theme.js';
 import { formatEvent } from './ui/formatEvent.js';
 import { formatError } from './ui/formatError.js';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { defaultLogsDir } from './session/runLog.js';
+
+/**
+ * Installed at module load, before anything else runs, so it's live for the entire process
+ * lifetime - including startup work before a project/logs directory is even known. Writes to a
+ * single fixed, always-discoverable file (not the per-run timestamped convention runLogger/
+ * fullContextLogger use - a crash is rare enough that one persistent, append-only file is more
+ * useful than hunting across timestamped ones), independent of node_modules/self-contained (no
+ * RunLogger dependency) so this can't itself fail the way it exists to catch.
+ *
+ * unhandledRejection: does NOT exit - per Node's own docs, a rejection alone doesn't corrupt
+ * process state the way a thrown exception can, so continuing is safe and is exactly what every
+ * `void logger.log(...)` fire-and-forget call in this codebase already assumes. Logged here as a
+ * last-resort net for anything that manages to escape the try/catch RunLogger.log() itself now
+ * has (see its own doc comment) or any other future fire-and-forget call.
+ *
+ * uncaughtException: DOES exit after logging - Node's own guidance is that continuing after an
+ * uncaught exception is unsafe (unknown/partial state), so this only buys a chance to record
+ * what happened before the process goes down anyway, not a way to survive it.
+ */
+function logCrash(kind: string, err: unknown): Promise<void> {
+  return (async () => {
+    try {
+      const dir = defaultLogsDir();
+      await mkdir(dir, { recursive: true });
+      const line = JSON.stringify({
+        ts: new Date().toISOString(),
+        type: kind,
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      await appendFile(join(dir, 'crash.log'), `${line}\n`, 'utf-8');
+    } catch {
+      // Truly nothing left to do - this function exists to catch failures, it can't itself have
+      // a failure path that matters.
+    }
+  })();
+}
+
+process.on('unhandledRejection', (reason) => {
+  void logCrash('unhandledRejection', reason);
+});
+process.on('uncaughtException', (err) => {
+  void logCrash('uncaughtException', err).finally(() => process.exit(1));
+});
 
 interface RestartableOpts {
   model: string;
@@ -85,6 +133,7 @@ async function runRepl(
   sessionStore: SessionStore,
   opts: RestartableOpts,
   contextWindow: number | undefined,
+  highlightColor: string,
   initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] },
 ): Promise<void> {
   if (!process.stdin.isTTY) {
@@ -102,6 +151,11 @@ async function runRepl(
     process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
   }
   const runLogger = new RunLogger(logsDirFor(projectRoot));
+  // Per-session wire-level transcript - every full request sent to the provider and every full
+  // response, plus tool calls/results - distinct from runLogger's own already-derived AgentEvent
+  // stream above. Same one-file-per-run directory/timestamp convention, just suffixed so it never
+  // collides with runLogger's own file.
+  const fullContextLogger = new RunLogger(logsDirFor(projectRoot), 'FULLCONTEXT');
   // Must be installed before render() so it sees Ink's very first frame - see the module's own
   // doc comment for the bug this works around.
   installResizeReflowFix(process.stdout);
@@ -115,11 +169,13 @@ async function runRepl(
       initialImage: opts.image,
       sessionStore,
       runLogger,
+      fullContextLogger,
       initialSession,
       restart,
       projectRoot,
       model: opts.model,
       contextWindow,
+      initialHighlightColor: highlightColor,
     }),
     {
       // Opt-in, off by default (confirmed in ink's own source: does nothing unless set). 'auto'
@@ -223,6 +279,12 @@ program
     // percentage/bar.
     const contextWindow =
       typeof resolvedConfig.contextWindow === 'number' ? resolvedConfig.contextWindow : undefined;
+    // /config-highlightcolor (+ -local-/-global-, App.tsx) - read fresh on every launch/restart,
+    // same "config.json only, re-read each time" shape as localApiKey above. Defaults to the
+    // amber theme's own accent rather than an arbitrary color, since that's what the rest of the
+    // UI already uses everywhere else.
+    const highlightColor =
+      typeof resolvedConfig.highlightColor === 'string' ? resolvedConfig.highlightColor : theme.accent;
     // Half the configured context window, not the flat 4096 both providers used to hardcode -
     // that flat cap was unrelated to the model's real budget and silently truncated any turn
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
@@ -238,6 +300,17 @@ program
       (validThinkingEfforts as readonly string[]).includes(resolvedConfig.anthropicThinkingEffort)
         ? (resolvedConfig.anthropicThinkingEffort as (typeof validThinkingEfforts)[number])
         : undefined;
+    // Opt-in only, same "no CLI flag, config.json only" shape as the others above. Undefined
+    // (unset) falls back to each provider's own default (see local.ts's DEFAULT_CONNECT_TIMEOUT_MS/
+    // DEFAULT_IDLE_TIMEOUT_MS, and anthropic.ts's DEFAULT_TIMEOUT_MS) rather than forcing one
+    // number everywhere - a local model's real generation speed varies by hardware, a cloud API's
+    // mostly doesn't. connectTimeoutMs also doubles as Anthropic's own single request timeout
+    // (its SDK-managed stream doesn't need the connect/idle split LocalProvider does - a cloud API
+    // doesn't sit behind PHOEBE's own --parallel 1 queuing the way a second local tool would).
+    const connectTimeoutMs =
+      typeof resolvedConfig.connectTimeoutMs === 'number' ? resolvedConfig.connectTimeoutMs : undefined;
+    const idleTimeoutMs =
+      typeof resolvedConfig.idleTimeoutMs === 'number' ? resolvedConfig.idleTimeoutMs : undefined;
 
     // The `-m`/`--model` value means nothing to LocalProvider - it never sends a `model` field
     // at all (llama-server only ever has one model loaded). Without this, the status bar and
@@ -255,13 +328,20 @@ program
     if (opts.provider === 'mock') {
       provider = new MockProvider();
     } else if (opts.provider === 'local') {
-      provider = new LocalProvider({ baseUrl: opts.baseUrl, apiKey: localApiKey, maxTokens: providerMaxTokens });
+      provider = new LocalProvider({
+        baseUrl: opts.baseUrl,
+        apiKey: localApiKey,
+        maxTokens: providerMaxTokens,
+        connectTimeoutMs,
+        idleTimeoutMs,
+      });
     } else if (opts.provider === 'anthropic') {
       try {
         provider = new AnthropicProvider({
           model: opts.model,
           thinkingEffort: anthropicThinkingEffort,
           maxTokens: providerMaxTokens,
+          timeoutMs: connectTimeoutMs,
         });
       } catch (err) {
         console.error((err as Error).message);
@@ -294,7 +374,7 @@ program
           inputHistory: data.inputHistory,
         };
       }
-      await runRepl(loop, projectRoot, sessionStore, opts, contextWindow, initialSession);
+      await runRepl(loop, projectRoot, sessionStore, opts, contextWindow, highlightColor, initialSession);
       return;
     }
 

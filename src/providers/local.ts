@@ -81,7 +81,26 @@ function mapStopReason(reason: string): StopReason {
   return 'end_turn';
 }
 
-const DEFAULT_TIMEOUT_MS = 5 * 60_000;
+// A single flat timeout covering the whole request (5 min, then 20 min) was the wrong shape
+// either way: real generation on a large (100K+) context can legitimately run long even at a
+// healthy ~80 tokens/sec, so any fixed wall-clock cap either kills a healthy turn or - once
+// raised far enough to stop doing that - stops meaningfully catching a real hang at all. Split
+// into two different questions instead, matching what's actually being waited on at each point:
+//
+// - "did the server ever start responding" (DEFAULT_CONNECT_TIMEOUT_MS) - covers fetch() up to
+//   the response headers. Stays generous: PHOEBE only serves one request at a time
+//   (--parallel 1), so time-to-first-byte legitimately includes queuing behind whatever another
+//   tool (Hermes, opencode) is already generating, not just this project's own load.
+// - "is the model still producing output, right now" (DEFAULT_IDLE_TIMEOUT_MS) - covers the gap
+//   between successive stream chunks once streaming has actually started (withIdleTimeout,
+//   below). Resets on every chunk, so an actively-streaming response never trips it no matter how
+//   long the total turn runs - only real silence (a crashed/deadlocked server mid-response) does.
+//   Short by comparison, since continuous token output shouldn't go quiet for minutes at a time.
+//
+// Both configurable via config.json's connectTimeoutMs/idleTimeoutMs (cli.ts), same "no CLI flag"
+// shape as contextWindow/localApiKey - these are the fallbacks when unset.
+const DEFAULT_CONNECT_TIMEOUT_MS = 20 * 60_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60_000;
 // Only used when contextWindow isn't configured (no maxTokens override reaches the constructor) -
 // matches the flat cap this replaced, so an unconfigured setup behaves exactly as before.
 const DEFAULT_MAX_TOKENS = 4096;
@@ -112,7 +131,8 @@ export async function fetchLocalModelId(baseUrl: string, apiKey?: string): Promi
 export class LocalProvider implements LLMProvider {
   readonly name = 'local';
   private baseUrl: string;
-  private timeoutMs: number;
+  private connectTimeoutMs: number;
+  private idleTimeoutMs: number;
   // Optional: most self-hosted llama-server instances don't require one (unlike Anthropic's,
   // which is mandatory - see AnthropicProvider). Only sent as a header when actually set, so a
   // server running without --api-key is unaffected either way. Env-var fallback only, no CLI
@@ -128,14 +148,48 @@ export class LocalProvider implements LLMProvider {
   // work done). Set from config.json's own contextWindow (cli.ts), not guessed here.
   private maxTokens: number;
 
-  constructor(options: { baseUrl?: string; timeoutMs?: number; apiKey?: string; maxTokens?: number } = {}) {
+  constructor(
+    options: {
+      baseUrl?: string;
+      connectTimeoutMs?: number;
+      idleTimeoutMs?: number;
+      apiKey?: string;
+      maxTokens?: number;
+    } = {},
+  ) {
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.apiKey = options.apiKey ?? process.env.O4C_LOCAL_API_KEY;
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    // Own controller, not just AbortSignal.timeout() directly - its timer is explicitly cleared
+    // the moment fetch() resolves (success or failure), below, so it can only ever fire while
+    // still waiting for a response to start. Left un-cleared, the same fixed-deadline signal
+    // would stay attached to the response body too (that's how fetch's signal works for its whole
+    // lifecycle) and abort an actively-streaming turn just for having run past this deadline in
+    // total - exactly the flat-timeout behavior this split replaces. Combined with the caller's
+    // own signal so the user can still cancel early on demand (e.g. Escape while "Thinking..." is
+    // showing) - covers cancellation for the whole request, not just this connect phase.
+    const connectController = new AbortController();
+    const connectTimer = setTimeout(
+      () =>
+        connectController.abort(
+          Object.assign(
+            new Error(
+              `Local server did not respond within ${Math.round(this.connectTimeoutMs / 1000)}s - it may be busy with another request, or the model may be stuck generating. Try again, or check the local server.`,
+            ),
+            { name: 'TimeoutError' },
+          ),
+        ),
+      this.connectTimeoutMs,
+    );
+    const connectSignal = request.signal
+      ? AbortSignal.any([connectController.signal, request.signal])
+      : connectController.signal;
+
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
@@ -159,23 +213,13 @@ export class LocalProvider implements LLMProvider {
           // replaces, not an acceptable side effect of adding streaming.
           stream_options: { include_usage: true },
         }),
-        // Without a timeout signal, a hung or runaway generation (e.g. a model stuck repeating
-        // inside a <think> block) leaves the request in flight forever - nothing in AgentLoop or
-        // the UI can cancel it, so the whole REPL (including /exit, queued behind the turn) is
-        // effectively frozen until this resolves on its own. Combined with the caller's own
-        // signal (if given) so the user can also cancel early on demand (e.g. Escape while the
-        // "Thinking..." spinner is showing), without losing the timeout as a backstop.
-        signal: request.signal
-          ? AbortSignal.any([AbortSignal.timeout(this.timeoutMs), request.signal])
-          : AbortSignal.timeout(this.timeoutMs),
+        signal: connectSignal,
       });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'TimeoutError') {
-        throw new Error(
-          `Local server did not respond within ${Math.round(this.timeoutMs / 1000)}s - the model may be stuck generating. Try again, or check the local server.`,
-        );
-      }
-      throw err;
+    } finally {
+      // Whether fetch resolved, rejected, or was aborted - either way this timer must never fire
+      // again after this point (see connectController's own comment for why). A TimeoutError
+      // rejection here already carries the friendly message set at abort time, nothing to catch.
+      clearTimeout(connectTimer);
     }
 
     if (!response.ok) {
@@ -192,8 +236,19 @@ export class LocalProvider implements LLMProvider {
     if (!response.body) {
       throw new Error('Local server returned no response body to stream from.');
     }
-    const { content, toolCalls, finishReason, usage } = await parseSseStream(response.body, request.onToken);
 
+    // Real generation happens here, not in the fetch() above - a big turn on a large context can
+    // spend most of its time in this stream, not in getting a response header back. Guarded by
+    // idle time (withIdleTimeout), not total duration - see the DEFAULT_*_TIMEOUT_MS comment for
+    // why - and still cancellable via request.signal directly (unrelated to connectController,
+    // which is already neutralized by the clearTimeout above by the time execution reaches here).
+    // Real bug, found via direct user report: a 25-minute local-model turn surfaced "Unexpected
+    // error: The operation was aborted due to timeout" instead of a friendly message - this call
+    // used to sit outside any try/catch entirely, so a timeout landing here (mid-stream, not at
+    // connect) reached the caller as a raw, unhandled error instead of withIdleTimeout's own
+    // already-friendly one.
+    const idleBody = withIdleTimeout(response.body, this.idleTimeoutMs);
+    const { content, toolCalls, finishReason, usage } = await parseSseStream(idleBody, request.onToken);
     return {
       content,
       toolCalls,
@@ -201,6 +256,52 @@ export class LocalProvider implements LLMProvider {
       usage,
     };
   }
+}
+
+/**
+ * Wraps a response body stream so a gap of `idleMs` between successive chunks - not the stream's
+ * total duration - is what counts as "stuck." Resets on every chunk read, so an actively
+ * streaming response never trips it no matter how long the turn runs in total; only the server
+ * actually going quiet (crashed or deadlocked mid-response) does. The underlying reader is
+ * cancelled when that happens, so the stalled connection doesn't linger after this gives up on it.
+ */
+function withIdleTimeout(body: ReadableStream<Uint8Array>, idleMs: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      // Definite-assignment: the Promise executor below runs synchronously (per spec), so this is
+      // always set before it's read - TS's control-flow analysis just can't see through `new
+      // Promise()` to know that.
+      let timer!: ReturnType<typeof setTimeout>;
+      let timedOut = false;
+      const idle = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(
+            Object.assign(
+              new Error(
+                `Local server produced no output for ${Math.round(idleMs / 1000)}s - the model may be stuck generating. Try again, or check the local server.`,
+              ),
+              { name: 'TimeoutError' },
+            ),
+          );
+        }, idleMs);
+      });
+      try {
+        const result = await Promise.race([reader.read(), idle]);
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (err) {
+        if (timedOut) void reader.cancel(err).catch(() => {});
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+    },
+  });
 }
 
 interface StreamedOpenAIChunk {
@@ -243,7 +344,7 @@ interface ParsedStream {
  */
 export async function parseSseStream(
   body: ReadableStream<Uint8Array>,
-  onToken?: (delta: string) => void,
+  onToken?: (delta: string, kind: 'think' | 'text') => void,
 ): Promise<ParsedStream> {
   let content = '';
   let reasoning = '';
@@ -283,11 +384,11 @@ export async function parseSseStream(
         if (!choice) continue;
         if (choice.delta?.reasoning_content) {
           reasoning += choice.delta.reasoning_content;
-          onToken?.(choice.delta.reasoning_content);
+          onToken?.(choice.delta.reasoning_content, 'think');
         }
         if (choice.delta?.content) {
           content += choice.delta.content;
-          onToken?.(choice.delta.content);
+          onToken?.(choice.delta.content, 'text');
         }
         for (const call of choice.delta?.tool_calls ?? []) {
           const existing = toolCallsByIndex.get(call.index) ?? { id: '', name: '', args: '' };
