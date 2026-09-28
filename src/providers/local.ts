@@ -98,7 +98,9 @@ function mapStopReason(reason: string): StopReason {
 //   Short by comparison, since continuous token output shouldn't go quiet for minutes at a time.
 //
 // Both configurable via config.json's connectTimeoutMs/idleTimeoutMs (cli.ts), same "no CLI flag"
-// shape as contextWindow/localApiKey - these are the fallbacks when unset.
+// shape as contextWindow/localApiKey - these are the fallbacks when unset. Either can also be set
+// to 0 or negative to disable that phase's timeout entirely (see complete()'s own comments) -
+// distinct from "unset," which still falls back to the default here, not to "no timeout."
 const DEFAULT_CONNECT_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60_000;
 // Only used when contextWindow isn't configured (no maxTokens override reaches the constructor) -
@@ -173,22 +175,31 @@ export class LocalProvider implements LLMProvider {
     // total - exactly the flat-timeout behavior this split replaces. Combined with the caller's
     // own signal so the user can still cancel early on demand (e.g. Escape while "Thinking..." is
     // showing) - covers cancellation for the whole request, not just this connect phase.
-    const connectController = new AbortController();
-    const connectTimer = setTimeout(
-      () =>
-        connectController.abort(
-          Object.assign(
-            new Error(
-              `Local server did not respond within ${Math.round(this.connectTimeoutMs / 1000)}s - it may be busy with another request, or the model may be stuck generating. Try again, or check the local server.`,
+    //
+    // 0 or negative means "no timeout at all" - `connectController` (and its timer) are simply
+    // never created, so fetch() only ever aborts via request.signal, never on its own. An
+    // explicit opt-out, not a huge-number workaround, for whoever would genuinely rather wait
+    // forever than risk a false-positive abort.
+    const connectController = this.connectTimeoutMs > 0 ? new AbortController() : undefined;
+    const connectTimer = connectController
+      ? setTimeout(
+          () =>
+            connectController.abort(
+              Object.assign(
+                new Error(
+                  `Local server did not respond within ${Math.round(this.connectTimeoutMs / 1000)}s - it may be busy with another request, or the model may be stuck generating. Try again, or check the local server.`,
+                ),
+                { name: 'TimeoutError' },
+              ),
             ),
-            { name: 'TimeoutError' },
-          ),
-        ),
-      this.connectTimeoutMs,
-    );
-    const connectSignal = request.signal
-      ? AbortSignal.any([connectController.signal, request.signal])
-      : connectController.signal;
+          this.connectTimeoutMs,
+        )
+      : undefined;
+    const connectSignal = connectController
+      ? request.signal
+        ? AbortSignal.any([connectController.signal, request.signal])
+        : connectController.signal
+      : request.signal;
 
     let response: Response;
     try {
@@ -219,7 +230,7 @@ export class LocalProvider implements LLMProvider {
       // Whether fetch resolved, rejected, or was aborted - either way this timer must never fire
       // again after this point (see connectController's own comment for why). A TimeoutError
       // rejection here already carries the friendly message set at abort time, nothing to catch.
-      clearTimeout(connectTimer);
+      if (connectTimer) clearTimeout(connectTimer);
     }
 
     if (!response.ok) {
@@ -247,7 +258,10 @@ export class LocalProvider implements LLMProvider {
     // used to sit outside any try/catch entirely, so a timeout landing here (mid-stream, not at
     // connect) reached the caller as a raw, unhandled error instead of withIdleTimeout's own
     // already-friendly one.
-    const idleBody = withIdleTimeout(response.body, this.idleTimeoutMs);
+    //
+    // 0 or negative disables this the same way as connectTimeoutMs above - the raw body is passed
+    // straight through, unwrapped, so there's no timer left running to ever fire at all.
+    const idleBody = this.idleTimeoutMs > 0 ? withIdleTimeout(response.body, this.idleTimeoutMs) : response.body;
     const { content, toolCalls, finishReason, usage } = await parseSseStream(idleBody, request.onToken);
     return {
       content,

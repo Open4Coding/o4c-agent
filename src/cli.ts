@@ -134,6 +134,7 @@ async function runRepl(
   opts: RestartableOpts,
   contextWindow: number | undefined,
   highlightColor: string,
+  maxIterations: number | undefined,
   initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] },
 ): Promise<void> {
   if (!process.stdin.isTTY) {
@@ -175,6 +176,7 @@ async function runRepl(
       projectRoot,
       model: opts.model,
       contextWindow,
+      maxIterations,
       initialHighlightColor: highlightColor,
     }),
     {
@@ -306,11 +308,21 @@ program
     // number everywhere - a local model's real generation speed varies by hardware, a cloud API's
     // mostly doesn't. connectTimeoutMs also doubles as Anthropic's own single request timeout
     // (its SDK-managed stream doesn't need the connect/idle split LocalProvider does - a cloud API
-    // doesn't sit behind PHOEBE's own --parallel 1 queuing the way a second local tool would).
+    // doesn't sit behind PHOEBE's own --parallel 1 queuing the way a second local tool would) -
+    // except for 0/negative ("no timeout," LocalProvider's own opt-out), which is deliberately
+    // NOT forwarded to Anthropic - see the AnthropicProvider construction below for why.
     const connectTimeoutMs =
       typeof resolvedConfig.connectTimeoutMs === 'number' ? resolvedConfig.connectTimeoutMs : undefined;
     const idleTimeoutMs =
       typeof resolvedConfig.idleTimeoutMs === 'number' ? resolvedConfig.idleTimeoutMs : undefined;
+    // Opt-in only, same "no CLI flag, config.json only" shape as the others above - see
+    // AgentLoop.run()'s own RunOptions.maxIterations doc comment (0/negative = no cap at all).
+    // Undefined falls back to AgentLoop's own default (25) unchanged. Real need found via direct
+    // user report: a long autonomous research turn against a local model (PHOEBE) hit the default
+    // cap ("stopped after 25 iterations without a final answer") well before it was actually done -
+    // 25 is a reasonable safety default, not a real ceiling for long, unattended tool-call chains.
+    const maxIterations =
+      typeof resolvedConfig.maxIterations === 'number' ? resolvedConfig.maxIterations : undefined;
 
     // The `-m`/`--model` value means nothing to LocalProvider - it never sends a `model` field
     // at all (llama-server only ever has one model loaded). Without this, the status bar and
@@ -341,7 +353,13 @@ program
           model: opts.model,
           thinkingEffort: anthropicThinkingEffort,
           maxTokens: providerMaxTokens,
-          timeoutMs: connectTimeoutMs,
+          // 0/negative here means "no timeout" to LocalProvider (its own opt-out, see its
+          // DEFAULT_*_TIMEOUT_MS comment) - NOT forwarded to the Anthropic SDK, which has no such
+          // concept: confirmed directly against its source (validatePositiveInteger in
+          // @anthropic-ai/sdk/internal/utils/values.js) that a negative timeout throws outright
+          // and 0 arms a near-instant one, neither anything like "disabled." Anthropic just keeps
+          // its own sane default (DEFAULT_TIMEOUT_MS in anthropic.ts) in that case instead.
+          timeoutMs: connectTimeoutMs && connectTimeoutMs > 0 ? connectTimeoutMs : undefined,
         });
       } catch (err) {
         console.error((err as Error).message);
@@ -374,7 +392,16 @@ program
           inputHistory: data.inputHistory,
         };
       }
-      await runRepl(loop, projectRoot, sessionStore, opts, contextWindow, highlightColor, initialSession);
+      await runRepl(
+        loop,
+        projectRoot,
+        sessionStore,
+        opts,
+        contextWindow,
+        highlightColor,
+        maxIterations,
+        initialSession,
+      );
       return;
     }
 
@@ -382,6 +409,7 @@ program
       const finalAnswer = await loop.run(prompt, {
         images: opts.image ? [opts.image] : undefined,
         onEvent: printEvent,
+        maxIterations,
       });
 
       process.stdout.write(`\n--- final ---\n${finalAnswer}\n`);

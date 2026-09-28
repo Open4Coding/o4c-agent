@@ -1,4 +1,4 @@
-import type { LLMProvider, Message } from '../providers/types.js';
+import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
 import {
   aiCompactionEntry,
@@ -34,9 +34,24 @@ export interface AgentEvent {
    * user somehow - consumers should only skip re-displaying 'think'/'text' when this is `true`;
    * otherwise this event is the *only* place that content ever shows up. */
   streamed?: boolean;
+  /** `'delta'` only - whether this streamed chunk is reasoning ("think") or the final answer
+   * ("text"), straight from the provider's own per-chunk signal (see `providers/types.ts`'s
+   * `onToken` doc comment) via `createThinkTagStripper`. Lets the live UI label reasoning the
+   * instant it starts streaming, not just after the fact. */
+  kind?: 'think' | 'text';
 }
 
 export interface RunOptions {
+  /** Caps how many provider round-trips a single `run()` call can make before giving up with
+   * `MaxIterationsError`. Undefined (unset) falls back to 25. 0 or negative means "no cap at all"
+   * - the same "0/negative disables it" convention `LocalProvider`'s connect/idle timeouts already
+   * use (see local.ts's own doc comment) - for long, unattended tool-call chains (e.g. a local
+   * model doing extended autonomous research/work) where 25 is nowhere near enough and there's no
+   * natural cap to pick instead. Not actually unbounded in practice: `checkAborted()` still runs
+   * every iteration and before every tool call, so Escape/Ctrl+C still stops it immediately, and
+   * every provider/tool call already has its own independent timeout backstop (LocalProvider's
+   * connect/idle timeouts, run_shell's own cap) - this only removes the *iteration-count* ceiling,
+   * nothing else that could otherwise leave the process stuck. */
   maxIterations?: number;
   onEvent?: (event: AgentEvent) => void;
   images?: string[];
@@ -50,6 +65,13 @@ export interface RunOptions {
    * created and used to build requests as normal; there's just no listener (a no-op), matching
    * `toolPolicy`'s own optional-callback convention below. */
   onEntry?: (entry: ContextEntry) => void;
+  /** Called once per completed provider round-trip - the main turn loop's own call and §2.3's
+   * compaction summarization call alike - with the exact request sent and exact response
+   * received, before any local post-processing (splitThinkBlock, etc.). The raw wire-level
+   * transcript, for a full-context log distinct from the already-derived AgentEvent stream -
+   * intended future consumer is the same infinite-context/compression work `onEntry` above is
+   * for. Never called for a failed/aborted request. Omitted entirely, nothing extra happens. */
+  onProviderCall?: (call: { request: CompletionRequest; response: CompletionResponse }) => void;
   /** Appended (with a blank-line separator) to the system prompt for this request only - lets the
    * caller (App.tsx, via `modePolicy.ts`'s `modeSystemPrompt()`) tell the model what its current
    * mode actually allows, so it behaves accordingly instead of only discovering a restriction
@@ -207,6 +229,7 @@ export class AgentLoop {
     settings: CompactionSettings,
     onEvent: (event: AgentEvent) => void,
     onEntry: (entry: ContextEntry) => void,
+    onProviderCall: (call: { request: CompletionRequest; response: CompletionResponse }) => void,
     signal?: AbortSignal,
   ): Promise<void> {
     if (!shouldCompact(this.visibleTokenEstimate, contextWindow, settings.reserveTokens)) return;
@@ -232,14 +255,16 @@ export class AgentLoop {
 
     let summary: unknown;
     const tokensBefore = this.visibleTokenEstimate;
+    const request: CompletionRequest = {
+      systemPrompt:
+        'You produce structured JSON summaries of coding-agent conversation history for context compaction. Output only the JSON object, nothing else.',
+      messages: [{ role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary }) }],
+      tools: [],
+      signal,
+    };
     try {
-      const response = await this.provider.complete({
-        systemPrompt:
-          'You produce structured JSON summaries of coding-agent conversation history for context compaction. Output only the JSON object, nothing else.',
-        messages: [{ role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary }) }],
-        tools: [],
-        signal,
-      });
+      const response = await this.provider.complete(request);
+      onProviderCall({ request, response });
       summary = parseSummary(response.content);
     } catch {
       return; // best-effort - see this method's own doc comment
@@ -270,9 +295,11 @@ export class AgentLoop {
   }
 
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
-    const maxIterations = options.maxIterations ?? 25;
+    const configuredMaxIterations = options.maxIterations ?? 25;
+    const maxIterations = configuredMaxIterations > 0 ? configuredMaxIterations : Infinity;
     const onEvent = options.onEvent ?? (() => {});
     const onEntry = options.onEntry ?? (() => {});
+    const onProviderCall = options.onProviderCall ?? (() => {});
 
     // Checked before this turn's own user message is appended, so the check reflects exactly
     // what's already in history from prior turns - a completed compaction here is committed
@@ -284,6 +311,7 @@ export class AgentLoop {
         options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS,
         onEvent,
         onEntry,
+        onProviderCall,
         options.signal,
       );
     }
@@ -325,19 +353,21 @@ export class AgentLoop {
       // splitThinkBlock() on the complete text below) - a real invariant this codebase already
       // guarantees for the final answer, extended here to cover the streamed preview too (see
       // streamFilter.ts's own doc comment for why this needs to be stateful across chunks).
-      const thinkFilter = createThinkTagStripper((text) => onEvent({ type: 'delta', text }));
+      const thinkFilter = createThinkTagStripper((text, kind) => onEvent({ type: 'delta', text, kind }));
       let streamed = false;
+      const request: CompletionRequest = {
+        systemPrompt: systemPromptForRequest,
+        messages: toWireMessages(this.entries),
+        tools: toolDefs,
+        signal: options.signal,
+        onToken: (delta, kind) => {
+          streamed = true;
+          thinkFilter.feed(delta, kind);
+        },
+      };
       try {
-        response = await this.provider.complete({
-          systemPrompt: systemPromptForRequest,
-          messages: toWireMessages(this.entries),
-          tools: toolDefs,
-          signal: options.signal,
-          onToken: (delta) => {
-            streamed = true;
-            thinkFilter.feed(delta);
-          },
-        });
+        response = await this.provider.complete(request);
+        onProviderCall({ request, response });
         thinkFilter.flush();
       } catch (err) {
         // Checked on the caller's own signal, not the error's name/type - a provider may wrap

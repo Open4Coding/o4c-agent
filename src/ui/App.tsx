@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
 import { InputBox } from './InputBox.js';
 import { SessionPicker } from './SessionPicker.js';
@@ -21,6 +21,8 @@ import { formatTokenCount, formatElapsed, renderProgressBar, progressBarFilledCe
 import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
+import { ConfigStore, type ConfigScope } from '../session/configStore.js';
+import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } from './highlightColor.js';
 import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
 import {
@@ -41,6 +43,10 @@ export interface AppProps {
   initialImage?: string;
   sessionStore: SessionStore;
   runLogger: RunLogger;
+  /** Per-session `<timestamp>.FULLCONTEXT.jsonl`, same directory/convention as runLogger's own
+   * file - the raw wire-level transcript (every provider request/response, every tool call and
+   * result), distinct from runLogger's already-derived, display-oriented event stream. */
+  fullContextLogger: RunLogger;
   /** Set by cli.ts when this process was launched with `--resume <id>` - seeds the visible
    * scrollback and currentSessionIdRef on mount, since a fresh process handoff (see `restart`
    * below) never gets a chance to append it mid-session. */
@@ -61,6 +67,21 @@ export interface AppProps {
    * docs/o4c-agent-design.md §2.3/§7.1 - this deliberately doesn't guess). Undefined hides the
    * status bar's progress-bar/percentage, showing just the raw token estimate instead. */
   contextWindow?: number;
+  /** Caps how many provider round-trips a single turn can make before giving up - see
+   * `AgentLoop.run()`'s own `RunOptions.maxIterations` doc comment (0/negative = no cap). Only
+   * known when set explicitly via config.json's `maxIterations` key; undefined falls back to
+   * `AgentLoop`'s own default (25) unchanged. */
+  maxIterations?: number;
+  /** The "/" command palette's highlight color (border + selected-row color), resolved once at
+   * cli.ts startup from config.json's `highlightColor` key (default amber, matching theme.ts) -
+   * seeds local state here (see /config-highlightcolor's own handling below) so a live
+   * /config-highlightcolor takes effect immediately, without needing a restart. */
+  initialHighlightColor: string;
+  /** Test-only override for ConfigStore's global scope (~/.o4c otherwise) - same isolation
+   * convention `ensureTrusted`/`seedLocalConfig`/`resolveO4cMd` already use elsewhere, so
+   * /config-global-highlightcolor never writes into the real machine's global config during a
+   * test. cli.ts never passes this - production always uses the real ~/.o4c. */
+  configGlobalDir?: string;
 }
 
 // Above this many tool_call/tool_result events in a single turn, further ones collapse into a
@@ -177,14 +198,31 @@ export function App({
   initialImage,
   sessionStore,
   runLogger,
+  fullContextLogger,
   initialSession,
   restart,
   projectRoot,
   model,
   contextWindow,
+  maxIterations,
+  initialHighlightColor,
+  configGlobalDir,
 }: AppProps) {
   const { exit } = useApp();
   const plansDir = plansDirFor(projectRoot);
+  // Undefined projectRoot already means "untrusted/no project" (ensureTrusted's own contract,
+  // projectContext.ts) - matches exactly what ConfigStore.hasScope('local') needs to correctly
+  // refuse a local-scope write, so no separate trusted flag needs threading down from cli.ts.
+  const configStore = useMemo(
+    () => new ConfigStore(projectRoot, configGlobalDir),
+    [projectRoot, configGlobalDir],
+  );
+  // Read-path validation (defense in depth - the /config-highlightcolor write path validates too,
+  // but config.json is hand-editable and this is the value that actually reaches Ink): an
+  // unrecognized color is SILENTLY DROPPED by Ink/chalk (verified at the byte level 2026-09-27 -
+  // no color SGR emitted at all), so an unvalidated bad value would strip the palette highlight
+  // styling with no error anywhere. resolveHighlightColor falls it back to the theme accent.
+  const [highlightColor, setHighlightColor] = useState(() => resolveHighlightColor(initialHighlightColor));
   const [textWindow, dispatchTextWindow] = useReducer(textWindowReducer, undefined, () => {
     let id = 0;
     const banner = makeBlock(id++, [
@@ -247,6 +285,12 @@ export function App({
   // (see handleEscape below). Null the rest of the time, so an Escape press with nothing running
   // is a safe no-op rather than needing its own isThinking check.
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Tracks the most recent delta's kind for the turn currently streaming - lets the live display
+  // tell the instant reasoning starts (to prefix "[think] ") and the instant it switches to the
+  // real answer (to start a fresh line rather than run on from the reasoning text). Reset to null
+  // at the start of every turn in processTurn, alongside its other per-turn tracking state.
+  const lastDeltaKindRef = useRef<'think' | 'text' | null>(null);
 
   // Bumped only by handleForceRecover (Ctrl+C) - lets a processTurn invocation that's still
   // stuck in flight when the user force-recovers recognize, whenever it eventually does settle,
@@ -311,14 +355,19 @@ export function App({
   const [confirmDialog, setConfirmDialog] = useState<{
     id: number;
     message: string;
+    tool: Tool;
+    input: Record<string, unknown>;
     resolve: (confirmed: boolean) => void;
   } | null>(null);
 
-  const askConfirm = useCallback((message: string): Promise<boolean> => {
-    return new Promise((resolve) => {
-      setConfirmDialog({ id: nextDialogId++, message, resolve });
-    });
-  }, []);
+  const askConfirm = useCallback(
+    (message: string, tool: Tool, input: Record<string, unknown>): Promise<boolean> => {
+      return new Promise((resolve) => {
+        setConfirmDialog({ id: nextDialogId++, message, tool, input, resolve });
+      });
+    },
+    [],
+  );
 
   // Real bug found via hands-on testing, 2026-09-26: switching to Auto mid-turn (Tab or /mode,
   // while a long multi-tool-call turn was already running) kept confirming every remaining
@@ -347,11 +396,32 @@ export function App({
       const access = classifyToolAccess(modeRef.current, tool, input, plansDirRef.current);
       if (access === 'allow') return 'allow';
       if (access === 'deny') return 'deny';
-      const ok = await askConfirm(`Allow ${tool.name}(${JSON.stringify(input)})?`);
+      const ok = await askConfirm(`Allow ${tool.name}(${JSON.stringify(input)})?`, tool, input);
       return ok ? 'allow' : 'deny';
     },
     [askConfirm],
   );
+
+  // A mode switch (Tab/`/mode`) should take effect immediately on an already-*open* confirmation
+  // too, not just on the next tool call (modeRef above already covers that case) - real bug found
+  // via direct user report: switching Manual -> Auto mid-turn while a permission prompt was up
+  // left the prompt sitting there, blocking, instead of auto-approving it - even though Auto's
+  // entire point is "don't ask." Re-runs the exact same classifyToolAccess the open prompt's
+  // question came from, against the *new* mode: an 'allow' or 'deny' result resolves and closes
+  // the dialog right away (matching what would have happened had this mode been active when the
+  // call was first made); 'confirm' (the new mode still wants a real answer for this specific
+  // call - e.g. Manual -> Accept Edits while confirming a run_shell, which Accept Edits still
+  // gates) leaves the dialog open, unchanged. Deliberately keyed on `mode` alone, not
+  // `confirmDialog` - this only needs to react to a mode *change*, and re-evaluating a dialog
+  // against the same mode it was already opened under is a same-decision no-op anyway.
+  useEffect(() => {
+    if (!confirmDialog) return;
+    const access = classifyToolAccess(mode, confirmDialog.tool, confirmDialog.input, plansDir);
+    if (access === 'confirm') return;
+    confirmDialog.resolve(access === 'allow');
+    setConfirmDialog(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   const pushBlock = useCallback((lines: Line[]) => {
     dispatchTextWindow({ type: 'commit', lines });
@@ -423,17 +493,9 @@ export function App({
 
   const processTurn = useCallback(
     async (input: string) => {
-      // /exit and /quit are intercepted earlier, in handleSubmit, before they can ever be
-      // queued behind a busy turn - they never reach here.
-      if (input === '/clear') {
-        // Handed off to a brand-new process (see AppProps.restart's doc comment) rather than
-        // reset in-place - the only way to get a genuinely clear screen. The just-cleared
-        // session's file (if it had been autosaved) is left alone on disk, resumable via /resume
-        // - no resumeId is passed, so the new process starts with a brand-new session id instead
-        // of overwriting that one.
-        restart();
-        setTimeout(() => exit(), 0);
-      } else if (input === '/resume') {
+      // /exit, /quit, and /clear are intercepted earlier, in handleSubmit, before they can ever
+      // be queued behind a busy turn - they never reach here.
+      if (input === '/resume') {
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
         const sessions = await sessionStore.readManifest();
         if (sessions.length === 0) {
@@ -543,6 +605,36 @@ export function App({
             pushBlock([{ kind: 'system', text: 'Config cancelled.' }]);
           }
         }
+      } else if (
+        commandName(input) === '/config-highlightcolor' ||
+        commandName(input) === '/config-local-highlightcolor' ||
+        commandName(input) === '/config-global-highlightcolor'
+      ) {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const name = commandName(input);
+        const scope: ConfigScope = name === '/config-global-highlightcolor' ? 'global' : 'local';
+        const color = input.slice(name.length).trim();
+        const usage = `Usage: ${name} <color> - a #RRGGBB hex code or one of: ${HIGHLIGHT_COLOR_NAMES.join(', ')}`;
+        if (!color) {
+          pushBlock([{ kind: 'error', text: usage }]);
+        } else if (!isValidHighlightColor(color)) {
+          pushBlock([{ kind: 'error', text: `Unrecognized color "${color}". ${usage}` }]);
+        } else if (scope === 'local' && !configStore.hasScope('local')) {
+          pushBlock([
+            {
+              kind: 'error',
+              text: 'No trusted project in this directory - nothing to set a local value into. Trust this project first, or use /config-global-highlightcolor instead.',
+            },
+          ]);
+        } else {
+          try {
+            await configStore.set(scope, 'highlightColor', color);
+            setHighlightColor(color);
+            pushBlock([{ kind: 'system', text: `Highlight color set to ${color} (${scope}).` }]);
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
+        }
       } else if (commandName(input) === '/set-sessionname') {
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
         const newName = input.slice(commandName(input).length).trim();
@@ -617,6 +709,7 @@ export function App({
         setIsThinking(true);
         let toolEventCount = 0;
         let summaryLine: Line | undefined;
+        lastDeltaKindRef.current = null;
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
@@ -631,6 +724,14 @@ export function App({
             modeInstruction: modeSystemPrompt(mode, plansDir),
             signal: controller.signal,
             contextWindow,
+            maxIterations,
+            // The full request/response wire transcript - "the sends", distinct from onEvent's
+            // already-derived AgentEvent stream below (which only ever carries the *response*
+            // side, split/reshaped for display). Fire-and-forget, same reasoning as runLogger's
+            // own calls: a logging failure must never interrupt the turn itself.
+            onProviderCall: (call) => {
+              void fullContextLogger.log({ type: 'provider_call', ...call });
+            },
             onEvent: (event: AgentEvent) => {
               // Raw streamed text - a live-preview-only signal, not logged (the run log already
               // gets the complete, final 'think'/'text' events below once the stream ends) and
@@ -639,7 +740,20 @@ export function App({
               // tracking) - handled first and returned early since every other event type below
               // means "a new, distinct line", the opposite of what a delta continuation needs.
               if (event.type === 'delta') {
-                if (event.text) dispatchTextWindow({ type: 'appendDelta', text: event.text });
+                if (event.text) {
+                  // event.kind reflects what the provider actually said this chunk was (see
+                  // AgentEvent's own doc comment) - defaulted to 'text' only for a provider/fake
+                  // that predates this and never sets it. A kind change from the previous delta
+                  // (including the very first delta of the turn, since the ref starts null) means
+                  // a fresh line: reasoning starting gets a "[think] " label live, the instant it
+                  // begins streaming rather than only after the fact; the answer starting after
+                  // reasoning gets a clean new line instead of running on from the think text.
+                  const kind = event.kind ?? 'text';
+                  const startNewLine = lastDeltaKindRef.current !== kind;
+                  lastDeltaKindRef.current = kind;
+                  const text = startNewLine && kind === 'think' ? `[think] ${event.text}` : event.text;
+                  dispatchTextWindow({ type: 'appendDelta', text, startNewLine });
+                }
                 return;
               }
 
@@ -647,6 +761,11 @@ export function App({
               // whether) anything gets displayed - fire-and-forget, a logging failure shouldn't
               // interrupt the turn.
               void runLogger.log({ event });
+              // Same event, also into the full-context log - tool_call/tool_result here is what
+              // completes "everything" alongside onProviderCall's request/response pairs above
+              // (a tool's actual execution result isn't part of any provider request/response,
+              // it's the agent's own local action).
+              void fullContextLogger.log({ event });
 
               const isToolEvent = event.type === 'tool_call' || event.type === 'tool_result';
               if (isToolEvent) toolEventCount += 1;
@@ -868,6 +987,35 @@ export function App({
         return;
       }
 
+      // /clear needs the exact same bypass, for a different failure mode: queuing it (like any
+      // other message) let it fire silently later - the instant whatever unrelated turn was busy
+      // finished, with zero further keypress. That's the confirmed root cause of the
+      // "spontaneous" screen reset (reproduced live 2026-09-27): the queue only surfaces a small,
+      // easy-to-miss "Queued #1: /clear" line, so the reset appeared to happen with no user
+      // action at all - the real trigger (typing /clear) had happened earlier, decoupled in time
+      // from the effect. Handled directly here (not routed through processTurn) so it can't touch
+      // that function's shared end-of-turn dequeue/isProcessing-reset code, which assumes a real
+      // turn either just finished or was genuinely queued - neither is true for a bypass like
+      // this, and running it through there would wrongly clear isProcessing out from under a
+      // still-busy turn.
+      if (input === '/clear') {
+        // Best-effort abort of any in-flight turn first (same as Escape/Ctrl+C) - not just
+        // politeness. Without this, a busy turn's still-arriving delta/think events keep
+        // updating the live status bar's token count and the in-flight text for however long it
+        // takes the abort signal (or the request's own timeout) to actually land, all while this
+        // process is mid-exit. Real, reported symptom this produces: /clear during a long think
+        // still showing a large, growing token count afterward - not the new fresh process
+        // inheriting anything (a genuinely new AgentLoop starts at 0), but Windows Terminal's own
+        // ESC[2J limitation (see resizeReflowFix.ts's doc comment: it scrolls the stale frame into
+        // scrollback rather than truly erasing it) leaving that last, larger frame from the dying
+        // old process visible above the new one's fresh banner. Stopping the old turn from
+        // rendering anything further shrinks this window as much as possible.
+        abortControllerRef.current?.abort();
+        restart();
+        setTimeout(() => exit(), 0);
+        return;
+      }
+
       if (isProcessing) {
         queuedInputsRef.current.push(input);
         setQueuedPreview([...queuedInputsRef.current]);
@@ -877,7 +1025,7 @@ export function App({
       setIsProcessing(true);
       void processTurn(input);
     },
-    [isProcessing, processTurn, exit],
+    [isProcessing, processTurn, exit, restart],
   );
 
   const handlePaletteSelect = useCallback(
@@ -1006,15 +1154,22 @@ export function App({
           sessions={resumePicker.sessions}
           onSelect={handlePickerSelect}
           onCancel={handlePickerCancel}
+          highlightColor={highlightColor}
         />
       ) : modePicker ? (
-        <ModePicker currentMode={mode} onSelect={handleModePickerSelect} onCancel={handleModePickerCancel} />
+        <ModePicker
+          currentMode={mode}
+          onSelect={handleModePickerSelect}
+          onCancel={handleModePickerCancel}
+          highlightColor={highlightColor}
+        />
       ) : setPicker ? (
         <CommandFamilyPicker
           title="Choose a setting (↑/↓ to choose, Enter to select, Esc to cancel):"
           commands={setCommands()}
           onSelect={handleSetPickerSelect}
           onCancel={handleSetPickerCancel}
+          highlightColor={highlightColor}
         />
       ) : setFamilyOpen ? (
         <CommandFamilyPicker
@@ -1022,6 +1177,7 @@ export function App({
           commands={setFamilyMatches}
           onSelect={handleSetFamilySelect}
           onCancel={handlePaletteCancel}
+          highlightColor={highlightColor}
         />
       ) : configPicker ? (
         <CommandFamilyPicker
@@ -1029,6 +1185,7 @@ export function App({
           commands={configCommands()}
           onSelect={handleConfigPickerSelect}
           onCancel={handleConfigPickerCancel}
+          highlightColor={highlightColor}
         />
       ) : configFamilyOpen ? (
         <CommandFamilyPicker
@@ -1036,9 +1193,15 @@ export function App({
           commands={configFamilyMatches}
           onSelect={handleConfigFamilySelect}
           onCancel={handlePaletteCancel}
+          highlightColor={highlightColor}
         />
       ) : paletteOpen ? (
-        <CommandPalette commands={paletteMatches} onSelect={handlePaletteSelect} onCancel={handlePaletteCancel} />
+        <CommandPalette
+          commands={paletteMatches}
+          onSelect={handlePaletteSelect}
+          onCancel={handlePaletteCancel}
+          highlightColor={highlightColor}
+        />
       ) : null}
       {queuedPreview.map((q, i) => (
         <Text key={i} color={theme.border}>

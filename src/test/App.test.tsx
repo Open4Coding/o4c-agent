@@ -11,6 +11,7 @@ import { MockProvider } from '../providers/mock.js';
 import { defaultTools } from '../tools/index.js';
 import { SessionStore } from '../session/sessionStore.js';
 import { RunLogger } from '../session/runLog.js';
+import { ConfigStore } from '../session/configStore.js';
 import { userInputEntry, aiResponseEntry, toWireMessages } from '../agent/contextEntry.js';
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 
@@ -30,11 +31,16 @@ class HangingProvider implements LLMProvider {
 // AgentLoop's own rollback logic (already covered directly in loop.test.ts).
 class AbortAwareHangingProvider implements LLMProvider {
   readonly name = 'abort-aware-hanging';
+  // Observable from a test without needing to catch the rejection itself - lets a test confirm
+  // the signal actually fired (e.g. /clear mid-turn) without also having to handle/await the
+  // rejected promise this class's own call site never awaits either.
+  public aborted = false;
   complete(request: CompletionRequest): Promise<CompletionResponse> {
     return new Promise((_, reject) => {
-      request.signal?.addEventListener('abort', () =>
-        reject(new Error('simulated in-flight cancellation')),
-      );
+      request.signal?.addEventListener('abort', () => {
+        this.aborted = true;
+        reject(new Error('simulated in-flight cancellation'));
+      });
     });
   }
 }
@@ -156,6 +162,30 @@ class ThinkingWithToolProvider implements LLMProvider {
   }
 }
 
+// Streams a real 'think' chunk via onToken, then pauses (until the test calls resume()) before
+// streaming the real answer and resolving - lets a test inspect the LIVE frame mid-turn, the
+// actual behavior being tested (a live "[think]" label the instant reasoning starts streaming,
+// not just a post-hoc one after the turn completes).
+class StreamingThinkProvider implements LLMProvider {
+  readonly name = 'streaming-think-test';
+  private release!: () => void;
+  private paused: Promise<void>;
+  constructor() {
+    this.paused = new Promise((resolve) => {
+      this.release = resolve;
+    });
+  }
+  resume(): void {
+    this.release();
+  }
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    request.onToken?.('reasoning about it', 'think');
+    await this.paused;
+    request.onToken?.('the final answer', 'text');
+    return { content: 'the final answer', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
 // Calls run_shell once with a harmless command, then ends the turn.
 class RunShellProvider implements LLMProvider {
   readonly name = 'run-shell-test';
@@ -254,9 +284,13 @@ async function setup(opts: {
   // `<projectRoot>/.o4c/plans/`. Omitted (as every non-Plan-Write test does) means Plan-Write
   // behaves exactly like plain Plan (see modePolicy.ts's plansDirFor(undefined) fallback).
   projectRoot?: string;
+  // Test isolation for /config-global-highlightcolor - see AppProps.configGlobalDir's own doc
+  // comment. Omitted means the real ~/.o4c, exactly like every other test that never touches it.
+  configGlobalDir?: string;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
+  const fullContextLogger = new RunLogger(join(opts.dir, 'logs'), 'FULLCONTEXT');
   const loop = new AgentLoop(opts.provider ?? new MockProvider(), defaultTools, 'test system prompt');
   // /clear and /resume now hand off to a brand-new process instead of resetting state
   // in-place (see AppProps.restart's doc comment) - nothing to actually spawn in a test, so this
@@ -270,15 +304,18 @@ async function setup(opts: {
       loop,
       sessionStore: store,
       runLogger,
+      fullContextLogger,
       initialSession: opts.initialSession,
       restart,
       projectRoot: opts.projectRoot,
       model: 'test-model',
+      initialHighlightColor: '#FFBF00',
+      configGlobalDir: opts.configGlobalDir,
     }),
   );
   liveInstances.push(instance);
   await tick();
-  return { ...instance, loop, store, runLogger, restartCalls };
+  return { ...instance, loop, store, runLogger, fullContextLogger, restartCalls };
 }
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -309,6 +346,47 @@ test('/exit bypasses the FIFO queue even while a turn is stuck processing, inste
     // Before the fix, this would have been queued and shown as "Queued #1: /exit" until the
     // hung turn eventually finished - which for a genuinely hung request is never.
     assert.equal(anyFrameIncludes(frames, 'Queued #1: /exit'), false);
+  });
+});
+
+test('/clear bypasses the FIFO queue even while a turn is busy, instead of firing silently once it finishes', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, restartCalls } = await setup({ dir, provider: new HangingProvider() });
+
+    // Kick off a turn that will never resolve, so isProcessing stays true indefinitely.
+    await submit(stdin, 'this will hang forever');
+    await tick(50);
+
+    await submit(stdin, '/clear');
+    await tick(50);
+
+    // Before the fix, this queued silently (shown only as "Queued #1: /clear") and only fired -
+    // unannounced, no further keypress - once the hung turn eventually finished (never, here).
+    // The real bug this reproduces: a /clear typed while busy appeared to reset the screen with
+    // no user action at all, because the actual trigger and its effect were separated in time.
+    assert.equal(anyFrameIncludes(frames, 'Queued #1: /clear'), false);
+    assert.deepEqual(restartCalls, [undefined]);
+  });
+});
+
+test('/clear mid-turn aborts the in-flight turn first, not just bypassing the queue', async () => {
+  await withTempDir(async (dir) => {
+    const provider = new AbortAwareHangingProvider();
+    const { stdin, restartCalls } = await setup({ dir, provider });
+
+    await submit(stdin, 'this will hang until aborted');
+    await tick(50);
+    assert.equal(provider.aborted, false);
+
+    await submit(stdin, '/clear');
+    await tick(50);
+
+    // Real reported symptom this prevents: without aborting first, the busy turn's still-arriving
+    // delta/think events kept updating the live status bar's token count for however long it took
+    // to settle on its own - all while this process was already mid-exit - so /clear during a
+    // long think appeared to leave a large, growing count on screen instead of resetting to 0.
+    assert.equal(provider.aborted, true);
+    assert.deepEqual(restartCalls, [undefined]);
   });
 });
 
@@ -381,6 +459,51 @@ test('a turn with many tool calls collapses the display past the cap, but logs e
   });
 });
 
+test('a real turn writes a separate <timestamp>.FULLCONTEXT.jsonl with the full request/response and tool events', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, runLogger, fullContextLogger } = await setup({ dir });
+
+    await submit(stdin, 'read something please');
+    await waitFor(() => anyFrameIncludes(frames, 'canned mock response'));
+
+    // Both loggers' own ensureFile() is itself async (an awaited mkdir before filePath is set) -
+    // fire-and-forget from App.tsx same as every other runLogger.log() call, so the file/path
+    // existing is not guaranteed the instant the render committed. Poll for both paths first.
+    let plainPath: string | undefined;
+    let fullPath: string | undefined;
+    await waitFor(() => {
+      plainPath = runLogger.getFilePath();
+      fullPath = fullContextLogger.getFilePath();
+      return plainPath !== undefined && fullPath !== undefined;
+    });
+    // Same directory/timestamp convention, distinct file - never collides with runLogger's own.
+    assert.notEqual(fullPath, plainPath);
+    assert.ok((fullPath as string).endsWith('.FULLCONTEXT.jsonl'));
+
+    let lines: string[] = [];
+    await waitFor(async () => {
+      const raw = await readFile(fullPath as string, 'utf-8');
+      lines = raw.trim().split('\n').filter(Boolean);
+      return lines.some((l) => JSON.parse(l).type === 'provider_call');
+    });
+    const parsed = lines.map((l) => JSON.parse(l));
+
+    const providerCalls = parsed.filter((e) => e.type === 'provider_call');
+    assert.ok(providerCalls.length > 0);
+    // The actual wire-level payload - request messages/tools and the full raw response, not just
+    // a reference to it.
+    assert.ok(Array.isArray(providerCalls[0].request.messages));
+    assert.ok(Array.isArray(providerCalls[0].request.tools));
+    assert.ok('content' in providerCalls[0].response);
+    assert.ok('stopReason' in providerCalls[0].response);
+
+    // Tool calls/results also land here (MockProvider always calls a tool on its first round) -
+    // not just provider round-trips, matching "everything" rather than half the picture.
+    assert.ok(parsed.some((e) => e.event?.type === 'tool_call'));
+    assert.ok(parsed.some((e) => e.event?.type === 'tool_result'));
+  });
+});
+
 test('a <think> block shows live as [think], is logged as its own event, and never leaks into the final answer', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, loop, runLogger } = await setup({ dir, provider: new ThinkingWithToolProvider() });
@@ -423,6 +546,28 @@ test('a <think> block shows live as [think], is logged as its own event, and nev
     const events = lines.map((l) => JSON.parse(l).event);
     assert.ok(events.some((e) => e.type === 'think' && e.text === 'let me check the file first'));
     assert.ok(events.some((e) => e.type === 'text' && e.text === 'The answer is 4.'));
+  });
+});
+
+test('a live-streaming think chunk shows "[think] " the instant reasoning starts, before the turn completes', async () => {
+  await withTempDir(async (dir) => {
+    const provider = new StreamingThinkProvider();
+    const { stdin, lastFrame } = await setup({ dir, provider });
+
+    await submit(stdin, 'what is 2+2?');
+    // The turn is deliberately still in flight here (provider is paused mid-stream) - this is the
+    // real behavior being fixed: previously nothing distinguished a live reasoning chunk from a
+    // live answer chunk, so this label never appeared until after the fact (see the ThinkingWithToolProvider
+    // test above, which only ever exercises the non-streamed fallback path).
+    await waitFor(() => (lastFrame() ?? '').includes('[think] reasoning about it'));
+
+    // The real answer hasn't streamed in yet - it's still paused - so it must not appear yet.
+    assert.equal((lastFrame() ?? '').includes('the final answer'), false);
+
+    provider.resume();
+    await waitFor(() => (lastFrame() ?? '').includes('the final answer'));
+    // Once the answer starts, it's on its own line, not run on from the reasoning text.
+    assert.equal((lastFrame() ?? '').includes('reasoning about itthe final answer'), false);
   });
 });
 
@@ -1071,28 +1216,39 @@ test('typing "/set-" (without submitting) live-reveals the /set-* family, which 
   });
 });
 
-test('/config says there is nothing to configure yet, with no /config-* commands registered (#6: frontend surface only, no real plugins this round)', async () => {
+test('/config opens a picker of /config-* commands; selecting one prefills the input box instead of running it', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, lastFrame } = await setup({ dir });
 
     await submit(stdin, '/config');
     await tick(50);
+    assert.ok(anyFrameIncludes(frames, 'Choose a setting'));
+    assert.ok(anyFrameIncludes(frames, '/config-highlightcolor'));
 
-    assert.ok(anyFrameIncludes(frames, 'Nothing to configure yet'));
-    // No picker should ever open for an empty family - same "Nothing to X yet" short-circuit
-    // shape as /set's own empty-family branch.
+    stdin.write(ENTER); // first entry - selects /config-highlightcolor
+    await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor'));
+
+    // The picker is gone and the command was NOT run yet - just handed to the input box for the
+    // user to finish typing the argument onto, same contract as /set's own picker.
     assert.equal((lastFrame() ?? '').includes('Choose a setting'), false);
+    assert.equal(anyFrameIncludes(frames, 'Highlight color set'), false);
   });
 });
 
-test('typing "/config-" live-reveals nothing while no /config-* commands are registered, rather than a spurious empty picker', async () => {
+test('typing "/config-" (without submitting) live-reveals the /config-* family, which the main palette otherwise hides entirely', async () => {
   await withTempDir(async (dir) => {
     const { stdin, lastFrame } = await setup({ dir });
 
-    await type(stdin, '/config-');
-    await tick(100);
+    // "/config" alone matches only the (non-hidden) /config command itself - hidden family
+    // members aren't shown yet.
+    await type(stdin, '/config');
+    await waitFor(() => (lastFrame() ?? '').includes('/config'));
+    assert.equal((lastFrame() ?? '').includes('/config-highlightcolor'), false);
 
-    assert.equal((lastFrame() ?? '').includes('Matching /config-* commands'), false);
+    // The trailing "-" flips it over to the family picker, same live-reveal /set-* already has.
+    await type(stdin, '-');
+    await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor'));
+    assert.ok((lastFrame() ?? '').includes('Matching /config-* commands'));
   });
 });
 
@@ -1102,6 +1258,82 @@ test('/config itself (unlike hidden /config-* entries) shows up in the bare "/" 
 
     await type(stdin, '/');
     await waitFor(() => (lastFrame() ?? '').includes('/config'));
+  });
+});
+
+test('/config-highlightcolor with no argument shows a usage error, writes nothing', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = dir;
+    const { stdin, lastFrame } = await setup({ dir, projectRoot });
+
+    // A trailing space (not the bare name alone) is how this is actually reachable in real use -
+    // typing the bare name with no space keeps the live /config-* family picker open (see
+    // composingConfigFamily/configFamilyOpen), which owns Enter itself (select+prefill) rather
+    // than ever handing the keystroke to handleSubmit. A space is exactly what the picker's own
+    // prefill already appends, and what ends "composing" the command name (isComposingCommand).
+    await submit(stdin, '/config-highlightcolor ');
+    await waitFor(() => (lastFrame() ?? '').includes('Usage: /config-highlightcolor'));
+
+    const local = await new ConfigStore(projectRoot).readScope('local');
+    assert.equal(local.highlightColor, undefined);
+  });
+});
+
+test('/config-highlightcolor with an unrecognized color shows an error, writes nothing', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = dir;
+    const { stdin, lastFrame } = await setup({ dir, projectRoot });
+
+    await submit(stdin, '/config-highlightcolor notarealcolor');
+    await waitFor(() => (lastFrame() ?? '').includes('Unrecognized color "notarealcolor"'));
+
+    const local = await new ConfigStore(projectRoot).readScope('local');
+    assert.equal(local.highlightColor, undefined);
+  });
+});
+
+test('/config-highlightcolor with no trusted project says so instead of writing anywhere', async () => {
+  await withTempDir(async (dir) => {
+    // No projectRoot passed - same as an untrusted/no-project run (App.tsx's own contract).
+    const { stdin, frames } = await setup({ dir });
+
+    await submit(stdin, '/config-highlightcolor #112233');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'No trusted project in this directory'));
+  });
+});
+
+test('/config-highlightcolor (bare) and /config-local-highlightcolor both write the same project-shared scope', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = dir;
+    const { stdin, frames, lastFrame } = await setup({ dir, projectRoot });
+
+    await submit(stdin, '/config-highlightcolor #112233');
+    await waitFor(() => (lastFrame() ?? '').includes('Highlight color set to #112233 (local)'));
+    assert.equal((await new ConfigStore(projectRoot).readScope('local')).highlightColor, '#112233');
+    // Never touches the global file.
+    assert.equal(anyFrameIncludes(frames, '#112233 (global)'), false);
+
+    await submit(stdin, '/config-local-highlightcolor blueBright');
+    await waitFor(() => (lastFrame() ?? '').includes('Highlight color set to blueBright (local)'));
+    assert.equal((await new ConfigStore(projectRoot).readScope('local')).highlightColor, 'blueBright');
+  });
+});
+
+test('/config-global-highlightcolor writes only the global scope, isolated from the real ~/.o4c during the test', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const projectRoot = join(dir, 'project');
+    const { stdin, lastFrame } = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir });
+
+    await submit(stdin, '/config-global-highlightcolor #445566');
+    await waitFor(() => (lastFrame() ?? '').includes('Highlight color set to #445566 (global)'));
+
+    const store = new ConfigStore(projectRoot, configGlobalDir);
+    assert.equal((await store.readScope('global')).highlightColor, '#445566');
+    // The project-shared (local) scope is untouched.
+    assert.equal((await store.readScope('local')).highlightColor, undefined);
   });
 });
 
@@ -1179,6 +1411,14 @@ test('switching to Auto mid-turn (Tab) takes effect on the very next tool call, 
   // exact scenario: two write_file calls in one turn, mode switched to Auto in the gap between
   // them (while the first call's confirm dialog is still showing), and asserts the second call
   // runs with no confirmation prompt at all.
+  //
+  // Second real bug, found the same way, fixed later: the mode switch above only ever reached
+  // *future* tool calls - an already-*open* dialog (the first call's, still on screen when Tab is
+  // pressed) used to just sit there needing a manual Yes/No regardless of the new mode ("does not
+  // close the window underneath asking for permission"), even though Auto's entire point is "don't
+  // ask." Fixed via App.tsx's own mode-change effect, which re-resolves an open dialog against
+  // whatever mode it's switched to. This test now covers both fixes: no DOWN/ENTER for the first
+  // dialog either, once Tab lands on Auto.
   await withTempDir(async (dir) => {
     const path1 = join(dir, 'first.txt');
     const path2 = join(dir, 'second.txt');
@@ -1195,14 +1435,9 @@ test('switching to Auto mid-turn (Tab) takes effect on the very next tool call, 
     await tick(100);
     assert.ok(anyFrameIncludes(frames, 'Mode set to Auto'));
 
-    // Approve the already-pending first confirmation (it started under Manual, so it's still a
-    // real dialog) to let the turn continue into its second tool call.
-    stdin.write(DOWN);
-    await tick(100);
-    stdin.write(ENTER);
-
-    // The second write_file call must now run with zero confirmation - before the fix, this
-    // would hang here waiting on a second "Allow write_file...?" dialog nothing ever answers.
+    // Both calls now run with zero further confirmation - before either fix, this would hang here
+    // waiting on a dialog nothing ever answers: the already-open first one (fix #2), or a second
+    // one for the next call (fix #1).
     await waitFor(async () => {
       try {
         return (await readFile(path2, 'utf-8')) === 'second';
@@ -1211,6 +1446,7 @@ test('switching to Auto mid-turn (Tab) takes effect on the very next tool call, 
       }
     });
     assert.equal(await readFile(path1, 'utf-8'), 'first');
+    assert.equal((lastFrame() ?? '').includes('Allow write_file'), false);
   });
 });
 

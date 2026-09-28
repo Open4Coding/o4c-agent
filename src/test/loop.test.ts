@@ -4,7 +4,7 @@ import { AgentLoop, AbortedError, MaxIterationsError } from '../agent/loop.js';
 import { aiResponseEntry, estimateTokens, userInputEntry } from '../agent/contextEntry.js';
 import { FakeProvider } from './fakeProvider.js';
 import { makeFakeTool } from './fakeTool.js';
-import type { LLMProvider } from '../providers/types.js';
+import type { CompletionRequest, CompletionResponse, LLMProvider } from '../providers/types.js';
 
 test('returns immediately when the model ends the turn with no tool calls', async () => {
   const provider = new FakeProvider([
@@ -16,6 +16,47 @@ test('returns immediately when the model ends the turn with no tool calls', asyn
 
   assert.equal(result, 'the answer');
   assert.equal(provider.callCount, 1);
+});
+
+test('onProviderCall fires once per real provider round-trip with the exact request and response', async () => {
+  const tool = makeFakeTool('read_file', 'file contents here');
+  const provider = new FakeProvider([
+    {
+      content: 'let me check',
+      toolCalls: [{ id: 't1', name: 'read_file', input: { path: 'foo.txt' } }],
+      stopReason: 'tool_use',
+    },
+    { content: 'the file says: file contents here', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+  const calls: Array<{ request: unknown; response: unknown }> = [];
+
+  await loop.run('what does foo.txt say?', { onProviderCall: (call) => calls.push(call) });
+
+  assert.equal(calls.length, 2);
+  assert.equal((calls[0].response as { content: string }).content, 'let me check');
+  assert.equal((calls[1].response as { content: string }).content, 'the file says: file contents here');
+  // The exact request actually sent, not a re-derived approximation - same messages FakeProvider
+  // itself recorded.
+  assert.deepEqual(
+    (calls[1].request as { messages: unknown[] }).messages,
+    provider.receivedRequests[1].messages,
+  );
+});
+
+test('onProviderCall is never called for a failed/aborted request', async () => {
+  const provider: LLMProvider = {
+    name: 'always-fails',
+    complete: async () => {
+      throw new Error('boom');
+    },
+  };
+  const loop = new AgentLoop(provider, [], 'system');
+  const calls: unknown[] = [];
+
+  await assert.rejects(() => loop.run('hello', { onProviderCall: (call) => calls.push(call) }));
+
+  assert.equal(calls.length, 0);
 });
 
 test('executes a tool call, feeds the result back, and returns the final answer', async () => {
@@ -91,6 +132,31 @@ test('stops after maxIterations if the model never ends the turn', async () => {
     MaxIterationsError,
   );
   assert.equal(provider.callCount, 3);
+});
+
+test('maxIterations of 0 or negative removes the cap entirely, not just raises it', async () => {
+  // Regression test for a real bug found via direct user report: a long autonomous turn against a
+  // local model hit the default 25-iteration cap well before it was actually done. Proves this
+  // isn't just "a generous default" - 30 tool-call rounds (past the old default of 25) followed
+  // by a real final answer must complete successfully, for both 0 and a negative value.
+  const tool = makeFakeTool('loop_tool', 'ok');
+  for (const maxIterations of [0, -1]) {
+    const toolRounds = Array.from({ length: 30 }, () => ({
+      content: '',
+      toolCalls: [{ id: 't', name: 'loop_tool', input: {} }],
+      stopReason: 'tool_use' as const,
+    }));
+    const provider = new FakeProvider([
+      ...toolRounds,
+      { content: 'done', toolCalls: [], stopReason: 'end_turn' as const },
+    ]);
+    const loop = new AgentLoop(provider, [tool], 'system');
+
+    const result = await loop.run('do a lot of work', { maxIterations });
+
+    assert.equal(result, 'done');
+    assert.equal(provider.callCount, 31);
+  }
 });
 
 test('retains conversation history across multiple run() calls', async () => {
@@ -339,6 +405,33 @@ test('streams a "delta" event per provider call, ahead of that call\'s own "text
   await loop.run('go', { onEvent: (e) => events.push(e.type) });
 
   assert.deepEqual(events, ['delta', 'text', 'tool_call', 'tool_result', 'delta', 'text']);
+});
+
+test('a "delta" event\'s kind reflects what the provider actually reported for that chunk (think vs. text)', async () => {
+  // FakeProvider always reports 'text' (it has no equivalent to a real provider's structured
+  // think/text split) - this exercises loop.ts's own passthrough of a provider that reports
+  // both kinds for one response, the real shape LocalProvider/AnthropicProvider send.
+  const provider: LLMProvider = {
+    name: 'kind-aware-test',
+    async complete(request: CompletionRequest): Promise<CompletionResponse> {
+      request.onToken?.('reasoning first', 'think');
+      request.onToken?.('the real answer', 'text');
+      return { content: 'the real answer', toolCalls: [], stopReason: 'end_turn' };
+    },
+  };
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const deltas: Array<{ text?: string; kind?: 'think' | 'text' }> = [];
+  await loop.run('go', {
+    onEvent: (e) => {
+      if (e.type === 'delta') deltas.push({ text: e.text, kind: e.kind });
+    },
+  });
+
+  assert.deepEqual(deltas, [
+    { text: 'reasoning first', kind: 'think' },
+    { text: 'the real answer', kind: 'text' },
+  ]);
 });
 
 test('a <think> block is split out: emitted as its own "think" event, and stripped from the final answer', async () => {

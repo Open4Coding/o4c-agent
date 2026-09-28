@@ -140,6 +140,54 @@ test('a connect-phase timeout (server never even responds) gives the "busy" mess
   }
 });
 
+test('idleTimeoutMs of 0 or negative disables the idle timeout entirely', async () => {
+  // Not just "large enough to not matter" - genuinely disabled. Proven by using a real gap (40ms)
+  // that a positive idle timeout smaller than it (this same shape passes with idleTimeoutMs: 30
+  // in the earlier test, aborting well before 40ms) would have tripped on.
+  function slowThenDoneResponse(): Response {
+    let sent = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent) {
+          controller.close();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        sent = true;
+        controller.enqueue(
+          new TextEncoder().encode('data: {"choices":[{"finish_reason":"stop","delta":{}}]}\n\n'),
+        );
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  }
+  for (const idleTimeoutMs of [0, -1]) {
+    const provider = new LocalProvider({ idleTimeoutMs });
+    const result = await withMockedFetch(slowThenDoneResponse, () => provider.complete(baseRequest));
+    assert.equal(result.stopReason, 'end_turn');
+  }
+});
+
+test('connectTimeoutMs of 0 or negative disables the connect timeout entirely', async () => {
+  // Same proof shape as the idle test above: a real 40ms delay before fetch() resolves, which a
+  // positive connect timeout smaller than it (30ms passes in the earlier "busy" test, aborting
+  // well before 40ms) would have tripped on.
+  for (const connectTimeoutMs of [0, -1]) {
+    const original = globalThis.fetch;
+    globalThis.fetch = ((_input: string | URL | Request, _init?: RequestInit) =>
+      new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(okResponse()), 40);
+      })) as typeof fetch;
+    try {
+      const provider = new LocalProvider({ connectTimeoutMs });
+      const result = await provider.complete(baseRequest);
+      assert.ok(result);
+    } finally {
+      globalThis.fetch = original;
+    }
+  }
+});
+
 test('a 401 with an API key already configured suggests it may be wrong, not "set" it', async () => {
   const provider = new LocalProvider({ apiKey: 'stale-key' });
   await assert.rejects(
