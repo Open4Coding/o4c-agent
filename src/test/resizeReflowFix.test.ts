@@ -34,6 +34,7 @@ function inkFrame(frame: string, previousFrameLines?: number): string {
 // recording `write`, mirroring the shape ink-testing-library's mock uses too.
 class MockStdout extends EventEmitter {
   columns = 100;
+  rows?: number;
   writes: string[] = [];
   write = (chunk: unknown): boolean => {
     this.writes.push(String(chunk));
@@ -240,6 +241,32 @@ test('a frame arriving after the console narrowed but before Node knows is held,
   // The stale-width spinner frame is skipped entirely. f1 expects 5 rows above the cursor but
   // what's actually there is f0, 7 rows at width 60: erase, then 5 newlines down.
   assert.deepEqual(stdout.writes, [f0, `${CSI}7A${CSI}J\n\n\n\n\n`, f1]);
+  uninstall();
+});
+
+test('a live region reflowed taller than the viewport skips the erase instead of blanking the screen', async () => {
+  // Regression test for a real bug found live: a long turn's live region (lots of tool call/
+  // result lines, or here just a wide frame narrowed hard) reflows to >= the terminal's actual
+  // row count. `${rows}A` can't reach the frame's true top in that case - ANSI clamps the cursor
+  // at row 1 - so the old code's `${CSI}J` erased the ENTIRE visible viewport, including any
+  // already-committed static history sitting above the live region, with no ED2-style scrollback
+  // archive to recover it from. Same setup as the plain narrowing test above (rows 7 vs expected
+  // 4 - a real mismatch, not a no-op), except the viewport is shorter than the reflowed height.
+  const stdout = new MockStdout();
+  stdout.rows = 5; // shorter than f0's reflowed height (7) at the new width
+  const uninstall = installResizeReflowFix(stdout, { settleMs: SETTLE });
+  const f0 = inkFrame(frameAt(100));
+  stdout.write(f0);
+
+  stdout.columns = 60;
+  stdout.emit('resize');
+  const f1 = inkFrame(frameAt(60), 4); // what Ink's own resize handler writes next
+  stdout.write(f1);
+
+  await tick(SETTLE * 3);
+  // No erase/cursor-up correction chunk in between - reconcile bailed out and f1 was replayed
+  // as-is, exactly like the "no resize" pass-through case, instead of erasing the viewport.
+  assert.deepEqual(stdout.writes, [f0, f1]);
   uninstall();
 });
 

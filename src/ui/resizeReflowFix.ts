@@ -55,7 +55,10 @@ const CURSOR_UP_ONE = `${CSI}1A`;
  *
  * Known residual limits:
  * - If the live region is taller than the visible viewport, part of the old frame is already in
- *   scrollback and can't be reached.
+ *   scrollback and can't be reached - `reconcile()` detects this (`rows >= stdout.rows`) and
+ *   skips the erase entirely rather than clamping the cursor at row 1 and wiping the whole
+ *   viewport (confirmed live: this is what was actually happening - not a harmless leftover, a
+ *   real screen-blanking bug). The trade is a stale frame remnant left on screen instead.
  * - The row math assumes the terminal REFLOWS wrapped lines on resize. Windows Terminal does
  *   (confirmed with the probe above - the cursor moved up exactly as lines unwrapped), as do
  *   iTerm2, Terminal.app, VTE/GNOME, kitty, Alacritty and tmux. xterm and legacy conhost do not
@@ -102,6 +105,7 @@ export function expectedUp(chunk: string): number {
 /** The bits of a TTY write stream this needs - structural so tests can use a plain mock. */
 export interface ReflowFixableStream extends NodeJS.EventEmitter {
   columns?: number;
+  rows?: number;
   write(chunk: unknown, ...rest: unknown[]): boolean;
 }
 
@@ -150,6 +154,17 @@ export function installResizeReflowFix(
     const { rows } = measureFrame(lastFrame, columns);
     const expected = expectedUp(chunk);
     if (rows === expected) return; // Ink's own erase lands exactly on the frame
+    // If the reflowed frame is at least as tall as the visible viewport, its top has already
+    // scrolled out by the time this runs (writing its own trailing '\n' while sitting on the
+    // last row necessarily scrolls the screen) - `${rows}A` can't reach it, ANSI just clamps the
+    // cursor at row 1. Erasing from there to end-of-screen (`${CSI}J`) would then wipe the WHOLE
+    // visible viewport, not just the stale frame - including any already-committed static history
+    // currently showing above it, and with no ED2-style scrollback archive to recover it from
+    // (confirmed live: a long turn with a tall live region blanked the entire scrollback down to
+    // the input box). Bail out instead: a stale remnant left on screen is a cosmetic leftover,
+    // silently erasing real conversation history is not an acceptable trade for it.
+    const viewportRows = stdout.rows;
+    if (viewportRows !== undefined && rows >= viewportRows) return;
     // Cursor sits just below the frame. Up to its true (reflowed) top, erase to the end of the
     // screen - only ever the live region, it's the last thing on screen - then newlines down to
     // exactly `expected` rows below the top, which is where the chunk is about to move up from.
