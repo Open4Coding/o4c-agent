@@ -28,7 +28,9 @@ export interface SessionData extends SessionMeta {
   inputHistory?: string[];
 }
 
-const MAX_SESSIONS = 20;
+// Front-end plan item #9's fallback default when `sessionsToSave` isn't configured - unchanged
+// behavior for anyone who never touches the new /set-sessionsToSave family.
+export const DEFAULT_MAX_SESSIONS = 20;
 const TITLE_MAX_LENGTH = 50;
 
 export function defaultSessionsDir(): string {
@@ -50,11 +52,19 @@ function isNotFound(err: unknown): boolean {
 /**
  * Persists sessions as one JSON file per session, plus a manifest (`index.json`) listing the
  * most recent ones for /resume. See docs/frontend-design.md §4.1 for the full design - global
- * (not cwd-scoped), capped at MAX_SESSIONS with oldest-pruning, no session file exists until the
+ * (not cwd-scoped), capped at `maxSessions` (configurable, front-end plan item #9's
+ * `/set-sessionsToSave` family) with oldest-pruning, no session file exists until the
  * first real save.
  */
 export class SessionStore {
-  constructor(private dir: string = defaultSessionsDir()) {}
+  constructor(
+    private dir: string = defaultSessionsDir(),
+    // Mutable (not readonly), not just a constructor default - /set-sessionsToSave (front-end
+    // plan item #9) updates this directly on the live instance for the current process, in
+    // addition to persisting the new value via ConfigStore for future launches - the same
+    // "immediate + persisted" dual effect /config-highlightcolor already established.
+    public maxSessions: number = DEFAULT_MAX_SESSIONS,
+  ) {}
 
   private manifestPath(): string {
     return join(this.dir, 'index.json');
@@ -116,9 +126,9 @@ export class SessionStore {
     );
 
     let updated = [meta, ...manifest.filter((m) => m.id !== sessionId)];
-    if (updated.length > MAX_SESSIONS) {
-      const pruned = updated.slice(MAX_SESSIONS);
-      updated = updated.slice(0, MAX_SESSIONS);
+    if (updated.length > this.maxSessions) {
+      const pruned = updated.slice(this.maxSessions);
+      updated = updated.slice(0, this.maxSessions);
       await Promise.all(pruned.map((p) => rm(this.sessionPath(p.id), { force: true })));
     }
     await this.writeManifest(updated);

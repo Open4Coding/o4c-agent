@@ -7,10 +7,13 @@ import { SessionStore, deriveTitle } from '../session/sessionStore.js';
 import { userInputEntry, aiResponseEntry, type ContextEntry } from '../agent/contextEntry.js';
 
 // Every test gets its own real temp directory - never touches the actual ~/.o4c/sessions.
-async function withTempStore(fn: (store: SessionStore, dir: string) => Promise<void>): Promise<void> {
+async function withTempStore(
+  fn: (store: SessionStore, dir: string) => Promise<void>,
+  maxSessions?: number,
+): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), 'o4c-session-test-'));
   try {
-    await fn(new SessionStore(dir), dir);
+    await fn(new SessionStore(dir, maxSessions), dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -202,5 +205,36 @@ test('the manifest is capped at 20 entries, oldest pruned first, and its file is
 
     // Pruning must delete the actual file, not just drop it from the manifest.
     assert.equal(await store.load(ids[0]), undefined);
+  });
+});
+
+test('maxSessions is configurable via the constructor, not hardcoded at 20 (front-end plan item #9)', async () => {
+  await withTempStore(async (store) => {
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      ids.push(await store.save([userInputEntry(`session ${i}`)]));
+    }
+
+    const manifest = await store.readManifest();
+    assert.equal(manifest.length, 3);
+    assert.equal(manifest.some((m) => m.id === ids[0]), false); // oldest pruned at the new, lower cap
+  }, 3);
+});
+
+test('maxSessions can be mutated live on an existing instance and takes effect on the next save', async () => {
+  await withTempStore(async (store) => {
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      ids.push(await store.save([userInputEntry(`session ${i}`)]));
+    }
+    assert.equal((await store.readManifest()).length, 3); // under the default cap so far, nothing pruned
+
+    // /set-sessionsToSave's own live-update path (App.tsx) - no new SessionStore instance needed.
+    store.maxSessions = 2;
+    ids.push(await store.save([userInputEntry('session 3')]));
+
+    const manifest = await store.readManifest();
+    assert.equal(manifest.length, 2);
+    assert.equal(manifest.some((m) => m.id === ids[0]), false); // pruned under the new, lower cap
   });
 });

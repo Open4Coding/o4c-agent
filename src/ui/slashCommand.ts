@@ -45,15 +45,49 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Rename the current session (shown in /resume). Usage: /set-sessionname <name>',
     hidden: true,
   },
+  // Same local/global naming convention as /config-highlightcolor below (bare = project-shared,
+  // -local- explicit alias for the same tier, -global- = per-machine) - front-end plan item #9.
+  {
+    name: '/set-sessionsToSave',
+    description:
+      'How many sessions /resume keeps before pruning the oldest (project-shared, .o4c/config.json). Usage: /set-sessionsToSave <n>',
+    hidden: true,
+  },
+  {
+    name: '/set-local-sessionsToSave',
+    description: 'Same as /set-sessionsToSave - explicit alias for the same project-shared tier.',
+    hidden: true,
+  },
+  {
+    name: '/set-global-sessionsToSave',
+    description: "Set how many sessions /resume keeps for this machine's global default (~/.o4c/config.json).",
+    hidden: true,
+  },
   {
     name: '/config',
     description: 'Browse and run a /config-* plugin setting command.',
   },
-  // No /config-<pluginname> entries yet - this round builds the frontend surface and the
-  // local/global config-store foundation only, not real plugin loading (see docs/plans/
-  // 0001.FrontEndIDEChanges.plan.md #6). configCommands() below returns [] until a real plugin
-  // registers one; /config's own handler already treats an empty family as "nothing to
-  // configure yet," the same way /set's does today.
+  // First real /config-* entries (the plugin-config foundation from #6 is otherwise still
+  // unused) - the "/" palette highlight color, per o4c-agent-design.md §1.7's naming convention
+  // (bare = project-shared, -local- explicit alias for the same tier, -global- = per-machine).
+  // Hidden like /set-sessionname above - discoverable via /config's own picker, not the bare "/"
+  // listing.
+  {
+    name: '/config-highlightcolor',
+    description:
+      'Set the "/" command palette highlight color (project-shared, .o4c/config.json). Usage: /config-highlightcolor <color>',
+    hidden: true,
+  },
+  {
+    name: '/config-local-highlightcolor',
+    description: 'Same as /config-highlightcolor - explicit alias for the same project-shared tier.',
+    hidden: true,
+  },
+  {
+    name: '/config-global-highlightcolor',
+    description: "Set the palette highlight color for this machine's global default (~/.o4c/config.json).",
+    hidden: true,
+  },
 ];
 
 /** Every registered `/set-*` command, in the order they'd appear in `/set`'s own picker -

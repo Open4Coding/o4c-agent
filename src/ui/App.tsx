@@ -692,6 +692,41 @@ export function App({
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
         }
+      } else if (
+        commandName(input) === '/set-sessionsToSave' ||
+        commandName(input) === '/set-local-sessionsToSave' ||
+        commandName(input) === '/set-global-sessionsToSave'
+      ) {
+        // Front-end plan item #9 - same local/global structure as /config-highlightcolor above,
+        // just under the /set family (a session-store retention setting, not a plugin config).
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const name = commandName(input);
+        const scope: ConfigScope = name === '/set-global-sessionsToSave' ? 'global' : 'local';
+        const raw = input.slice(name.length).trim();
+        const usage = `Usage: ${name} <n> - a positive whole number of sessions to keep`;
+        const n = Number(raw);
+        if (!raw) {
+          pushBlock([{ kind: 'error', text: usage }]);
+        } else if (!Number.isInteger(n) || n < 1) {
+          pushBlock([{ kind: 'error', text: `"${raw}" isn't a positive whole number. ${usage}` }]);
+        } else if (scope === 'local' && !configStore.hasScope('local')) {
+          pushBlock([
+            {
+              kind: 'error',
+              text: 'No trusted project in this directory - nothing to set a local value into. Trust this project first, or use /set-global-sessionsToSave instead.',
+            },
+          ]);
+        } else {
+          try {
+            await configStore.set(scope, 'sessionsToSave', n);
+            // Immediate effect for this process too, not just persisted for the next launch -
+            // same dual effect /config-highlightcolor already established.
+            sessionStore.maxSessions = n;
+            pushBlock([{ kind: 'system', text: `Sessions to save set to ${n} (${scope}).` }]);
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
+        }
       } else if (input === '/help') {
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
         const lines = COMMANDS.map(

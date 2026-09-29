@@ -1351,6 +1351,84 @@ test('/config-global-highlightcolor writes only the global scope, isolated from 
   });
 });
 
+test('/set-sessionsToSave with no argument shows a usage error, writes nothing', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = dir;
+    const { stdin, lastFrame } = await setup({ dir, projectRoot });
+
+    await submit(stdin, '/set-sessionsToSave ');
+    await waitFor(() => (lastFrame() ?? '').includes('Usage: /set-sessionsToSave'));
+
+    const local = await new ConfigStore(projectRoot).readScope('local');
+    assert.equal(local.sessionsToSave, undefined);
+  });
+});
+
+test('/set-sessionsToSave with a non-numeric or non-positive value shows an error, writes nothing', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = dir;
+    const { stdin, lastFrame } = await setup({ dir, projectRoot });
+
+    await submit(stdin, '/set-sessionsToSave abc');
+    await waitFor(() => (lastFrame() ?? '').includes('"abc" isn\'t a positive whole number'));
+
+    await submit(stdin, '/set-sessionsToSave 0');
+    await waitFor(() => (lastFrame() ?? '').includes('"0" isn\'t a positive whole number'));
+
+    await submit(stdin, '/set-sessionsToSave -3');
+    await waitFor(() => (lastFrame() ?? '').includes('"-3" isn\'t a positive whole number'));
+
+    const local = await new ConfigStore(projectRoot).readScope('local');
+    assert.equal(local.sessionsToSave, undefined);
+  });
+});
+
+test('/set-sessionsToSave with no trusted project says so instead of writing anywhere', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir });
+
+    await submit(stdin, '/set-sessionsToSave 5');
+    await tick(50);
+
+    assert.ok(anyFrameIncludes(frames, 'No trusted project in this directory'));
+  });
+});
+
+test('/set-sessionsToSave (bare) and /set-local-sessionsToSave both write the same project-shared scope, and take effect immediately', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = dir;
+    const { stdin, frames, lastFrame, store } = await setup({ dir, projectRoot });
+
+    await submit(stdin, '/set-sessionsToSave 5');
+    await waitFor(() => (lastFrame() ?? '').includes('Sessions to save set to 5 (local)'));
+    assert.equal((await new ConfigStore(projectRoot).readScope('local')).sessionsToSave, 5);
+    assert.equal(store.maxSessions, 5); // live effect, not just persisted for the next launch
+    // Never touches the global file.
+    assert.equal(anyFrameIncludes(frames, '(global)'), false);
+
+    await submit(stdin, '/set-local-sessionsToSave 7');
+    await waitFor(() => (lastFrame() ?? '').includes('Sessions to save set to 7 (local)'));
+    assert.equal((await new ConfigStore(projectRoot).readScope('local')).sessionsToSave, 7);
+    assert.equal(store.maxSessions, 7);
+  });
+});
+
+test('/set-global-sessionsToSave writes only the global scope, isolated from the real ~/.o4c during the test', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const projectRoot = join(dir, 'project');
+    const { stdin, lastFrame } = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir });
+
+    await submit(stdin, '/set-global-sessionsToSave 3');
+    await waitFor(() => (lastFrame() ?? '').includes('Sessions to save set to 3 (global)'));
+
+    const configStore = new ConfigStore(projectRoot, configGlobalDir);
+    assert.equal((await configStore.readScope('global')).sessionsToSave, 3);
+    // The project-shared (local) scope is untouched.
+    assert.equal((await configStore.readScope('local')).sessionsToSave, undefined);
+  });
+});
+
 test('Manual Mode (the default) prompts before write_file, and declining leaves the file untouched', async () => {
   await withTempDir(async (dir) => {
     const targetPath = join(dir, 'manual-no.txt');

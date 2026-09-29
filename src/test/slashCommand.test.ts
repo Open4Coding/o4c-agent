@@ -47,7 +47,13 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/quit',
     '/set',
     '/set-sessionname',
+    '/set-sessionsToSave',
+    '/set-local-sessionsToSave',
+    '/set-global-sessionsToSave',
     '/config',
+    '/config-highlightcolor',
+    '/config-local-highlightcolor',
+    '/config-global-highlightcolor',
   ]);
 });
 

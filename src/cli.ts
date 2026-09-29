@@ -318,6 +318,12 @@ program
     // 25 is a reasonable safety default, not a real ceiling for long, unattended tool-call chains.
     const maxIterations =
       typeof resolvedConfig.maxIterations === 'number' ? resolvedConfig.maxIterations : undefined;
+    // Front-end plan item #9: SessionStore's own retention cap (was a hardcoded MAX_SESSIONS=20),
+    // now settable via /set-sessionsToSave (+ -local-/-global-, App.tsx) - same
+    // "config.json only, re-read fresh on every launch/restart" shape as the others above.
+    // Undefined (unset) falls back to SessionStore's own DEFAULT_MAX_SESSIONS, unchanged.
+    const sessionsToSave =
+      typeof resolvedConfig.sessionsToSave === 'number' ? resolvedConfig.sessionsToSave : undefined;
 
     // The `-m`/`--model` value means nothing to LocalProvider - it never sends a `model` field
     // at all (llama-server only ever has one model loaded). Without this, the status bar and
@@ -395,7 +401,7 @@ program
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
 
     if (!prompt) {
-      const sessionStore = new SessionStore(sessionsDirFor(projectRoot));
+      const sessionStore = new SessionStore(sessionsDirFor(projectRoot), sessionsToSave);
       let initialSession: { id: string; title: string; messages: Message[]; inputHistory?: string[] } | undefined;
       if (opts.resume) {
         const data = await sessionStore.load(opts.resume);
