@@ -466,3 +466,53 @@ test('the compaction trigger picks up a per-request modeInstruction as overhead 
     'expected modeInstruction to count toward the overhead estimate, same as the fixed system prompt',
   );
 });
+
+test('a compaction whose generated summary would cost more than it removes is declined, not applied', async () => {
+  // Real flaw found via direct hands-on observation, not just probing: a small compactable
+  // region can generate a summary LARGER than what it replaces - the structured JSON summary
+  // (user_intent/technical_concepts/files/errors_and_fixes/etc.) has its own baseline size, so
+  // folding away just a couple of small entries can make visibleTokenEstimate go UP, not down.
+  const verboseSummary = { current_work: 'x'.repeat(3000) }; // serializes far larger than the ~400-token region it'd replace
+  const provider = new FakeProvider([
+    { content: JSON.stringify(verboseSummary), toolCalls: [], stopReason: 'end_turn' },
+    { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.loadEntries(buildOldTurns(3)); // 3 turns, ~200 tokens each = ~600 total
+
+  const beforeVisible = loop.getVisibleTokenEstimate();
+  const result = await loop.run('go', {
+    contextWindow: 500,
+    compactionSettings: { reserveTokens: 50, keepRecentTokens: 10 }, // threshold=450 < 600, tiny keep budget
+  });
+
+  assert.equal(result, 'answer');
+  // The compaction WAS attempted (the provider call happened), but its result was declined.
+  assert.equal(provider.callCount, 2);
+  assert.equal(loop.getEntries().some((e) => e.sub_type === 'compaction'), false);
+  assert.equal(loop.getEntries().some((e) => e.agent_visible === false), false); // nothing hidden
+  assert.ok(
+    loop.getVisibleTokenEstimate() >= beforeVisible,
+    'expected an unhelpful compaction to leave visibleTokenEstimate unchanged, not smaller',
+  );
+});
+
+test('a compaction whose generated summary genuinely shrinks a small region is still applied', async () => {
+  // The counterpart to the test above - the guard must not block a real, legitimate net win just
+  // because the region happens to be small; only decline when the summary itself is the problem.
+  const tinySummary = { next_step: 'x' }; // serializes far smaller than the region it replaces
+  const provider = new FakeProvider([
+    { content: JSON.stringify(tinySummary), toolCalls: [], stopReason: 'end_turn' },
+    { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.loadEntries(buildOldTurns(3));
+
+  const result = await loop.run('go', {
+    contextWindow: 500,
+    compactionSettings: { reserveTokens: 50, keepRecentTokens: 10 },
+  });
+
+  assert.equal(result, 'answer');
+  assert.ok(loop.getEntries().some((e) => e.sub_type === 'compaction'), 'expected a genuinely helpful compaction to be applied');
+});

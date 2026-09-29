@@ -380,6 +380,21 @@ export class AgentLoop {
       return; // best-effort - see this method's own doc comment
     }
 
+    // Real flaw found via direct hands-on observation (not just probing): compacting a small
+    // region can produce a net *increase* - a structured JSON summary (user_intent/
+    // technical_concepts/files/errors_and_fixes/problem_solving/pending_tasks/current_work/
+    // next_step) has its own baseline size, and when it replaces only a handful of small entries,
+    // the summary can cost more than what it removed. Measured before mutating anything (never
+    // partially applies a compaction only to discover afterward it should be undone) - if the
+    // summary wouldn't actually shrink the visible history, this round is declined the same
+    // best-effort way a failed provider call already is above: no mutation, no entry, no event.
+    // shouldCompact() will simply be asked again next check, once more real history has
+    // accumulated and there's an actual net win to make.
+    const firstKeptEntryId = this.entries[cutPoint]?.id;
+    const summaryEntry = aiCompactionEntry(summary, firstKeptEntryId, tokensBefore);
+    const tokensRemoved = toCompact.reduce((sum, e) => sum + (e.agent_visible !== false ? estimateTokens(e) : 0), 0);
+    if (estimateTokens(summaryEntry) >= tokensRemoved) return;
+
     // Flip visibility via deindex/mutate/reindex so visibleTokenEstimate's bookkeeping (owned by
     // those two methods) stays correct - never touch agent_visible directly without going through
     // them. Entries an earlier compaction already hid are skipped, not double-counted.
@@ -390,8 +405,6 @@ export class AgentLoop {
       this.indexEntry(entry);
     }
 
-    const firstKeptEntryId = this.entries[cutPoint]?.id;
-    const summaryEntry = aiCompactionEntry(summary, firstKeptEntryId, tokensBefore);
     // Spliced in at the cut point itself (not appended to the end) so it sits exactly where the
     // hidden entries used to be in reading order - toWireMessages() then naturally emits it as
     // the first thing the model sees, immediately before the untouched, still-verbatim tail.
