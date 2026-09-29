@@ -415,6 +415,19 @@ test('editing works even when disabled=true, matching the type-ahead queueing de
   assert.deepEqual(submitted, ['queued message']);
 });
 
+test('the cursor stays visible while disabled=true, not just editable - real bug found via direct user report', async () => {
+  // "when this is thinking, the cursor disappears, you give it a prompt there is no cursor" -
+  // disabled=true (the mid-turn "thinking" state) still genuinely accepts keystrokes for queueing
+  // (the test above), so hiding the cursor made it look like typing wasn't going anywhere when it
+  // actually was. The cursor cell must still render even though the box is disabled.
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { disabled: true, onSubmit: () => {} }));
+  await tick();
+
+  await type(stdin, 'x');
+  const frame = lastFrame() ?? '';
+  assert.ok(frame.includes(CURSOR_ON), 'cursor must still be visible while disabled=true');
+});
+
 // The test harness's fake Stdout (ink-testing-library) always reports 100 columns, fixed - see
 // contentWidth() in InputBox.tsx: border (2) + paddingX*2 (2) = 4 columns of overhead, so content
 // is 96 columns wide here. With `wrap="hard"` (fixed-width, no word-wrap, no character elision -
