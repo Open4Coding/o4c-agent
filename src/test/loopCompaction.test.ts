@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AgentLoop } from '../agent/loop.js';
 import { userInputEntry, aiResponseEntry, type ContextEntry } from '../agent/contextEntry.js';
 import { FakeProvider } from './fakeProvider.js';
+import { makeFakeTool } from './fakeTool.js';
 import type { CompletionRequest, CompletionResponse, LLMProvider } from '../providers/types.js';
 
 // content.length 400 -> estimateTokens() (chars/4) = 100 tokens per entry, 200 per turn.
@@ -143,4 +144,62 @@ test('a failed compaction call is swallowed - the turn itself still proceeds nor
   assert.equal(result, 'answer despite the failed compaction');
   assert.equal(loop.getEntries().some((e) => e.sub_type === 'compaction'), false);
   assert.equal(loop.getEntries().some((e) => e.agent_visible === false), false); // nothing hidden
+});
+
+test('a single long turn (many tool calls, no new user message in between) compacts mid-turn instead of crashing', async () => {
+  // Reproduces the real crash this fix was for: a long research turn's own tool results grow
+  // past the context limit entirely on its own, with no new user message to hang a pre-loop
+  // check on. Distinguishes the compaction call from a real turn call by `tools.length === 0`
+  // (maybeCompact's own request shape, loop.ts) rather than by predicting exact queue
+  // positions/token counts by hand - the real trigger is `visibleTokenEstimate`, not a fixed
+  // iteration count, so pinning down "iteration N exactly" would make this test as fragile as
+  // the arithmetic it's trying to avoid depending on.
+  const TOTAL_TOOL_ITERATIONS = 10;
+  let toolCallsIssued = 0;
+  const provider: LLMProvider = {
+    name: 'long-turn',
+    async complete(request: CompletionRequest): Promise<CompletionResponse> {
+      if (request.tools.length === 0) {
+        return { content: JSON.stringify({ next_step: 'keep going' }), toolCalls: [], stopReason: 'end_turn' };
+      }
+      if (toolCallsIssued < TOTAL_TOOL_ITERATIONS) {
+        toolCallsIssued += 1;
+        return {
+          content: `working, step ${toolCallsIssued}`,
+          toolCalls: [{ id: `t${toolCallsIssued}`, name: 'big_tool', input: {} }],
+          stopReason: 'tool_use',
+        };
+      }
+      return { content: 'final answer', toolCalls: [], stopReason: 'end_turn' };
+    },
+  };
+  const tool = makeFakeTool('big_tool', padded('tool output'));
+  const loop = new AgentLoop(provider, [tool], 'system');
+  loop.loadEntries(buildOldTurns(6)); // 1200 estimated tokens - a real turn boundary to cut into, but under threshold on its own
+
+  let toolCallsIssuedAtCompaction = -1;
+  const result = await loop.run('research this deeply', {
+    contextWindow: 2000,
+    compactionSettings: { reserveTokens: 100, keepRecentTokens: 300 }, // threshold = 1900
+    maxIterations: 0, // unlimited - this turn alone needs more than the default 25-iteration cap
+    onEntry: (entry) => {
+      if (entry.sub_type === 'compaction' && toolCallsIssuedAtCompaction === -1) {
+        toolCallsIssuedAtCompaction = toolCallsIssued;
+      }
+    },
+  });
+
+  assert.equal(result, 'final answer');
+  assert.equal(toolCallsIssued, TOTAL_TOOL_ITERATIONS); // the whole turn ran to completion, nothing truncated
+  assert.ok(
+    loop.getEntries().some((e) => e.sub_type === 'compaction'),
+    'expected at least one mid-turn compaction to have fired',
+  );
+  // > 0, not just "happened at some point" - proves it fired only after this turn's own tool
+  // calls had already appended new entries, i.e. genuinely mid-turn - not the pre-loop check
+  // (which runs before iteration 0, while toolCallsIssued is still 0).
+  assert.ok(
+    toolCallsIssuedAtCompaction > 0,
+    `expected compaction to fire after at least one tool call this turn, got toolCallsIssued=${toolCallsIssuedAtCompaction}`,
+  );
 });

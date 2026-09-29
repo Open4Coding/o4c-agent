@@ -440,6 +440,33 @@ export class AgentLoop {
         onEvent({ type: 'tool_result', toolName: call.name, toolOutput: output });
         this.appendEntry(aiToolCallResponseEntry(call.id, output, tool?.mutating), onEntry);
       }
+
+      // Real bug found via direct user report: the only other maybeCompact() call (above, before
+      // this loop) runs once, before this turn's own tool-calling ever starts - it has no way to
+      // catch a *single* long turn (many tool calls, no new user message in between) growing past
+      // the context limit entirely on its own. Reproduced directly: a 60+-tool-call research turn
+      // grew to 114% of the model's context window with zero chance to compact along the way, and
+      // crashed on whatever provider request finally exceeded it (`exceed_context_size_error`).
+      // Checked here, after this iteration's tool calls are appended and only when the loop is
+      // actually going to continue (an `!isToolUse` turn already returned above, so there is no
+      // next request to protect) - never at the top of the loop, which was tried first and found
+      // to double up with the pre-loop check on iteration 0 specifically: with zero new entries
+      // appended between them, an immediate retry of a compaction that the pre-loop check just
+      // failed can spuriously "succeed" against a response never meant to be treated as a summary
+      // (caught by a regression test - `loopCompaction.test.ts`'s "a failed compaction call is
+      // swallowed" - failing an unrelated assertion once the top-of-loop placement was added).
+      // Cheap when it doesn't fire (visibleTokenEstimate is an O(1) running counter) - only
+      // actually costs anything on the iteration where compaction genuinely needs to happen.
+      if (options.contextWindow) {
+        await this.maybeCompact(
+          options.contextWindow,
+          options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS,
+          onEvent,
+          onEntry,
+          onProviderCall,
+          options.signal,
+        );
+      }
     }
 
     throw new MaxIterationsError(maxIterations);
