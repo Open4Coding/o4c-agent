@@ -175,6 +175,8 @@ async function runRepl(
       restart,
       projectRoot,
       model: opts.model,
+      provider: opts.provider,
+      baseUrl: opts.baseUrl,
       contextWindow,
       maxIterations,
       initialHighlightColor: highlightColor,

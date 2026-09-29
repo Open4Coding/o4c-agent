@@ -23,6 +23,7 @@ import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import { ConfigStore, type ConfigScope } from '../session/configStore.js';
 import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } from './highlightColor.js';
+import { buildSplashText } from './splash.js';
 import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
 import {
@@ -62,6 +63,11 @@ export interface AppProps {
   /** The model id this session is running (`-m`/config.json's `model`, as passed to the
    * provider) - display only, shown in the status bar. */
   model: string;
+  /** `'local' | 'anthropic' | 'mock'` - display only, for the startup splash header. */
+  provider: string;
+  /** Only meaningful (and only shown) for the local provider - display only, for the startup
+   * splash header. Anthropic's own fixed API endpoint isn't shown; nobody configured it. */
+  baseUrl: string;
   /** The current model's max context size, in tokens - only known when set explicitly via
    * config.json's `contextWindow` key (no per-model metadata registry exists yet, per
    * docs/o4c-agent-design.md §2.3/§7.1 - this deliberately doesn't guess). Undefined hides the
@@ -188,6 +194,12 @@ function LineText({ line }: { line: Line }) {
       );
     case 'error':
       return <Text color={theme.error}>{line.text}</Text>;
+    case 'splash':
+      return (
+        <Text bold color={theme.primary}>
+          {line.text}
+        </Text>
+      );
     default:
       return <Text color={theme.border}>{line.text}</Text>;
   }
@@ -203,6 +215,8 @@ export function App({
   restart,
   projectRoot,
   model,
+  provider,
+  baseUrl,
   contextWindow,
   maxIterations,
   initialHighlightColor,
@@ -227,8 +241,21 @@ export function App({
     let id = 0;
     const banner = makeBlock(id++, [
       {
+        kind: 'splash',
+        text: buildSplashText({
+          location: projectRoot ?? process.cwd(),
+          provider,
+          model,
+          // mode's own useState always starts at 'manual' (declared further below in this
+          // component) - hardcoded here rather than reading that state var, which isn't in scope
+          // yet at this point in the component body (this lazy initializer runs before it).
+          modeLabel: modeInfo('manual').label,
+          baseUrl: provider === 'local' ? baseUrl : undefined,
+        }),
+      },
+      {
         kind: 'system',
-        text: 'o4c interactive session. Type your request, or / to see available commands.',
+        text: 'Type your request, or / to see available commands.',
       },
     ]);
     if (!initialSession) return initialTextWindow([banner]);

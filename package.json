@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "tsx --test src/test/loop.test.ts src/test/contextEntry.test.ts src/test/searchUtils.test.ts src/test/slashCommand.test.ts src/test/sessionStore.test.ts src/test/projectContext.test.ts src/test/configStore.test.ts src/test/modePolicy.test.ts src/test/resizeReflowFix.test.ts src/test/keyboardCommandsHelp.test.ts src/test/inputBoxLayout.test.ts src/test/local.test.ts src/test/infiniteContextStore.test.ts src/test/textWindow.test.ts src/test/statusBar.test.ts src/test/compaction.test.ts src/test/loopCompaction.test.ts src/test/localProviderStream.test.ts src/test/streamFilter.test.ts src/test/anthropicProvider.test.ts src/test/InputBox.test.tsx src/test/SelectList.test.tsx src/test/App.test.tsx"
+    "test": "tsx --test src/test/loop.test.ts src/test/contextEntry.test.ts src/test/searchUtils.test.ts src/test/slashCommand.test.ts src/test/sessionStore.test.ts src/test/projectContext.test.ts src/test/configStore.test.ts src/test/modePolicy.test.ts src/test/resizeReflowFix.test.ts src/test/keyboardCommandsHelp.test.ts src/test/splash.test.ts src/test/inputBoxLayout.test.ts src/test/local.test.ts src/test/infiniteContextStore.test.ts src/test/textWindow.test.ts src/test/statusBar.test.ts src/test/compaction.test.ts src/test/loopCompaction.test.ts src/test/localProviderStream.test.ts src/test/streamFilter.test.ts src/test/anthropicProvider.test.ts src/test/InputBox.test.tsx src/test/SelectList.test.tsx src/test/App.test.tsx"
   },
   "license": "Apache-2.0",
   "dependencies": {

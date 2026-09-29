@@ -309,6 +309,8 @@ async function setup(opts: {
       restart,
       projectRoot: opts.projectRoot,
       model: 'test-model',
+      provider: 'mock',
+      baseUrl: '',
       initialHighlightColor: '#FFBF00',
       configGlobalDir: opts.configGlobalDir,
     }),
@@ -331,6 +333,18 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
+
+test('startup splash header shows the word-mark, provider/model, and starting mode', async () => {
+  await withTempDir(async (dir) => {
+    const { lastFrame } = await setup({ dir });
+    const frame = lastFrame() ?? '';
+
+    assert.match(frame, /█████/); // the word-mark itself
+    assert.match(frame, /mock · test-model/); // no baseUrl segment - provider isn't 'local'
+    assert.match(frame, /Mode: Manual/); // AgentLoop/App always start in Manual mode
+    assert.match(frame, /Type your request, or \/ to see available commands\./);
+  });
+});
 
 test('/exit bypasses the FIFO queue even while a turn is stuck processing, instead of sitting queued behind it', async () => {
   await withTempDir(async (dir) => {
