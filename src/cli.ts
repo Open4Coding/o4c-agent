@@ -5,7 +5,7 @@ import { render } from 'ink';
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
 import { AnthropicProvider } from './providers/anthropic.js';
-import { LocalProvider, fetchLocalModelId } from './providers/local.js';
+import { LocalProvider, fetchLocalModelId, fetchLocalContextWindow } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider, Message } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
@@ -277,11 +277,10 @@ program
     // this, never the shared config.json.
     const localApiKey =
       typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined;
-    // No per-model context-size registry exists yet (docs/o4c-agent-design.md §2.3/§7.1) - this
-    // is a plain opt-in config key rather than a guess, same "no CLI flag, config.json only"
-    // shape as localApiKey above. Unset, the status bar just shows a raw token estimate with no
-    // percentage/bar.
-    const contextWindow =
+    // Manually-configured override - still wins over auto-detection below when set (front-end
+    // plan item #8's own scope note: proceed with auto-detected-only for now, no override command
+    // yet, but a hand-set config value should still take precedence over whatever gets detected).
+    const configuredContextWindow =
       typeof resolvedConfig.contextWindow === 'number' ? resolvedConfig.contextWindow : undefined;
     // /config-highlightcolor (+ -local-/-global-, App.tsx) - read fresh on every launch/restart,
     // same "config.json only, re-read each time" shape as localApiKey above. Defaults to the
@@ -289,12 +288,6 @@ program
     // UI already uses everywhere else.
     const highlightColor =
       typeof resolvedConfig.highlightColor === 'string' ? resolvedConfig.highlightColor : theme.accent;
-    // Half the configured context window, not the flat 4096 both providers used to hardcode -
-    // that flat cap was unrelated to the model's real budget and silently truncated any turn
-    // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
-    // PHOEBE: the turn just ended with an empty answer, no error). Undefined (no contextWindow
-    // configured) falls back to each provider's own pre-existing default.
-    const providerMaxTokens = contextWindow ? Math.floor(contextWindow / 2) : undefined;
     // Opt-in only, same "no CLI flag, config.json only" shape as localApiKey/contextWindow above -
     // extended thinking has a real token-cost impact (thinking tokens are billed as output), so
     // this is never turned on silently. Anthropic-only; harmless (just unread) for other providers.
@@ -332,11 +325,36 @@ program
     // Anthropic default, unrelated to what's actually being talked to) instead of the real
     // served model - real bug, found via direct user report. Best-effort: on any failure to
     // reach the server, opts.model (whatever it already was) is left unchanged rather than
-    // blocking startup on it.
+    // blocking startup on it. Run alongside the context-window probe below (Promise.all, not
+    // sequential awaits) - two independent, best-effort GETs against the same server, no reason
+    // to pay their latency twice at startup.
+    let autoContextWindow: number | undefined;
     if (opts.provider === 'local') {
-      const detected = await fetchLocalModelId(opts.baseUrl, localApiKey);
-      if (detected) opts = { ...opts, model: detected };
+      const [detectedModel, detectedContextWindow] = await Promise.all([
+        fetchLocalModelId(opts.baseUrl, localApiKey),
+        fetchLocalContextWindow(opts.baseUrl, localApiKey),
+      ]);
+      if (detectedModel) opts = { ...opts, model: detectedModel };
+      autoContextWindow = detectedContextWindow;
     }
+    // Front-end plan item #8: auto-detected max context, not a guess or a required manual value -
+    // a manually-configured contextWindow (above) still wins when set. Local comes from the real
+    // probe just above (confirmed live against PHOEBE's /props); Anthropic has no equivalent query
+    // endpoint, so this falls back to the flat 200K every current Claude model actually has
+    // (matches cc's own MODEL_CONTEXT_WINDOW_DEFAULT fallback, confirmed directly against its
+    // source during this project's own context-window research) rather than guessing per model id.
+    // 'mock' gets no default - a test/dev provider has no real window to report.
+    const ANTHROPIC_DEFAULT_CONTEXT_WINDOW = 200_000;
+    const contextWindow =
+      configuredContextWindow ??
+      autoContextWindow ??
+      (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : undefined);
+    // Half the configured context window, not the flat 4096 both providers used to hardcode -
+    // that flat cap was unrelated to the model's real budget and silently truncated any turn
+    // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
+    // PHOEBE: the turn just ended with an empty answer, no error). Undefined (no contextWindow
+    // known at all) falls back to each provider's own pre-existing default.
+    const providerMaxTokens = contextWindow ? Math.floor(contextWindow / 2) : undefined;
 
     let provider: LLMProvider;
     if (opts.provider === 'mock') {

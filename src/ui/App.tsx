@@ -127,6 +127,7 @@ function StatusBar({
   model,
   contextWindow,
   liveText,
+  mode,
 }: {
   loop: AgentLoop;
   model: string;
@@ -139,6 +140,11 @@ function StatusBar({
    * fill fraction below as a rough estimate (chars/4, same heuristic `estimateTokens()` uses),
    * never persisted anywhere - purely a live display adjustment. */
   liveText: readonly string[];
+  /** Front-end plan item #8: context max/current/%used belongs on the same line as Mode, under
+   * the input box - folded in here (Ink renders sibling `<Text>` elements on separate rows unless
+   * they're nested inside one shared `<Text>` tree, which is what this whole component already is)
+   * rather than as a second, separately-positioned line the way it used to be. */
+  mode: Mode;
 }) {
   const [, tick] = useState(0);
   const startRef = useRef(Date.now());
@@ -154,6 +160,10 @@ function StatusBar({
 
   return (
     <Text>
+      <Text color={modeInfo(mode).color}>
+        Mode: {modeInfo(mode).label} (/mode or Tab to change)
+      </Text>
+      <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>◆ {model}</Text>
       <Text color={theme.border}> | </Text>
       <Text color={theme.text}>
@@ -1152,7 +1162,6 @@ export function App({
           </React.Fragment>
         ))}
       {isThinking && <Spinner />}
-      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} />
       <InputBox
         disabled={isProcessing}
         active={!confirmDialog && !resumePicker && !modePicker && !setPicker && !configPicker}
@@ -1165,9 +1174,10 @@ export function App({
         initialHistory={initialSession?.inputHistory}
         onHistoryChange={handleInputHistoryChange}
       />
-      <Text color={modeInfo(mode).color}>
-        Mode: {modeInfo(mode).label}  (/mode or Tab to change)
-      </Text>
+      {/* Front-end plan item #8: context max/current/%used now lives on the same line as Mode,
+          under the input box - previously two separate lines (StatusBar above the input box,
+          "Mode: X" below it). */}
+      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} />
       <Text color={theme.border}>Esc interrupt · type to queue · Ctrl+C reset</Text>
       {confirmDialog ? (
         <ConfirmDialog

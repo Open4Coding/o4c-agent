@@ -130,6 +130,33 @@ export async function fetchLocalModelId(baseUrl: string, apiKey?: string): Promi
   }
 }
 
+/**
+ * Queries the server's own `/props` for the real context window it's actually running with
+ * (`default_generation_settings.n_ctx`) - confirmed directly against a live PHOEBE server, not
+ * assumed from docs (`curl .../props` returned `229376` here, matching what had previously only
+ * been a hand-entered `contextWindow` in config.json). Without this, a user who never manually
+ * sets that config key gets no context-window display or compaction trigger at all - the exact
+ * gap behind a real silent-hang incident (a large-codebase search grew past the model's usable
+ * context with no warning). Best-effort, same shape as `fetchLocalModelId`: undefined on any
+ * failure (server down, older llama-server without this field, timeout) so a display-only lookup
+ * never blocks startup or crashes it. A manually-configured `contextWindow` in config.json still
+ * takes precedence over this when both are present - this is the fallback, not an override.
+ */
+export async function fetchLocalContextWindow(baseUrl: string, apiKey?: string): Promise<number | undefined> {
+  try {
+    const response = await fetch(`${baseUrl}/props`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return undefined;
+    const data = (await response.json()) as { default_generation_settings?: { n_ctx?: number } };
+    const nCtx = data.default_generation_settings?.n_ctx;
+    return typeof nCtx === 'number' && nCtx > 0 ? nCtx : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class LocalProvider implements LLMProvider {
   readonly name = 'local';
   private baseUrl: string;

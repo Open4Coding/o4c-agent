@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LocalProvider } from '../providers/local.js';
+import { LocalProvider, fetchLocalContextWindow } from '../providers/local.js';
 import type { CompletionRequest } from '../providers/types.js';
 
 const baseRequest: CompletionRequest = {
@@ -201,4 +201,45 @@ test('a 401 with an API key already configured suggests it may be wrong, not "se
       return true;
     },
   );
+});
+
+test('fetchLocalContextWindow reads n_ctx from a real /props response shape', async () => {
+  const result = await withMockedFetch(
+    () =>
+      new Response(
+        JSON.stringify({ default_generation_settings: { n_ctx: 229376 }, total_slots: 1 }),
+        { status: 200 },
+      ),
+    () => fetchLocalContextWindow('http://localhost:8080'),
+  );
+  assert.equal(result, 229376);
+});
+
+test('fetchLocalContextWindow returns undefined on a non-ok response', async () => {
+  const result = await withMockedFetch(
+    () => new Response('not found', { status: 404 }),
+    () => fetchLocalContextWindow('http://localhost:8080'),
+  );
+  assert.equal(result, undefined);
+});
+
+test('fetchLocalContextWindow returns undefined when n_ctx is missing (older llama-server)', async () => {
+  const result = await withMockedFetch(
+    () => new Response(JSON.stringify({ default_generation_settings: {} }), { status: 200 }),
+    () => fetchLocalContextWindow('http://localhost:8080'),
+  );
+  assert.equal(result, undefined);
+});
+
+test('fetchLocalContextWindow returns undefined on a network error, never throws', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error('ECONNREFUSED');
+  }) as typeof fetch;
+  try {
+    const result = await fetchLocalContextWindow('http://localhost:8080');
+    assert.equal(result, undefined);
+  } finally {
+    globalThis.fetch = original;
+  }
 });
