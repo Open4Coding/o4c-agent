@@ -138,11 +138,11 @@ export class AnthropicProvider implements LLMProvider {
       { signal: request.signal },
     );
     if (request.onToken) {
-      stream.on('text', (delta) => request.onToken?.(delta));
-      // Same live-preview treatment as regular text - real-time think/response labeling isn't
-      // attempted here either (AgentLoop's own `createThinkTagStripper` already made that call
-      // for every provider, not just this one).
-      stream.on('thinking', (delta) => request.onToken?.(delta));
+      stream.on('text', (delta) => request.onToken?.(delta, 'text'));
+      // The SDK already fires this as its own distinct event type - a direct signal, not
+      // something reconstructed from raw text the way `createThinkTagStripper` has to for a
+      // provider that only emits embedded `<think>` markup in a single text stream.
+      stream.on('thinking', (delta) => request.onToken?.(delta, 'think'));
     }
 
     let response: Anthropic.Message;

@@ -102,6 +102,20 @@ test('appendDelta while active grows the same line instead of adding a new one',
   assert.deepEqual(state.live, ['Hello, world']);
 });
 
+test('appendDelta with startNewLine forces a fresh line even mid-stream (deltaActive true)', () => {
+  // The real case this is for: a delta stream transitioning kind (reasoning ending, the real
+  // answer beginning) mid-turn - deltaActive stays true across that transition (it's still one
+  // continuous 'delta' stream from AgentLoop's perspective), so without startNewLine the answer's
+  // first chunk would just run on from the end of the reasoning line.
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'appendDelta', text: '[think] reasoning...' });
+  state = textWindowReducer(state, { type: 'appendDelta', text: 'the answer', startNewLine: true });
+  assert.deepEqual(state.live, ['[think] reasoning...', 'the answer']);
+  // And it keeps growing normally on subsequent chunks, same as any other delta run.
+  state = textWindowReducer(state, { type: 'appendDelta', text: ' continues' });
+  assert.deepEqual(state.live, ['[think] reasoning...', 'the answer continues']);
+});
+
 test('appendLive after an active delta stream starts a fresh line, not a continuation', () => {
   let state = initialTextWindow();
   state = textWindowReducer(state, { type: 'appendDelta', text: 'streamed' });

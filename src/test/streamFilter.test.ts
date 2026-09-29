@@ -2,10 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createThinkTagStripper } from '../agent/streamFilter.js';
 
+// kind is always 'text' here - these tests are about tag-stripping, not kind-tracking (which has
+// its own dedicated tests below).
 function run(chunks: string[]): string[] {
   const emitted: string[] = [];
   const { feed, flush } = createThinkTagStripper((text) => emitted.push(text));
-  for (const chunk of chunks) feed(chunk);
+  for (const chunk of chunks) feed(chunk, 'text');
   flush();
   return emitted;
 }
@@ -49,7 +51,7 @@ test('an opened think block that never closes (unclosed tag) still flushes its c
 test('flush emits nothing extra when the buffer is already empty', () => {
   const emitted: string[] = [];
   const { feed, flush } = createThinkTagStripper((t) => emitted.push(t));
-  feed('complete text<think>x</think>');
+  feed('complete text<think>x</think>', 'text');
   const beforeFlushCount = emitted.length;
   flush();
   assert.equal(emitted.length, beforeFlushCount);
@@ -66,4 +68,33 @@ test('content immediately after an open tag in the same chunk streams without wa
   // artificial per-character delay), proving reasoning content isn't held back once the opening
   // tag itself is fully resolved.
   assert.ok(emitted.includes('reasoning continues for a while'));
+});
+
+test('emitted kind matches the kind each chunk was fed with', () => {
+  const emitted: Array<{ text: string; kind: 'think' | 'text' }> = [];
+  const { feed, flush } = createThinkTagStripper((text, kind) => emitted.push({ text, kind }));
+  feed('reasoning first', 'think');
+  feed('the real answer', 'text');
+  flush();
+  assert.deepEqual(emitted, [
+    { text: 'reasoning first', kind: 'think' },
+    { text: 'the real answer', kind: 'text' },
+  ]);
+});
+
+test('a <think> tag split across a kind change is still fully stripped, each piece labeled correctly', () => {
+  const emitted: Array<{ text: string; kind: 'think' | 'text' }> = [];
+  const { feed, flush } = createThinkTagStripper((text, kind) => emitted.push({ text, kind }));
+  // "<th" is a partial prefix of "<think>" - held back rather than emitted with this call's kind.
+  feed('reasoning<th', 'think');
+  // The rest of the tag arrives on the NEXT call, now under a different kind - the real case this
+  // guards: a provider's think/text boundary landing exactly where a stray "<think>"-shaped
+  // fragment happened to split. The completed tag is still found and stripped correctly, and the
+  // real content on each side is labeled with the kind it actually came from.
+  feed('ink>final answer', 'text');
+  flush();
+  assert.deepEqual(emitted, [
+    { text: 'reasoning', kind: 'think' },
+    { text: 'final answer', kind: 'text' },
+  ]);
 });

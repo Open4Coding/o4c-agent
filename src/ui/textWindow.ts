@@ -37,8 +37,12 @@ export type TextWindowAction =
   | { type: 'appendLive'; text: string }
   /** Raw streamed text chunks (`AgentEvent.type === 'delta'`) - appended onto the current live
    * line while a stream is in progress (`deltaActive`), or start a fresh line otherwise. This is
-   * the one `live`-mutating action that doesn't mean "a new, distinct line" - see `deltaActive`. */
-  | { type: 'appendDelta'; text: string }
+   * the one `live`-mutating action that doesn't mean "a new, distinct line" - see `deltaActive`.
+   * `startNewLine` forces the fresh-line behavior even while `deltaActive` is already true - the
+   * one case that needs it: a delta stream transitioning kind (reasoning ending, the real answer
+   * beginning) mid-turn, which should visually start its own line rather than run on from
+   * whatever was streaming before it. */
+  | { type: 'appendDelta'; text: string; startNewLine?: boolean }
   /** The `[scan] N more tool calls collapsed...` running summary line updates in place as the
    * count grows, rather than appending a new line per tool event once collapsing starts - the one
    * genuinely stateful (as opposed to append-only) update the live region needs. */
@@ -75,7 +79,7 @@ export function textWindowReducer(state: TextWindowState, action: TextWindowActi
     case 'appendLive':
       return { ...state, live: [...state.live, action.text], deltaActive: false };
     case 'appendDelta': {
-      if (state.live.length === 0 || !state.deltaActive) {
+      if (action.startNewLine || state.live.length === 0 || !state.deltaActive) {
         return { ...state, live: [...state.live, action.text], deltaActive: true };
       }
       const live = state.live.slice();

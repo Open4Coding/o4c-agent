@@ -45,12 +45,16 @@ export interface CompletionRequest {
    * straight through to that call's own cancellation mechanism. */
   signal?: AbortSignal;
   /** Called with each raw text chunk as it streams in, if the provider supports streaming (both
-   * real providers do). Purely a live-preview signal - undifferentiated (no `<think>` vs response
-   * split, which needs the complete text to detect reliably) and not a replacement for the
-   * final `CompletionResponse.content` this call still resolves to once the stream ends. Optional
-   * so a caller that doesn't care about live preview (or MockProvider in tests) can just ignore
-   * it - every provider must still fully resolve `complete()` normally either way. */
-  onToken?: (delta: string) => void;
+   * real providers do). Purely a live-preview signal - not a replacement for the final
+   * `CompletionResponse.content` this call still resolves to once the stream ends. Optional so a
+   * caller that doesn't care about live preview (or MockProvider in tests) can just ignore it -
+   * every provider must still fully resolve `complete()` normally either way.
+   *
+   * `kind` says whether this chunk is reasoning ("think") or the final answer ("text") - both
+   * real providers already know this per-chunk at the source (LocalProvider branches on
+   * `reasoning_content` vs `content`; Anthropic's SDK fires distinct `'thinking'`/`'text'` stream
+   * events), so this is a direct signal, not a guess reconstructed from the complete text later. */
+  onToken?: (delta: string, kind: 'think' | 'text') => void;
 }
 
 export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens';

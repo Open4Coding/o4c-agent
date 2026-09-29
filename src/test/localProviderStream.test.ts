@@ -49,6 +49,21 @@ test('reasoning_content deltas stream through onToken as they arrive, same as co
   assert.deepEqual(seen, ['thinking...', 'answer']);
 });
 
+test('onToken receives the correct kind per chunk - "think" for reasoning_content, "text" for content', async () => {
+  const stream = sseStream([
+    sse({ choices: [{ delta: { reasoning_content: 'thinking...' } }] }),
+    sse({ choices: [{ delta: { content: 'answer' } }] }),
+  ]);
+
+  const seen: Array<{ delta: string; kind: 'think' | 'text' }> = [];
+  await parseSseStream(stream, (delta, kind) => seen.push({ delta, kind }));
+
+  assert.deepEqual(seen, [
+    { delta: 'thinking...', kind: 'think' },
+    { delta: 'answer', kind: 'text' },
+  ]);
+});
+
 test('no reasoning_content at all leaves content unwrapped, unchanged from before', async () => {
   const stream = sseStream([sse({ choices: [{ delta: { content: 'plain answer' } }] })]);
 

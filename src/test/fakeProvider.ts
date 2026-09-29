@@ -35,8 +35,10 @@ export class FakeProvider implements LLMProvider {
     }
     // Simulates streaming for anything that cares to check it (AgentLoop's own 'delta' wiring),
     // one call with the full content - not truly incremental, matching MockProvider's own
-    // simplification.
-    onToken?.(next.content);
+    // simplification. Always 'text': tests exercising think-block behavior here script raw
+    // <think> tags directly into content and rely on the tag-stripper (kind-based labeling is a
+    // separate, additive signal real providers give - this fake has no equivalent to give).
+    onToken?.(next.content, 'text');
     return next;
   }
 }

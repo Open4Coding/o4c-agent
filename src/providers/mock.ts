@@ -33,7 +33,7 @@ export class MockProvider implements LLMProvider {
         input: placeholderInput(tool),
       };
       const content = `[mock] calling "${tool.name}" to see what happens.`;
-      request.onToken?.(content);
+      request.onToken?.(content, 'text');
       return {
         content,
         toolCalls: [call],
@@ -48,7 +48,7 @@ export class MockProvider implements LLMProvider {
       : '[mock] no tools were available to call.';
 
     const content = `${summary} This is a canned mock response, not a real answer - use --provider anthropic for that.`;
-    request.onToken?.(content);
+    request.onToken?.(content, 'text');
     return {
       content,
       toolCalls: [],
