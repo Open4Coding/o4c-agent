@@ -415,3 +415,54 @@ test('maybeCompact caps its own summarization prompt so an oversized region cann
     'expected compaction to actually succeed, not be silently swallowed by an oversized prompt',
   );
 });
+
+test('the compaction trigger accounts for system-prompt + tool-schema overhead, not just entry content', async () => {
+  // Real gap found via direct probe (probe-compaction.ts scenario E): visibleTokenEstimate alone
+  // (entry content only) stayed under threshold while the true request - system prompt + every
+  // tool's JSON schema, identical on every single call - was already over it. The trigger fired
+  // later than the real request size, eating into reserveTokens' own margin.
+  const bigSystemPrompt = 'x'.repeat(6000); // ~1500 estimated tokens - not in visibleTokenEstimate at all
+  const provider = new FakeProvider([
+    { content: JSON.stringify({ next_step: 'x' }), toolCalls: [], stopReason: 'end_turn' },
+    { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const tool = makeFakeTool('read_file', 'contents');
+  const loop = new AgentLoop(provider, [tool], bigSystemPrompt);
+  loop.loadEntries(buildOldTurns(3)); // ~600 estimated tokens of entry content - under threshold on its own
+
+  const result = await loop.run('go', {
+    contextWindow: 2000,
+    // threshold = 1900. Entry content alone (600) stays under it - only counting the system
+    // prompt's overhead too (600 + ~1500 = ~2100) crosses it, which is the actual point of this
+    // test: without the fix, this would never have fired at all.
+    compactionSettings: { reserveTokens: 100, keepRecentTokens: 50 },
+  });
+
+  assert.equal(result, 'answer');
+  assert.equal(provider.callCount, 2); // one compaction call, one real turn call - it DID fire
+  assert.ok(
+    loop.getEntries().some((e) => e.sub_type === 'compaction'),
+    'expected the overhead-aware trigger to fire even though entry content alone was under threshold',
+  );
+});
+
+test('the compaction trigger picks up a per-request modeInstruction as overhead too', async () => {
+  const provider = new FakeProvider([
+    { content: JSON.stringify({ next_step: 'x' }), toolCalls: [], stopReason: 'end_turn' },
+    { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system'); // small, fixed system prompt this time
+  loop.loadEntries(buildOldTurns(3)); // ~600 tokens
+
+  const result = await loop.run('go', {
+    contextWindow: 2000, // threshold = 1900 (same settings as above)
+    compactionSettings: { reserveTokens: 100, keepRecentTokens: 50 },
+    modeInstruction: 'x'.repeat(6000), // ~1500 tokens, appended onto the small fixed system prompt
+  });
+
+  assert.equal(result, 'answer');
+  assert.ok(
+    loop.getEntries().some((e) => e.sub_type === 'compaction'),
+    'expected modeInstruction to count toward the overhead estimate, same as the fixed system prompt',
+  );
+});

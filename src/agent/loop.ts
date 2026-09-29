@@ -7,6 +7,7 @@ import {
   aiThinkEntry,
   aiToolCallEntry,
   aiToolCallResponseEntry,
+  estimateTextTokens,
   estimateTokens,
   splitThinkBlock,
   toWireMessages,
@@ -220,13 +221,23 @@ export class AgentLoop {
   }
 
   /**
-   * §2.3's real compaction pass - checked once at the top of `run()`, before the new turn's own
-   * user message is appended. Best-effort: any failure (provider error, abort) is caught and
-   * swallowed here rather than failing the turn itself - a skipped compaction just means this
-   * turn's request may come in over budget and fail on its own, exactly the pre-existing behavior
-   * before compaction existed, not a new regression. Nothing is mutated unless the summarization
-   * call actually succeeds, so a failure never leaves history in a half-compacted state.
+   * Real gap found via direct probe (`tmp.tmp/probe-compaction.ts` scenario E): the compaction
+   * trigger only ever read `visibleTokenEstimate` (entry content alone) - but every real request
+   * this turn sends also carries the system prompt (plus any `modeInstruction`) and every tool's
+   * full JSON schema, identical on every single call, none of which was in the estimate. The
+   * trigger therefore fired later than the true request size, eating into `reserveTokens`' own
+   * margin - the one thing it exists to protect. Computed fresh on every check rather than cached:
+   * `tools` never changes after construction, but `modeInstruction` is per-request and can differ
+   * turn to turn.
    */
+  private overheadTokenEstimate(modeInstruction?: string): number {
+    const systemPromptForRequest = modeInstruction ? `${this.systemPrompt}\n\n${modeInstruction}` : this.systemPrompt;
+    const toolDefsJson = JSON.stringify(
+      this.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+    );
+    return estimateTextTokens(systemPromptForRequest) + estimateTextTokens(toolDefsJson);
+  }
+
   /**
    * §2.3's MicroCompact tier (2026-09-28) - tier 2 of 3, cheaper than `maybeCompact()`'s real
    * summarization call (tier 3) and run before it. No API call at all: old `toolcall`/
@@ -246,9 +257,11 @@ export class AgentLoop {
     settings: CompactionSettings,
     onEvent: (event: AgentEvent) => void,
     onEntry: (entry: ContextEntry) => void,
+    modeInstruction?: string,
   ): void {
     const microCompactReserve = settings.microCompactReserveTokens ?? DEFAULT_MICRO_COMPACT_RESERVE_TOKENS;
-    if (!shouldCompact(this.visibleTokenEstimate, contextWindow, microCompactReserve)) return;
+    const effectiveVisible = this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction);
+    if (!shouldCompact(effectiveVisible, contextWindow, microCompactReserve)) return;
 
     const cutoff = microCompactCutoffIndex(this.entries, settings.keepRecentTokens);
     if (cutoff === 0) return; // whole log is still under the keep-recent budget - nothing old enough yet
@@ -303,6 +316,14 @@ export class AgentLoop {
     });
   }
 
+  /**
+   * §2.3's real compaction pass - checked once at the top of `run()`, before the new turn's own
+   * user message is appended. Best-effort: any failure (provider error, abort) is caught and
+   * swallowed here rather than failing the turn itself - a skipped compaction just means this
+   * turn's request may come in over budget and fail on its own, exactly the pre-existing behavior
+   * before compaction existed, not a new regression. Nothing is mutated unless the summarization
+   * call actually succeeds, so a failure never leaves history in a half-compacted state.
+   */
   private async maybeCompact(
     contextWindow: number,
     settings: CompactionSettings,
@@ -310,8 +331,10 @@ export class AgentLoop {
     onEntry: (entry: ContextEntry) => void,
     onProviderCall: (call: { request: CompletionRequest; response: CompletionResponse }) => void,
     signal?: AbortSignal,
+    modeInstruction?: string,
   ): Promise<void> {
-    if (!shouldCompact(this.visibleTokenEstimate, contextWindow, settings.reserveTokens)) return;
+    const effectiveVisible = this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction);
+    if (!shouldCompact(effectiveVisible, contextWindow, settings.reserveTokens)) return;
     const cutPoint = findCutPoint(this.entries, settings.keepRecentTokens);
     if (cutPoint === 0) return; // no safe turn boundary to cut at yet - skip this round
 
@@ -395,7 +418,7 @@ export class AgentLoop {
     // runs before tier 3 (one real API call) - §2.3's cheap-first ordering.
     if (options.contextWindow) {
       const compactionSettings = options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS;
-      this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry);
+      this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
       await this.maybeCompact(
         options.contextWindow,
         compactionSettings,
@@ -403,6 +426,7 @@ export class AgentLoop {
         onEntry,
         onProviderCall,
         options.signal,
+        options.modeInstruction,
       );
     }
 
@@ -553,7 +577,7 @@ export class AgentLoop {
       // last pass is simply a cheap, correct no-op.
       if (options.contextWindow) {
         const compactionSettings = options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS;
-        this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry);
+        this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
         await this.maybeCompact(
           options.contextWindow,
           compactionSettings,
@@ -561,6 +585,7 @@ export class AgentLoop {
           onEntry,
           onProviderCall,
           options.signal,
+          options.modeInstruction,
         );
       }
     }

@@ -89,13 +89,22 @@ export interface ContextEntry {
 }
 
 /**
- * Rough token estimate for one entry - chars/4, the same heuristic-until-a-real-tokenizer-exists
- * convention this codebase already uses elsewhere (no per-provider tokenizer is wired in). Used to
- * keep `AgentLoop`'s running context-size estimate (§2.3's eventual compaction trigger reads this)
- * cheap to maintain - O(1) per append instead of re-summing the whole entry log every turn.
+ * Rough token estimate for a raw string - chars/4, the same heuristic-until-a-real-tokenizer-
+ * exists convention this codebase already uses elsewhere (no per-provider tokenizer is wired in).
+ * The primitive `estimateTokens()` (entries) and `AgentLoop`'s own compaction-trigger overhead
+ * estimate (system prompt + tool schemas, neither of which is a `ContextEntry`) both build on.
+ */
+export function estimateTextTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Rough token estimate for one entry - see `estimateTextTokens()`. Used to keep `AgentLoop`'s
+ * running context-size estimate (§2.3's compaction trigger reads this) cheap to maintain - O(1)
+ * per append instead of re-summing the whole entry log every turn.
  */
 export function estimateTokens(entry: ContextEntry): number {
-  return Math.ceil(entry.content.length / 4);
+  return estimateTextTokens(entry.content);
 }
 
 function newEntry(partial: Omit<ContextEntry, 'id' | 'session_id' | 'created_at'>): ContextEntry {
