@@ -144,14 +144,40 @@ function serializeEntryForSummary(entry: ContextEntry): string {
   return '';
 }
 
+/** Default cap on the serialized conversation text this prompt embeds, in characters (~4 chars/
+ * token, this codebase's own `estimateTokens()` convention) - overridable per call via
+ * `maxContentChars` so `maybeCompact()` can derive a real budget from its own `reserveTokens`
+ * instead of trusting a single fixed guess to fit every configured context window. */
+export const DEFAULT_MAX_COMPACTION_PROMPT_CHARS = 40_000; // ~10,000 tokens
+
+/**
+ * Real gap found via direct probe (`tmp.tmp/probe-compaction.ts` scenario C, not just code-
+ * reading): `toCompact` (everything `findCutPoint()` decided to fold away) has no upper bound -
+ * a region built of many/large tool outputs can produce a summarization prompt bigger than the
+ * model's entire context window, which then fails the call outright, and `maybeCompact()`'s own
+ * best-effort catch silently swallows it - compaction just never happens for that round, with no
+ * indication why. Truncates from the *start* (drops the oldest slice, keeps what's closest to the
+ * kept/recent tail) when over budget - the next compaction's `previousSummary` seeding already
+ * exists specifically to let a later round pick up anything an earlier one had to leave out, so
+ * this degrades gracefully rather than being a one-shot, unrecoverable loss.
+ */
+function capConversationText(conversation: string, maxContentChars: number): string {
+  if (conversation.length <= maxContentChars) return conversation;
+  const omittedChars = conversation.length - maxContentChars;
+  const marker = `[... ${omittedChars} earlier characters omitted - this region was too large for one summarization pass ...]\n`;
+  return marker + conversation.slice(conversation.length - maxContentChars);
+}
+
 /** Builds the one-shot prompt sent to the summarizer call. `previousSummary`, when given (this
  * isn't the session's first compaction), asks the model to *update* it rather than regenerate
  * from scratch - bounds the cost of repeated compactions over a long session (§2.3). */
 export function buildCompactionPrompt(input: {
   entries: readonly ContextEntry[];
   previousSummary?: unknown;
+  maxContentChars?: number;
 }): string {
-  const conversation = input.entries.map(serializeEntryForSummary).filter(Boolean).join('\n');
+  const raw = input.entries.map(serializeEntryForSummary).filter(Boolean).join('\n');
+  const conversation = capConversationText(raw, input.maxContentChars ?? DEFAULT_MAX_COMPACTION_PROMPT_CHARS);
   if (input.previousSummary === undefined) {
     return `${SUMMARY_INSTRUCTIONS}\n\nConversation to summarize:\n\n${conversation}`;
   }

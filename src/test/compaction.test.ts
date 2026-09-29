@@ -146,6 +146,31 @@ test('buildCompactionPrompt with a previous summary asks for an update, embeddin
   assert.ok(prompt.includes('[User]: next thing'));
 });
 
+test('buildCompactionPrompt stays under maxContentChars regardless of how large the region is', () => {
+  // Real gap found via direct probe (scenario C, tmp.tmp/probe-compaction.ts): a region built of
+  // many/large tool outputs has no upper bound on its own - without a cap, this exact shape
+  // produces a summarization prompt bigger than the model's entire context window.
+  const entries = buildTurns(200, 2000); // deliberately huge - would be ~1.6M+ chars uncapped
+  const prompt = buildCompactionPrompt({ entries, maxContentChars: 5000 });
+  // A little over 5000 for the fixed instructions/marker text around the capped conversation
+  // itself, but nowhere near the ~1.6M+ chars the raw, uncapped serialization would produce.
+  assert.ok(prompt.length < 6000, `expected a capped prompt, got ${prompt.length} chars`);
+});
+
+test('buildCompactionPrompt truncates from the start, keeping the slice closest to the kept/recent tail', () => {
+  const entries = [userInputEntry('OLDEST MARKER'), userInputEntry('x'.repeat(5000)), userInputEntry('NEWEST MARKER')];
+  const prompt = buildCompactionPrompt({ entries, maxContentChars: 200 });
+  assert.ok(!prompt.includes('OLDEST MARKER'), 'expected the oldest content to be the part dropped');
+  assert.ok(prompt.includes('NEWEST MARKER'), 'expected the newest content to survive the cap');
+  assert.ok(prompt.includes('omitted'), 'expected a visible marker noting truncation happened');
+});
+
+test('buildCompactionPrompt leaves a short conversation completely untouched, no marker at all', () => {
+  const entries = [userInputEntry('short')];
+  const prompt = buildCompactionPrompt({ entries, maxContentChars: 5000 });
+  assert.ok(!prompt.includes('omitted'));
+});
+
 test('parseSummary parses clean JSON', () => {
   const result = parseSummary('{"next_step": "ship it"}');
   assert.deepEqual(result, { next_step: 'ship it' });

@@ -361,3 +361,57 @@ test('MicroCompact never splits a toolcall from its toolcallresponse even when t
   assert.notEqual(callEntry('c2')?.agent_visible, false);
   assert.notEqual(responseEntry('c2')?.agent_visible, false);
 });
+
+test('maybeCompact caps its own summarization prompt so an oversized region cannot fail the call outright', async () => {
+  // Reproduces probe-compaction.ts's scenario C through the real path (maybeCompact() deriving
+  // maxContentChars from its own settings.reserveTokens), not by calling buildCompactionPrompt()
+  // directly - a region built of many large tool outputs has no upper bound of its own, and
+  // without the cap the resulting prompt would be large enough to fail outright (simulated here
+  // as the fake provider throwing past a size it treats as "too big for the window"), silently
+  // swallowed by maybeCompact()'s own best-effort catch with no compaction ever happening.
+  const MAX_REALISTIC_PROMPT_CHARS = 20_000; // stands in for "would exceed the real model window"
+  let compactionRequestContentLength = -1;
+  const provider: LLMProvider = {
+    name: 'size-sensitive',
+    async complete(request: CompletionRequest): Promise<CompletionResponse> {
+      if (request.tools.length === 0) {
+        compactionRequestContentLength = request.messages[0].content.length;
+        if (compactionRequestContentLength > MAX_REALISTIC_PROMPT_CHARS) {
+          throw new Error('prompt too large for context window');
+        }
+        return { content: JSON.stringify({ next_step: 'x' }), toolCalls: [], stopReason: 'end_turn' };
+      }
+      return { content: 'answer', toolCalls: [], stopReason: 'end_turn' };
+    },
+  };
+  // A registered (if unused) tool, so the real turn's own request has tools.length > 0 -
+  // distinguishing it from the compaction call's tools:[] shape, same as maybeCompact()'s own
+  // request does in real code (loop.ts).
+  const loop = new AgentLoop(provider, [makeFakeTool('unused_tool', 'n/a')], 'system');
+  // 30 turns, each padded well past a size that would make the raw, uncapped region's serialized
+  // text (~30 * ~1000+ chars) exceed MAX_REALISTIC_PROMPT_CHARS on its own.
+  const entries: ContextEntry[] = [];
+  for (let i = 0; i < 30; i++) {
+    entries.push(userInputEntry(`turn ${i} ${'x'.repeat(996)}`)); // ~1000 chars each
+    entries.push(aiResponseEntry(`resp ${i} ${'y'.repeat(996)}`));
+  }
+  loop.loadEntries(entries); // ~30,000 raw chars in the region a compaction would try to fold away
+
+  const result = await loop.run('go', {
+    contextWindow: 2000,
+    // reserveTokens=3000 -> maxContentChars = floor(3000*0.7)*4 = 8400, comfortably under
+    // MAX_REALISTIC_PROMPT_CHARS once capped, nowhere close to it uncapped.
+    compactionSettings: { reserveTokens: 3000, keepRecentTokens: 500 },
+  });
+
+  assert.equal(result, 'answer');
+  assert.ok(compactionRequestContentLength > 0, 'expected the compaction call to actually be attempted');
+  assert.ok(
+    compactionRequestContentLength <= MAX_REALISTIC_PROMPT_CHARS,
+    `compaction prompt was ${compactionRequestContentLength} chars - the cap did not actually bound it`,
+  );
+  assert.ok(
+    loop.getEntries().some((e) => e.sub_type === 'compaction'),
+    'expected compaction to actually succeed, not be silently swallowed by an oversized prompt',
+  );
+});

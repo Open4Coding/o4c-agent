@@ -334,10 +334,18 @@ export class AgentLoop {
 
     let summary: unknown;
     const tokensBefore = this.visibleTokenEstimate;
+    // 70% of the reserve held for this call's own prompt, in chars (this codebase's own
+    // chars/4 ~= tokens convention) - leaves headroom in the same reserve for the system prompt
+    // above and the JSON response itself, rather than letting `toCompact` (which has no upper
+    // bound of its own - see buildCompactionPrompt's own doc comment on the probed gap this
+    // closes) consume the entire budget or more.
+    const maxContentChars = Math.max(4000, Math.floor(settings.reserveTokens * 0.7) * 4);
     const request: CompletionRequest = {
       systemPrompt:
         'You produce structured JSON summaries of coding-agent conversation history for context compaction. Output only the JSON object, nothing else.',
-      messages: [{ role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary }) }],
+      messages: [
+        { role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary, maxContentChars }) },
+      ],
       tools: [],
       signal,
     };
