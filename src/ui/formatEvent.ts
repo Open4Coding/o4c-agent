@@ -36,6 +36,9 @@ export function formatEvent(event: AgentEvent): string | null {
   if (event.type === 'compaction') {
     return event.text ? `[compact] ${event.text}` : null;
   }
+  if (event.type === 'prune') {
+    return event.text ? `[prune] ${event.text}` : null;
+  }
   if (event.type === 'warning') {
     return event.text ? `[warning] ${event.text}` : null;
   }

@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentLoop } from '../agent/loop.js';
-import { userInputEntry, aiResponseEntry, type ContextEntry } from '../agent/contextEntry.js';
+import {
+  userInputEntry,
+  aiResponseEntry,
+  aiToolCallEntry,
+  aiToolCallResponseEntry,
+  type ContextEntry,
+} from '../agent/contextEntry.js';
 import { FakeProvider } from './fakeProvider.js';
 import { makeFakeTool } from './fakeTool.js';
 import type { CompletionRequest, CompletionResponse, LLMProvider } from '../providers/types.js';
@@ -17,6 +23,20 @@ function buildOldTurns(n: number): ContextEntry[] {
   for (let i = 0; i < n; i++) {
     entries.push(userInputEntry(padded(`old user turn ${i}`)));
     entries.push(aiResponseEntry(padded(`old assistant turn ${i}`)));
+  }
+  return entries;
+}
+
+/** `n` toolcall/toolcallresponse pairs, ~112 estimated tokens each (~12 for the call's JSON,
+ * ~100 for the padded response) - no user/response entries around them, so there is no turn
+ * boundary anywhere in this history (§2.3's MicroCompact tier exists specifically to still be
+ * able to prune within exactly this shape). */
+function buildOldToolCallPairs(n: number): ContextEntry[] {
+  const entries: ContextEntry[] = [];
+  for (let i = 0; i < n; i++) {
+    const call = { id: `old-call-${i}`, name: 'read_file', input: { path: `f${i}` } };
+    entries.push(aiToolCallEntry(call, false));
+    entries.push(aiToolCallResponseEntry(call.id, padded(`old tool output ${i}`), false));
   }
   return entries;
 }
@@ -180,7 +200,14 @@ test('a single long turn (many tool calls, no new user message in between) compa
   let toolCallsIssuedAtCompaction = -1;
   const result = await loop.run('research this deeply', {
     contextWindow: 2000,
-    compactionSettings: { reserveTokens: 100, keepRecentTokens: 300 }, // threshold = 1900
+    compactionSettings: {
+      reserveTokens: 100, // tier 3 threshold = 1900
+      keepRecentTokens: 300,
+      // Disabled (never fires - see shouldCompact()'s formula) so this test stays an isolated
+      // regression test for tier 3's mid-turn relocation fix specifically, unaffected by tier 2
+      // (MicroCompact) now existing alongside it - that tier gets its own dedicated tests below.
+      microCompactReserveTokens: -1_000_000,
+    },
     maxIterations: 0, // unlimited - this turn alone needs more than the default 25-iteration cap
     onEntry: (entry) => {
       if (entry.sub_type === 'compaction' && toolCallsIssuedAtCompaction === -1) {
@@ -202,4 +229,135 @@ test('a single long turn (many tool calls, no new user message in between) compa
     toolCallsIssuedAtCompaction > 0,
     `expected compaction to fire after at least one tool call this turn, got toolCallsIssued=${toolCallsIssuedAtCompaction}`,
   );
+});
+
+test('MicroCompact (tier 2) prunes old tool-call pairs for free, hides both entries, keeps the recent tail, and appends exactly one prune marker', async () => {
+  const provider = new FakeProvider([{ content: 'answer', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.loadEntries(buildOldToolCallPairs(8)); // ~112 tokens/pair, ~896 total - no turn boundary anywhere
+
+  const result = await loop.run('go', {
+    contextWindow: 1000,
+    compactionSettings: { reserveTokens: 50, keepRecentTokens: 300, microCompactReserveTokens: 150 },
+  });
+
+  assert.equal(result, 'answer');
+  assert.equal(provider.callCount, 1); // free tier - no extra summarization call, tier 3 never needed
+
+  const entries = loop.getEntries();
+  const pruneEntries = entries.filter((e) => e.type === 'ai' && e.sub_type === 'prune');
+  assert.equal(pruneEntries.length, 1); // one marker per pass, not one per pruned pair
+  assert.notEqual(pruneEntries[0].agent_visible, false); // the marker itself stays visible
+
+  const calls = entries.filter((e) => e.sub_type === 'toolcall');
+  const hidden = calls.filter((e) => e.agent_visible === false);
+  const stillVisible = calls.filter((e) => e.agent_visible !== false);
+  assert.ok(hidden.length > 0, 'expected some old pairs to be pruned');
+  assert.ok(stillVisible.length > 0, 'expected some recent pairs to survive');
+
+  // Every pair is fully hidden or fully visible together, never split - a split pair would leave
+  // a dangling tool_use/tool_result in the wire projection.
+  for (const call of calls) {
+    const response = entries.find((e) => e.sub_type === 'toolcallresponse' && e.tool_call_id === call.tool_call_id);
+    assert.equal(call.agent_visible === false, response?.agent_visible === false, `pair ${call.tool_call_id} split across visibility`);
+  }
+
+  const wire = loop.getMessages();
+  const wireText = wire.map((m) => m.content).join('\n');
+  for (const call of hidden) {
+    const response = entries.find((e) => e.sub_type === 'toolcallresponse' && e.tool_call_id === call.tool_call_id);
+    assert.ok(response && !wireText.includes(response.content), "a hidden pair's content leaked into the wire projection");
+  }
+});
+
+test('MicroCompact rescues a single turn with no earlier turn boundary at all - the exact gap tier 3 alone cannot close', async () => {
+  // Reproduces probe-compaction.ts's scenario A/B directly: one turn, no second user message ever,
+  // so findCutPoint() has no boundary to snap to and would return 0 forever - confirmed separately
+  // in compaction.test.ts. This is what tier 2 is actually for.
+  const TOTAL_TOOL_ITERATIONS = 20;
+  let toolCallsIssued = 0;
+  const provider: LLMProvider = {
+    name: 'no-boundary',
+    async complete(request: CompletionRequest): Promise<CompletionResponse> {
+      if (request.tools.length === 0) {
+        // tier 3's own request shape - reaching this at all would mean tier 2 failed to keep this
+        // turn under tier 3's (much higher) threshold on its own.
+        return { content: JSON.stringify({ next_step: 'x' }), toolCalls: [], stopReason: 'end_turn' };
+      }
+      if (toolCallsIssued < TOTAL_TOOL_ITERATIONS) {
+        toolCallsIssued += 1;
+        return {
+          content: '',
+          toolCalls: [{ id: `t${toolCallsIssued}`, name: 'big_tool', input: {} }],
+          stopReason: 'tool_use',
+        };
+      }
+      return { content: 'final answer', toolCalls: [], stopReason: 'end_turn' };
+    },
+  };
+  const tool = makeFakeTool('big_tool', padded('tool output'));
+  const loop = new AgentLoop(provider, [tool], 'system');
+  // No loadEntries() - this turn's own opening user message is the only thing in history when it
+  // starts.
+
+  let maxVisible = 0;
+  const result = await loop.run('research this deeply', {
+    contextWindow: 1500,
+    compactionSettings: { reserveTokens: 50, keepRecentTokens: 300, microCompactReserveTokens: 400 },
+    maxIterations: 0,
+    onEntry: () => {
+      maxVisible = Math.max(maxVisible, loop.getVisibleTokenEstimate());
+    },
+  });
+
+  assert.equal(result, 'final answer');
+  assert.equal(toolCallsIssued, TOTAL_TOOL_ITERATIONS); // the whole turn ran to completion
+  assert.ok(loop.getEntries().some((e) => e.sub_type === 'prune'), 'expected MicroCompact to have pruned at least once');
+  assert.equal(loop.getEntries().some((e) => e.sub_type === 'compaction'), false); // tier 3 never needed to fire
+  // Without tier 2, this exact shape grows to ~20 * 112 ≈ 2240 tokens with zero chance to shrink
+  // (findCutPoint always returns 0 here) - bounded growth, not "never crossed the window even
+  // once," is the actual claim: tier 2 only fires once it's already past its own threshold.
+  assert.ok(maxVisible < 2000, `peak visible ${maxVisible} grew essentially unbounded - MicroCompact failed to cap it`);
+});
+
+test('MicroCompact never splits a toolcall from its toolcallresponse even when the raw cutoff lands between them', async () => {
+  // The bug found and fixed while writing this test: microCompactCutoffIndex() doesn't snap to a
+  // turn boundary (that's the whole point - see its own doc comment), so the raw cutoff can land
+  // exactly between a pair. Engineered directly: the middle pair's response alone is large enough
+  // that the backward walk crosses keepRecentTokens while sitting on the call, landing the cutoff
+  // exactly at the response's own index.
+  const provider = new FakeProvider([{ content: 'answer', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const call0 = { id: 'c0', name: 'read_file', input: {} };
+  const call1 = { id: 'c1', name: 'read_file', input: {} };
+  const call2 = { id: 'c2', name: 'read_file', input: {} };
+  loop.loadEntries([
+    aiToolCallEntry(call0, false),
+    aiToolCallResponseEntry(call0.id, padded('small old output'), false), // ~100 tokens
+    aiToolCallEntry(call1, false),
+    aiToolCallResponseEntry(call1.id, 'y'.repeat(2400), false), // ~600 tokens - deliberately huge
+    aiToolCallEntry(call2, false),
+    aiToolCallResponseEntry(call2.id, padded('small recent output'), false), // ~100 tokens
+  ]);
+
+  await loop.run('go', {
+    contextWindow: 10_000,
+    compactionSettings: { reserveTokens: 1, keepRecentTokens: 500, microCompactReserveTokens: 9999 },
+  });
+
+  const entries = loop.getEntries();
+  const callEntry = (id: string) => entries.find((e) => e.tool_call_id === id && e.sub_type === 'toolcall');
+  const responseEntry = (id: string) => entries.find((e) => e.tool_call_id === id && e.sub_type === 'toolcallresponse');
+
+  assert.equal(callEntry('c0')?.agent_visible, false); // old, small pair - safely prunable
+  assert.equal(responseEntry('c0')?.agent_visible, false);
+
+  // The pair the raw (unsnapped) cutoff lands inside of - correctly left fully visible (its real
+  // response size means it isn't actually old enough once accounted for), never split.
+  assert.notEqual(callEntry('c1')?.agent_visible, false);
+  assert.notEqual(responseEntry('c1')?.agent_visible, false);
+
+  assert.notEqual(callEntry('c2')?.agent_visible, false);
+  assert.notEqual(responseEntry('c2')?.agent_visible, false);
 });

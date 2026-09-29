@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   shouldCompact,
   findCutPoint,
+  microCompactCutoffIndex,
   buildCompactionPrompt,
   parseSummary,
   DEFAULT_COMPACTION_SETTINGS,
@@ -83,6 +84,50 @@ test('findCutPoint skips already-hidden (agent_visible=false) entries when accum
   for (const e of hidden.slice(0, 40)) e.agent_visible = false; // first 10 turns
 
   assert.equal(findCutPoint(hidden, 1500), findCutPoint(entries, 1500));
+});
+
+test('microCompactCutoffIndex returns 0 when the whole log is smaller than the keep budget', () => {
+  const entries = buildTurns(2, 50);
+  assert.equal(microCompactCutoffIndex(entries, 100_000), 0);
+});
+
+test('microCompactCutoffIndex does NOT snap to a turn boundary, unlike findCutPoint', () => {
+  // This is the whole point of the separate function: a cutoff that lands mid-turn is fine here -
+  // individual toolcall/toolcallresponse pairs are pruned independently of turn structure, not a
+  // single contiguous block the way findCutPoint's cut point is.
+  const entries = buildTurns(20, 100);
+  const cutoff = microCompactCutoffIndex(entries, 1500);
+  assert.ok(cutoff > 0);
+  assert.ok(cutoff < entries.length);
+  // Same keep-budget backward walk as findCutPoint, so the two land near the same raw candidate
+  // before findCutPoint's own forward/backward boundary-snapping moves it up to a few entries in
+  // either direction - not necessarily equal to findCutPoint's actual (snapped) result.
+  const cut = findCutPoint(entries, 1500);
+  assert.ok(Math.abs(cutoff - cut) <= 4, `expected the unsnapped cutoff (${cutoff}) near the snapped cut point (${cut})`);
+});
+
+test('microCompactCutoffIndex finds a real cutoff even in a single turn with no earlier turn boundary at all', () => {
+  // The exact gap probed directly (tmp.tmp/probe-compaction.ts scenario A) and the reason this
+  // function exists instead of reusing findCutPoint(): one giant turn, no second user message
+  // anywhere, so findCutPoint has no boundary to snap to and returns 0 (a real no-op, confirmed
+  // separately in this same file). microCompactCutoffIndex has no such requirement.
+  const entries: ContextEntry[] = [userInputEntry('go')];
+  for (let i = 0; i < 20; i++) {
+    const call = { id: `call-${i}`, name: 'read_file', input: { path: `f${i}.ts` } };
+    entries.push(aiToolCallEntry(call, false));
+    entries.push(aiToolCallResponseEntry(call.id, `output ${i} ${'y'.repeat(100)}`, false));
+  }
+  assert.equal(findCutPoint(entries, 500), 0); // confirms the gap this is meant to close
+  const cutoff = microCompactCutoffIndex(entries, 500);
+  assert.ok(cutoff > 0, 'expected a real cutoff, not 0, for the exact case findCutPoint cannot handle');
+});
+
+test('microCompactCutoffIndex skips already-hidden (agent_visible=false) entries when accumulating', () => {
+  const entries = buildTurns(40, 100);
+  const hidden = buildTurns(40, 100);
+  for (const e of hidden.slice(0, 40)) e.agent_visible = false;
+
+  assert.equal(microCompactCutoffIndex(hidden, 1500), microCompactCutoffIndex(entries, 1500));
 });
 
 test('buildCompactionPrompt with no previous summary asks for a fresh summary', () => {

@@ -21,7 +21,8 @@ export type EntrySubType =
   | 'background-session'
   | 'worktree'
   | 'plugin-lifecycle'
-  | 'compaction';
+  | 'compaction'
+  | 'prune';
 
 /**
  * The single shape used both as `AgentLoop`'s live in-session history and, once §7's
@@ -206,6 +207,23 @@ export function aiCompactionEntry(
 }
 
 /**
+ * §2.3's MicroCompact tier (2026-09-28, `cc`/hermes-agent-derived: a free, no-API-call tier
+ * cheaper than a real `compaction` summary) inserts one of these per pass, right after hiding
+ * whichever old `toolcall`/`toolcallresponse` pairs it found - same append-and-flip mechanism
+ * `aiCompactionEntry` already uses (codex's no-history-rewrite constraint), reused here rather
+ * than mutating the pruned entries' own content in place. Unlike a compaction summary, there is
+ * nothing to summarize - a fixed-template line is all this needs, so `content` is plain text, not
+ * a JSON shape a wire-formatter has to unpack.
+ */
+export function aiPruneEntry(prunedPairCount: number, tokensFreed: number): ContextEntry {
+  return newEntry({
+    type: 'ai',
+    sub_type: 'prune',
+    content: `[${prunedPairCount} older tool call${prunedPairCount === 1 ? '' : 's'} pruned from context (~${tokensFreed} tokens freed) - still visible in scrollback and the run log]`,
+  });
+}
+
+/**
  * Projects the full entry log down to exactly what a provider needs for one request - the same
  * `Message[]` wire format every provider already accepts unchanged (§4.2's abstraction needs no
  * changes because of this refactor).
@@ -302,7 +320,11 @@ export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
 
     if (
       entry.type === 'ai' &&
-      (entry.sub_type === 'response' || entry.sub_type === 'info' || entry.sub_type === 'think' || entry.sub_type === 'compaction')
+      (entry.sub_type === 'response' ||
+        entry.sub_type === 'info' ||
+        entry.sub_type === 'think' ||
+        entry.sub_type === 'compaction' ||
+        entry.sub_type === 'prune')
     ) {
       const text = entry.sub_type === 'compaction' ? formatCompactionForWire(entry.content) : entry.content;
       if (!pending) pending = { content: text, toolCalls: [] };

@@ -868,7 +868,7 @@ export function App({
               dispatchTextWindow({ type: 'appendLive', text });
               if (event.type === 'tool_call' || event.type === 'tool_result') {
                 responseLines.push({ kind: event.type, text });
-              } else if (event.type === 'compaction') {
+              } else if (event.type === 'compaction' || event.type === 'prune') {
                 // Rare and worth a permanent record, unlike plain "text" narration - a user
                 // scrolling back should be able to see exactly when/why older history vanished
                 // from what the model sees.

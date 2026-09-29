@@ -2,6 +2,7 @@ import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from
 import type { Tool } from '../tools/types.js';
 import {
   aiCompactionEntry,
+  aiPruneEntry,
   aiResponseEntry,
   aiThinkEntry,
   aiToolCallEntry,
@@ -15,15 +16,17 @@ import {
 import {
   buildCompactionPrompt,
   findCutPoint,
+  microCompactCutoffIndex,
   parseSummary,
   shouldCompact,
   DEFAULT_COMPACTION_SETTINGS,
+  DEFAULT_MICRO_COMPACT_RESERVE_TOKENS,
   type CompactionSettings,
 } from './compaction.js';
 import { createThinkTagStripper } from './streamFilter.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'delta' | 'warning';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -224,6 +227,82 @@ export class AgentLoop {
    * before compaction existed, not a new regression. Nothing is mutated unless the summarization
    * call actually succeeds, so a failure never leaves history in a half-compacted state.
    */
+  /**
+   * §2.3's MicroCompact tier (2026-09-28) - tier 2 of 3, cheaper than `maybeCompact()`'s real
+   * summarization call (tier 3) and run before it. No API call at all: old `toolcall`/
+   * `toolcallresponse` pairs (matched by `tool_call_id`, not assumed adjacent) get flipped
+   * `agent_visible=false` in place, exactly like `maybeCompact()`'s own entries - append-and-flip,
+   * never rewrite (codex's constraint, same reasoning as tier 3). One `prune`-typed marker entry
+   * is appended per pass, however many pairs it found this round - not one per pair, which would
+   * just be noise for what's otherwise a routine, frequent, free operation.
+   *
+   * Synchronous (no `await`) - there's no provider call to make, which is the entire point of this
+   * tier existing. Skips entirely once nothing new is left to prune (either the log is still
+   * smaller than `keepRecentTokens`, or every old pair in range was already hidden by an earlier
+   * pass) - a marker entry that pruned nothing would be actively misleading.
+   */
+  private maybeMicroCompact(
+    contextWindow: number,
+    settings: CompactionSettings,
+    onEvent: (event: AgentEvent) => void,
+    onEntry: (entry: ContextEntry) => void,
+  ): void {
+    const microCompactReserve = settings.microCompactReserveTokens ?? DEFAULT_MICRO_COMPACT_RESERVE_TOKENS;
+    if (!shouldCompact(this.visibleTokenEstimate, contextWindow, microCompactReserve)) return;
+
+    const cutoff = microCompactCutoffIndex(this.entries, settings.keepRecentTokens);
+    if (cutoff === 0) return; // whole log is still under the keep-recent budget - nothing old enough yet
+
+    // Matched by id rather than assumed adjacent (unlike loop.ts's own append order, which is
+    // always back-to-back) - correct regardless of what ends up between them, e.g. an earlier
+    // compaction/prune marker. Index tracked alongside the entry, not just the entry itself -
+    // `microCompactCutoffIndex` doesn't snap to a turn boundary the way `findCutPoint` does, so
+    // the cutoff can land exactly between a pair; both entries must be strictly before it, or a
+    // response `microCompactCutoffIndex` meant to keep in the verbatim recent tail could get
+    // hidden anyway just because its call happened to fall on the old side of the cutoff.
+    const responsesByCallId = new Map<string, { entry: ContextEntry; index: number }>();
+    this.entries.forEach((entry, index) => {
+      if (entry.type === 'ai' && entry.sub_type === 'toolcallresponse' && entry.tool_call_id) {
+        responsesByCallId.set(entry.tool_call_id, { entry, index });
+      }
+    });
+
+    let prunedPairCount = 0;
+    let tokensFreed = 0;
+    for (let i = 0; i < cutoff; i++) {
+      const call = this.entries[i];
+      if (call.type !== 'ai' || call.sub_type !== 'toolcall' || call.agent_visible === false || !call.tool_call_id) {
+        continue;
+      }
+      const found = responsesByCallId.get(call.tool_call_id);
+      if (!found || found.index >= cutoff || found.entry.agent_visible === false) continue;
+      const response = found.entry;
+
+      tokensFreed += estimateTokens(call) + estimateTokens(response);
+      this.deindexEntry(call);
+      call.agent_visible = false;
+      this.indexEntry(call);
+      this.deindexEntry(response);
+      response.agent_visible = false;
+      this.indexEntry(response);
+      prunedPairCount += 1;
+    }
+    if (prunedPairCount === 0) return;
+
+    // Appended at the end, not spliced - unlike a full compaction's single contiguous block, the
+    // pairs this hid are scattered among still-visible entries (user turns, responses, an earlier
+    // summary), so there's no one position that reads as "where they used to be." The end is also
+    // exactly where this pass happened chronologically - nothing after it exists yet.
+    const pruneEntry = aiPruneEntry(prunedPairCount, tokensFreed);
+    this.entries.push(pruneEntry);
+    this.indexEntry(pruneEntry);
+    onEntry(pruneEntry);
+    onEvent({
+      type: 'prune',
+      text: `Pruned ${prunedPairCount} older tool call${prunedPairCount === 1 ? '' : 's'} (~${tokensFreed} tokens freed).`,
+    });
+  }
+
   private async maybeCompact(
     contextWindow: number,
     settings: CompactionSettings,
@@ -304,11 +383,14 @@ export class AgentLoop {
     // Checked before this turn's own user message is appended, so the check reflects exactly
     // what's already in history from prior turns - a completed compaction here is committed
     // regardless of whether this turn itself later aborts (it isn't part of what `rollbackTo`
-    // below undoes; it already happened as its own, prior, successful step).
+    // below undoes; it already happened as its own, prior, successful step). Tier 2 (free) always
+    // runs before tier 3 (one real API call) - §2.3's cheap-first ordering.
     if (options.contextWindow) {
+      const compactionSettings = options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS;
+      this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry);
       await this.maybeCompact(
         options.contextWindow,
-        options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS,
+        compactionSettings,
         onEvent,
         onEntry,
         onProviderCall,
@@ -457,10 +539,16 @@ export class AgentLoop {
       // swallowed" - failing an unrelated assertion once the top-of-loop placement was added).
       // Cheap when it doesn't fire (visibleTokenEstimate is an O(1) running counter) - only
       // actually costs anything on the iteration where compaction genuinely needs to happen.
+      // Tier 2 first, same cheap-first ordering as the pre-loop check above - safe to call here
+      // unconditionally (unlike tier 3's async retry hazard above): it's synchronous, can't fail,
+      // and already-pruned pairs are skipped, so calling it again with zero new entries since the
+      // last pass is simply a cheap, correct no-op.
       if (options.contextWindow) {
+        const compactionSettings = options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS;
+        this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry);
         await this.maybeCompact(
           options.contextWindow,
-          options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS,
+          compactionSettings,
           onEvent,
           onEntry,
           onProviderCall,

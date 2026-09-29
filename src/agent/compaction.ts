@@ -16,11 +16,25 @@ export interface CompactionSettings {
    * cut point is snapped to the nearest turn boundary at or after this budget is reached, so this
    * is a floor, not an exact count. */
   keepRecentTokens: number;
+  /** §2.3's tiered-compaction addition, 2026-09-28 - the trigger for the free MicroCompact tier
+   * (`maybeMicroCompact()`), same `shouldCompact()` formula as `reserveTokens` but a bigger
+   * number, so it's "within this many tokens of the window" earlier/more eagerly than a real,
+   * API-costing summarization ever needs to run. Independent of `reserveTokens` (tier 3's own
+   * trigger stays exactly as before) - the two tiers fire at different distances from the window,
+   * not off the same threshold. Exact ratio is implementation-time tuning, not fixed by the
+   * design (see the design doc's own note) - this default just needs to be meaningfully bigger.
+   * Optional (falls back to `DEFAULT_MICRO_COMPACT_RESERVE_TOKENS`) so every existing caller/test
+   * that only ever cared about tier 3's two fields keeps working unchanged - MicroCompact is a
+   * new, additive tier, not a breaking change to this settings shape. */
+  microCompactReserveTokens?: number;
 }
+
+export const DEFAULT_MICRO_COMPACT_RESERVE_TOKENS = 32768;
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
   reserveTokens: 16384,
   keepRecentTokens: 20000,
+  microCompactReserveTokens: DEFAULT_MICRO_COMPACT_RESERVE_TOKENS,
 };
 
 /** Trigger: compact once the visible context estimate is within `reserveTokens` of the model's
@@ -71,6 +85,33 @@ export function findCutPoint(entries: readonly ContextEntry[], keepRecentTokens:
   // safe (if slightly more conservative) cut rather than none at all.
   for (let i = candidate - 1; i >= 0; i--) {
     if (isTurnBoundary(entries[i])) return i;
+  }
+  return 0;
+}
+
+/**
+ * §2.3's MicroCompact tier (2026-09-28) - the "old enough" boundary for pruning individual
+ * `toolcall`/`toolcallresponse` pairs, deliberately *not* `findCutPoint()`'s turn-boundary-snapped
+ * cut point. Reuses only its first half (the backward walk accumulating `estimateTokens()` for
+ * currently-visible entries until `keepRecentTokens` is reached) - MicroCompact never needs to
+ * snap to a `user`/`input` boundary the way a full summary does, because a self-contained
+ * toolcall/toolcallresponse pair (matched by id, never split across turns) can be safely hidden on
+ * its own regardless of where the surrounding turn boundaries fall.
+ *
+ * This is what actually closes the gap `findCutPoint()` leaves open: a single giant turn with no
+ * earlier turn boundary at all (probed directly - `tmp.tmp/probe-compaction.ts`'s scenario A)
+ * still has *individual old tool-call pairs* within it that are old enough to prune, even though
+ * `findCutPoint()` itself would return 0 (nothing to compact) for that exact same history.
+ *
+ * Returns the index before which entries are old enough to be pruning candidates - `0` if the
+ * whole log is smaller than `keepRecentTokens` (nothing old enough yet).
+ */
+export function microCompactCutoffIndex(entries: readonly ContextEntry[], keepRecentTokens: number): number {
+  let accumulated = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (accumulated >= keepRecentTokens) return i + 1;
+    const entry = entries[i];
+    if (entry.agent_visible !== false) accumulated += estimateTokens(entry);
   }
   return 0;
 }
