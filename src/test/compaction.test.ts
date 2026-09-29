@@ -13,6 +13,7 @@ import {
   aiResponseEntry,
   aiToolCallEntry,
   aiToolCallResponseEntry,
+  estimateTokens,
   type ContextEntry,
 } from '../agent/contextEntry.js';
 
@@ -73,6 +74,41 @@ test('findCutPoint keeps at least keepRecentTokens worth of entries (allowing tu
   const cut = findCutPoint(entries, 1500);
   const keptTokens = entries.slice(cut).reduce((sum, e) => sum + Math.ceil(e.content.length / 4), 0);
   assert.ok(keptTokens >= 1500, `kept only ${keptTokens} tokens, wanted >= 1500`);
+});
+
+test('findCutPoint never undershoots keepRecentTokens, even when a huge turn sits right where the raw walk lands', () => {
+  // Real gap found via direct probe (tmp.tmp/probe-compaction.ts scenario D): the raw backward
+  // walk lands inside a huge turn, with only a small tail of turns after it - snapping forward
+  // (the original, buggy behavior) moves the cut into that small tail, undershooting the keep
+  // budget. Snapping backward first (the fix) moves the cut to before the giant turn instead,
+  // overshooting the budget rather than undershooting it - never violating the documented floor.
+  // estimateTokens() = ceil(len/4), so len = tokens*4 lands on ~tokens exactly - needed here (unlike
+  // buildTurns' own approximate char-repeat sizing) to precisely land the raw candidate inside the
+  // giant turn's own huge entry, which is the specific case this regression is about.
+  const exact = (tokens: number): string => 'x'.repeat(tokens * 4);
+  function smallTurns(n: number): ContextEntry[] {
+    const out: ContextEntry[] = [];
+    for (let i = 0; i < n; i++) {
+      const call = { id: `c${i}`, name: 'read_file', input: { path: `f${i}` } };
+      out.push(userInputEntry(exact(25)));
+      out.push(aiToolCallEntry(call, false));
+      out.push(aiToolCallResponseEntry(call.id, exact(25), false));
+      out.push(aiResponseEntry(exact(25)));
+    }
+    return out;
+  }
+  const call = { id: 'big', name: 'run_shell', input: { command: 'x' } };
+  const entries: ContextEntry[] = [
+    ...smallTurns(6), // ~600 tokens
+    userInputEntry(exact(25)),
+    aiToolCallEntry(call, false),
+    aiToolCallResponseEntry(call.id, exact(3000), false), // the huge entry the raw walk lands inside
+    aiResponseEntry(exact(25)),
+    ...smallTurns(6), // ~600 tokens - too small on its own to reach keepRecentTokens
+  ];
+  const cut = findCutPoint(entries, 2000);
+  const kept = entries.slice(cut).reduce((sum, e) => sum + (e.agent_visible !== false ? estimateTokens(e) : 0), 0);
+  assert.ok(kept >= 2000, `kept only ${kept} tokens, wanted >= 2000 (keepRecentTokens)`);
 });
 
 test('findCutPoint skips already-hidden (agent_visible=false) entries when accumulating', () => {

@@ -13,8 +13,9 @@ export interface CompactionSettings {
    * once the visible context estimate gets within this many tokens of the model's real window. */
   reserveTokens: number;
   /** Roughly how many tokens' worth of the most recent entries stay verbatim, uncompacted - the
-   * cut point is snapped to the nearest turn boundary at or after this budget is reached, so this
-   * is a floor, not an exact count. */
+   * cut point is snapped to the nearest turn boundary at or *before* this budget is reached (see
+   * `findCutPoint()`'s own doc comment on why backward, not forward), so this is a genuine floor -
+   * at least this much survives, usually a bit more, never less. */
   keepRecentTokens: number;
   /** §2.3's tiered-compaction addition, 2026-09-28 - the trigger for the free MicroCompact tier
    * (`maybeMicroCompact()`), same `shouldCompact()` formula as `reserveTokens` but a bigger
@@ -56,12 +57,24 @@ function isTurnBoundary(entry: ContextEntry): boolean {
  * summary and hidden (`agent_visible = false`); entries `[cutPoint, end)` stay untouched.
  *
  * Walks backward from the end accumulating `estimateTokens()` for currently-visible entries
- * until `keepRecentTokens` is reached, then walks forward from there to the nearest turn boundary
- * (a `user`/`input` entry) - snapping to a turn boundary is what guarantees a `toolcall` is never
+ * until `keepRecentTokens` is reached, then snaps from there to the nearest turn boundary (a
+ * `user`/`input` entry) - snapping to a turn boundary is what guarantees a `toolcall` is never
  * separated from its `toolcallresponse`, since neither can ever *be* a turn boundary itself, only
  * sit between two of them. Returns `0` (nothing to compact) if there's no earlier turn boundary to
  * cut at, or the log is too short to have one - compaction that can't find a safe cut point is a
  * no-op for this round, not a forced, unsafe one.
+ *
+ * Snaps **backward** (to an earlier boundary) first, not forward - real gap found via direct
+ * probe (`tmp.tmp/probe-compaction.ts` scenario D): snapping *forward* first (as this function
+ * originally did) moves the cut *later*, folding away more than `keepRecentTokens` worth of the
+ * still-open tail whenever the nearest boundary at or after the raw candidate happens to be far
+ * away (e.g. deep inside one large turn) - directly violating this same function's own documented
+ * "at least keepRecentTokens survives" contract, which `keepRecentTokens`'s own doc comment on
+ * `CompactionSettings` calls a floor. Snapping backward only ever *keeps more* than the raw
+ * candidate (moving the cut earlier), so it can only overshoot the floor, never undershoot it -
+ * the forward direction is now only a fallback, used solely when there is no boundary before the
+ * candidate at all to keep the "no boundary anywhere -> no-op" behavior for that edge case
+ * unchanged.
  */
 export function findCutPoint(entries: readonly ContextEntry[], keepRecentTokens: number): number {
   let accumulated = 0;
@@ -77,13 +90,12 @@ export function findCutPoint(entries: readonly ContextEntry[], keepRecentTokens:
   }
   if (accumulated < keepRecentTokens) return 0; // whole log is smaller than the keep-budget
 
-  for (let i = candidate; i < entries.length; i++) {
+  for (let i = candidate - 1; i >= 0; i--) {
     if (isTurnBoundary(entries[i])) return i;
   }
-  // No turn boundary at or after the candidate point (e.g. it landed inside the final, still-
-  // open turn) - walk backward instead to the nearest boundary before it, so there's still a
-  // safe (if slightly more conservative) cut rather than none at all.
-  for (let i = candidate - 1; i >= 0; i--) {
+  // No turn boundary before the candidate point at all - fall back to snapping forward instead,
+  // so there's still a cut (even one that overshoots the keep budget a little) rather than none.
+  for (let i = candidate; i < entries.length; i++) {
     if (isTurnBoundary(entries[i])) return i;
   }
   return 0;
