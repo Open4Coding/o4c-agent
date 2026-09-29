@@ -422,7 +422,7 @@ export function InputBox({
 
   return (
     <Box borderStyle="round" borderColor={disabled ? 'gray' : theme.border} paddingX={1}>
-      <Text wrap="wrap" color={disabled ? 'gray' : theme.text}>
+      <Text wrap="wrap" color={disabled ? 'gray' : theme.accent}>
         {line}
       </Text>
     </Box>

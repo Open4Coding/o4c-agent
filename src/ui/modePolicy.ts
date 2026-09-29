@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Tool } from '../tools/types.js';
+import { theme } from './theme.js';
 
 export type Mode = 'manual' | 'auto' | 'acceptEdits' | 'plan' | 'planWrite';
 
@@ -9,8 +10,9 @@ export interface ModeInfo {
   /** Shown next to the label in /mode's picker - what this mode actually does to write_file and
    * run_shell, kept in sync with classifyToolAccess below since that's the real behavior. */
   description: string;
-  /** Ink's standard named palette only (no hex) - yellow stands in for orange, magenta for
-   * purple, since neither is in that named set. blue and white are exact matches. */
+  /** Ink's standard named palette, except Manual - per direct instruction, every "white" text
+   * spot in the UI became the amber theme accent instead, this mode's badge included. Yellow
+   * stands in for orange, magenta for purple, since neither is in that named set. */
   color: string;
 }
 
@@ -19,7 +21,7 @@ export const MODES: ModeInfo[] = [
     mode: 'manual',
     label: 'Manual',
     description: 'Confirms every file write and shell command before running it.',
-    color: 'white',
+    color: theme.accent,
   },
   {
     mode: 'auto',

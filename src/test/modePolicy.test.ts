@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyToolAccess, modeInfo, modeSystemPrompt, MODES } from '../ui/modePolicy.js';
+import { theme } from '../ui/theme.js';
 import type { Tool } from '../tools/types.js';
 
 function fakeTool(name: string, mutating: boolean): Tool {
@@ -100,11 +101,13 @@ test('modeSystemPrompt for planWrite with no plansDir says nothing is writable, 
 });
 
 test('modeInfo returns the expected label and standard-palette color for each mode', () => {
+  // manual is the one exception - the theme accent (amber), not a named color, per direct
+  // instruction that every "white" UI text spot become amber instead.
   assert.deepEqual(modeInfo('manual'), {
     mode: 'manual',
     label: 'Manual',
     description: 'Confirms every file write and shell command before running it.',
-    color: 'white',
+    color: theme.accent,
   });
   assert.deepEqual(modeInfo('auto'), {
     mode: 'auto',

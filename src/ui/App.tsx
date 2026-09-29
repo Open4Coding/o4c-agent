@@ -166,7 +166,7 @@ function StatusBar({
       <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>◆ {model}</Text>
       <Text color={theme.border}> | </Text>
-      <Text color={theme.text}>
+      <Text color={theme.accent}>
         {formatTokenCount(tokens)}
         {contextWindow ? `/${formatTokenCount(contextWindow)}` : ''}
       </Text>
@@ -176,11 +176,11 @@ function StatusBar({
           <Text color={theme.warn}>{'█'.repeat(progressBarFilledCells(fraction))}</Text>
           <Text color={theme.border}>{'░'.repeat(10 - progressBarFilledCells(fraction))}</Text>
           {'] '}
-          <Text color={theme.text}>{Math.round(fraction * 100)}%</Text>
+          <Text color={theme.accent}>{Math.round(fraction * 100)}%</Text>
         </Text>
       )}
       <Text color={theme.border}> | </Text>
-      <Text color={theme.text}>{elapsed}</Text>
+      <Text color={theme.accent}>{elapsed}</Text>
     </Text>
   );
 }
@@ -198,7 +198,7 @@ function LineText({ line }: { line: Line }) {
       return <Text color={theme.border}>{line.text}</Text>;
     case 'final':
       return (
-        <Text bold color={theme.text}>
+        <Text bold color={theme.accent}>
           {line.text}
         </Text>
       );
