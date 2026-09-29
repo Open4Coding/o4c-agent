@@ -8,6 +8,9 @@ export interface CommandFamilyPickerProps {
   commands: readonly CommandInfo[];
   onSelect: (command: CommandInfo) => void;
   onCancel: () => void;
+  /** The configurable "/" highlight color (default amber, /config-highlightcolor) - see
+   * App.tsx's own doc comment on the prop it threads this down from. */
+  highlightColor: string;
 }
 
 /**
@@ -18,12 +21,19 @@ export interface CommandFamilyPickerProps {
  * the input box with the command's name so the user can type its argument before submitting),
  * same separation `/mode`'s picker keeps from `/mode` itself.
  */
-export function CommandFamilyPicker({ title, commands, onSelect, onCancel }: CommandFamilyPickerProps) {
+export function CommandFamilyPicker({
+  title,
+  commands,
+  onSelect,
+  onCancel,
+  highlightColor,
+}: CommandFamilyPickerProps) {
   return (
     <SelectList
       items={commands}
       getKey={(c) => c.name}
       title={title}
+      borderColor={highlightColor}
       onSelect={onSelect}
       onCancel={onCancel}
       renderItem={(c, selected) => (

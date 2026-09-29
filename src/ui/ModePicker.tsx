@@ -7,11 +7,15 @@ export interface ModePickerProps {
   currentMode: Mode;
   onSelect: (mode: Mode) => void;
   onCancel: () => void;
+  /** The configurable "/" highlight color (default amber, /config-highlightcolor) - only used
+   * for the border here, since each row is already colored by its own mode (see renderItem
+   * below), not by selection. */
+  highlightColor: string;
 }
 
 /** The `/mode` picker - built on the generic SelectList, opening with the currently-active mode
  * already highlighted rather than always defaulting to the top of the list. */
-export function ModePicker({ currentMode, onSelect, onCancel }: ModePickerProps) {
+export function ModePicker({ currentMode, onSelect, onCancel, highlightColor }: ModePickerProps) {
   const currentIndex = MODES.findIndex((m) => m.mode === currentMode);
   return (
     <SelectList
@@ -19,6 +23,7 @@ export function ModePicker({ currentMode, onSelect, onCancel }: ModePickerProps)
       getKey={(m) => m.mode}
       title="Choose a mode (↑/↓ to choose, Enter to select, Esc to cancel):"
       initialIndex={currentIndex >= 0 ? currentIndex : 0}
+      borderColor={highlightColor}
       onSelect={(m) => onSelect(m.mode)}
       onCancel={onCancel}
       renderItem={(m, selected) => (

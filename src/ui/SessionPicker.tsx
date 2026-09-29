@@ -7,6 +7,9 @@ export interface SessionPickerProps {
   sessions: readonly SessionMeta[];
   onSelect: (id: string) => void;
   onCancel: () => void;
+  /** The configurable "/" highlight color (default amber, /config-highlightcolor) - see
+   * App.tsx's own doc comment on the prop it threads this down from. */
+  highlightColor: string;
 }
 
 function relativeTime(iso: string): string {
@@ -35,18 +38,19 @@ function sortableTimestamp(iso: string): string {
 }
 
 /** A newest-first, scrollable session list for /resume, built on the generic SelectList. */
-export function SessionPicker({ sessions, onSelect, onCancel }: SessionPickerProps) {
+export function SessionPicker({ sessions, onSelect, onCancel, highlightColor }: SessionPickerProps) {
   return (
     <SelectList
       items={sessions}
       getKey={(s) => s.id}
       title="Resume a session (↑/↓ to choose, Enter to resume, Esc to cancel):"
       maxVisible={20}
+      borderColor={highlightColor}
       onSelect={(s) => onSelect(s.id)}
       onCancel={onCancel}
       emptyMessage="No saved sessions to resume."
       renderItem={(s, selected) => (
-        <Text color={selected ? 'cyan' : undefined} inverse={selected}>
+        <Text color={selected ? highlightColor : undefined} inverse={selected}>
           {selected ? '> ' : '  '}
           {sortableTimestamp(s.updatedAt)} — {relativeTime(s.updatedAt)} — {s.title} (
           {s.messageCount} messages)
