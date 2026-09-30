@@ -1,8 +1,39 @@
 import stringWidth from 'string-width';
+import { appendFileSync } from 'node:fs';
 
 const CSI = '\x1B[';
 const ERASE_LINE = `${CSI}2K`;
 const CURSOR_UP_ONE = `${CSI}1A`;
+
+/**
+ * TEMPORARY diagnostic instrumentation, 2026-09-30 - real user report that the screen still
+ * clears/loses content on real long runs even with the scroll-instead-of-bail-out fix in place.
+ * No repro available on this machine to test against directly, and the existing AgentEvent-level
+ * run logs don't capture the raw bytes this module actually writes to the terminal - so there is
+ * currently no way to tell whether this module's own logic is firing (and doing the wrong thing)
+ * or not firing at all for whatever the real trigger is. Gated behind an env var, same pattern
+ * already used successfully earlier in this project for the original tall-viewport bug
+ * (`O4C_REFLOW_DEBUG_FILE`) - true zero-cost when unset (a single string check per write, no
+ * file I/O), and meant to be removed once a real occurrence is actually captured and diagnosed.
+ * Never throws into the render path - a failed diagnostic write must not break the actual fix.
+ */
+const REFLOW_DEBUG_FILE = process.env.O4C_REFLOW_DEBUG_FILE;
+function debugLog(line: string): void {
+  if (!REFLOW_DEBUG_FILE) return;
+  try {
+    appendFileSync(REFLOW_DEBUG_FILE, `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    // best-effort only - see doc comment above
+  }
+}
+/** Escapes control bytes so a logged chunk reads as one line of visible text, and caps its length
+ * so one giant frame doesn't make the debug file unreadable - full raw length is still logged
+ * separately as a number. */
+function previewChunk(chunk: string): string {
+  const escaped = chunk.replace(/\x1B/g, '\\x1B').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+  const max = 400;
+  return escaped.length > max ? `${escaped.slice(0, max)}...(+${escaped.length - max} more)` : escaped;
+}
 
 /**
  * The bug this fixes, confirmed directly against Ink 5.2.1's source (log-update.js, ink.js):
@@ -147,6 +178,7 @@ export function installResizeReflowFix(
   stdout: ReflowFixableStream,
   { settleMs = 150 }: ResizeReflowFixOptions = {},
 ): () => void {
+  debugLog(`--- installResizeReflowFix: columns=${stdout.columns} rows=${stdout.rows} settleMs=${settleMs} ---`);
   const originalWrite = stdout.write;
   const hadOwnWrite = Object.prototype.hasOwnProperty.call(stdout, 'write');
   const forward = (chunk: unknown, rest: unknown[]) => originalWrite.call(stdout, chunk, ...rest);
@@ -159,11 +191,20 @@ export function installResizeReflowFix(
 
   // Make the on-screen frame match what `chunk`'s own erase prefix is about to assume.
   const reconcile = (chunk: string) => {
-    if (!frameOnScreen || lastFrame === undefined) return;
+    if (!frameOnScreen || lastFrame === undefined) {
+      debugLog(`reconcile: skip (frameOnScreen=${frameOnScreen} lastFrame=${lastFrame !== undefined})`);
+      return;
+    }
     const columns = liveColumns(stdout) ?? stdout.columns;
-    if (!columns) return;
+    if (!columns) {
+      debugLog('reconcile: skip (no columns available)');
+      return;
+    }
     const { rows } = measureFrame(lastFrame, columns);
     const expected = expectedUp(chunk);
+    debugLog(
+      `reconcile: columns=${columns} rows=${rows} expected=${expected} viewportRows=${stdout.rows} lastFrameLen=${lastFrame.length}`,
+    );
     if (rows === expected) return; // Ink's own erase lands exactly on the frame
     // If the reflowed frame is at least as tall as the visible viewport, its top has already
     // scrolled out by the time this runs (writing its own trailing '\n' while sitting on the
@@ -188,6 +229,7 @@ export function installResizeReflowFix(
     // blank space and paints correctly, instead of clamping at row 1 over whatever was there.
     const viewportRows = stdout.rows;
     if (viewportRows !== undefined && rows >= viewportRows) {
+      debugLog(`reconcile: SCROLL branch - writing ${rows} blank lines (viewportRows=${viewportRows})`);
       forward('\n'.repeat(rows), []);
       frameOnScreen = false;
       return;
@@ -195,16 +237,19 @@ export function installResizeReflowFix(
     // Cursor sits just below the frame. Up to its true (reflowed) top, erase to the end of the
     // screen - only ever the live region, it's the last thing on screen - then newlines down to
     // exactly `expected` rows below the top, which is where the chunk is about to move up from.
+    debugLog(`reconcile: CORRECTIVE-ERASE branch - ${CSI}${rows}A${CSI}J + ${expected} newlines`);
     forward(`${CSI}${rows}A${CSI}J${'\n'.repeat(expected)}`, []);
     frameOnScreen = false;
   };
 
   const emit = (chunk: unknown, rest: unknown[]) => {
     if (typeof chunk !== 'string') {
+      debugLog(`emit: non-string chunk (${typeof chunk})`);
       forward(chunk, rest);
       return;
     }
     const erases = chunk.startsWith(ERASE_LINE);
+    debugLog(`emit: len=${chunk.length} erases=${erases} endsWithNL=${chunk.endsWith('\n')} chunk="${previewChunk(chunk)}"`);
     if (erases) reconcile(chunk);
     forward(chunk, rest);
     if (chunk.endsWith('\n')) {
@@ -225,6 +270,7 @@ export function installResizeReflowFix(
     resizing = false;
     const chunks = held;
     held = [];
+    debugLog(`settle: replaying ${chunks.length} held chunks`);
     // Index of the last frame-shaped chunk in this batch, not the last array index - Ink 7 wraps
     // every frame in DEC synchronized-output toggles (`ESC[?2026h` before, `ESC[?2026l` after,
     // each its own separate stdout.write call), so the literal last queued item during a resize
@@ -251,6 +297,7 @@ export function installResizeReflowFix(
   };
 
   const beginResizing = () => {
+    debugLog(`beginResizing: columns=${stdout.columns} rows=${stdout.rows} liveColumns=${liveColumns(stdout)}`);
     resizing = true;
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(settle, settleMs);
