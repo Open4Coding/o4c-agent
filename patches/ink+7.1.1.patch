@@ -1,0 +1,45 @@
+diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
+index 0082666..8509de2 100644
+--- a/node_modules/ink/build/ink.js
++++ b/node_modules/ink/build/ink.js
+@@ -22,6 +22,24 @@ import { accessibilityContext as AccessibilityContext } from './components/Acces
+ import { resolveFlags, } from './kitty-keyboard.js';
+ const noop = () => { };
+ const textEncoder = new TextEncoder();
++// PATCHED (o4c-agent, 2026-09-30): unbounded growth found via direct source read + confirmed as
++// a known upstream issue (vadimdemedes/ink PR #1005, merged 2026-09-20 but not yet in a published
++// npm release as of 7.1.1) - `fullStaticOutput` accumulates every committed <Static> frame into
++// one ever-growing string for the whole process lifetime, in BOTH debug and normal interactive
++// mode (despite this file's own comment above claiming "only used in debug mode" - it is not;
++// see the unconditional append in the interactive render path). A long session with a verbose
++// model produces gigabytes of accumulated static output this way, none of it ever collectible
++// since it's a live-referenced instance property for as long as the process runs - matches a
++// real captured "JavaScript heap out of memory" crash directly. Same fix shape already shipped by
++// other projects hitting this (letta-ai/letta-code): cap the retained string, cutting at a line
++// boundary so a reprint never emits a partial ANSI escape sequence.
++const FULL_STATIC_OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
++function capFullStaticOutput(value) {
++    if (value.length <= FULL_STATIC_OUTPUT_CAP_BYTES) return value;
++    const cutFrom = value.length - FULL_STATIC_OUTPUT_CAP_BYTES;
++    const newlineAt = value.indexOf('\n', cutFrom);
++    return newlineAt === -1 ? value.slice(-FULL_STATIC_OUTPUT_CAP_BYTES) : value.slice(newlineAt + 1);
++}
+ const yieldImmediate = async () => new Promise(resolve => {
+     setImmediate(resolve);
+ });
+@@ -352,6 +370,7 @@ export default class Ink {
+         if (this.options.debug) {
+             if (hasStaticOutput) {
+                 this.fullStaticOutput += staticOutput;
++                this.fullStaticOutput = capFullStaticOutput(this.fullStaticOutput);
+             }
+             this.lastOutput = output;
+             this.lastOutputToRender = output;
+@@ -414,6 +433,7 @@ export default class Ink {
+         }
+         if (hasStaticOutput) {
+             this.fullStaticOutput += staticOutput;
++            this.fullStaticOutput = capFullStaticOutput(this.fullStaticOutput);
+         }
+         this.renderInteractiveFrame(output, outputHeight, hasStaticOutput ? staticOutput : '');
+     };
