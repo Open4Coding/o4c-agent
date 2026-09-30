@@ -244,7 +244,7 @@ test('a frame arriving after the console narrowed but before Node knows is held,
   uninstall();
 });
 
-test('a live region reflowed taller than the viewport skips the erase instead of blanking the screen', async () => {
+test('a live region reflowed taller than the viewport scrolls it away instead of blanking the screen', async () => {
   // Regression test for a real bug found live: a long turn's live region (lots of tool call/
   // result lines, or here just a wide frame narrowed hard) reflows to >= the terminal's actual
   // row count. `${rows}A` can't reach the frame's true top in that case - ANSI clamps the cursor
@@ -252,6 +252,12 @@ test('a live region reflowed taller than the viewport skips the erase instead of
   // already-committed static history sitting above the live region, with no ED2-style scrollback
   // archive to recover it from. Same setup as the plain narrowing test above (rows 7 vs expected
   // 4 - a real mismatch, not a no-op), except the viewport is shorter than the reflowed height.
+  //
+  // First fix (bail out, write nothing) was itself real-world confirmed still bad - it reads as
+  // the screen clearing/losing content, not a harmless leftover. Scrolling is always safe (moves
+  // rows into scrollback, never deletes them), so the stale frame's own true row count (7) is
+  // written as blank lines instead, guaranteeing enough blank space above the cursor that f1's
+  // own cursor-up-4 (its `expected`, always <= the true 7) can't clamp and paint over anything.
   const stdout = new MockStdout();
   stdout.rows = 5; // shorter than f0's reflowed height (7) at the new width
   const uninstall = installResizeReflowFix(stdout, { settleMs: SETTLE });
@@ -264,9 +270,31 @@ test('a live region reflowed taller than the viewport skips the erase instead of
   stdout.write(f1);
 
   await tick(SETTLE * 3);
-  // No erase/cursor-up correction chunk in between - reconcile bailed out and f1 was replayed
-  // as-is, exactly like the "no resize" pass-through case, instead of erasing the viewport.
-  assert.deepEqual(stdout.writes, [f0, f1]);
+  assert.deepEqual(stdout.writes, [f0, '\n'.repeat(7), f1]);
+  uninstall();
+});
+
+test('a live region wrapped past the viewport with NO resize at all still scrolls away, not blanks', async () => {
+  // The actual real-world trigger reported directly: no resize ever happens here - a single long,
+  // unbroken line (a big final-answer paragraph, or many collapsed tool-call events summarized on
+  // one line) wraps past the viewport on its own, at a column width that never changed.
+  // reconcile() runs on every write, not just resize-triggered ones, so the same fix applies here
+  // too - this confirms that directly rather than assuming it from the resize-only tests above.
+  // Also covers the erase-only shape specifically (Ink's real render.clear() before a Static
+  // commit - no trailing frame content, unlike every other test in this file).
+  const stdout = new MockStdout();
+  stdout.columns = 20;
+  stdout.rows = 5; // shorter than the long line's wrapped height (5) - equal counts as "too tall" too
+  const uninstall = installResizeReflowFix(stdout, { settleMs: SETTLE });
+
+  const longLine = 'x'.repeat(100); // wraps to Math.ceil(100/20) = 5 rows at columns=20
+  const f0 = inkFrame(longLine);
+  stdout.write(f0);
+
+  const clearChunk = eraseLines(2); // erasing f0 (1 real content line + Ink's own "+1")
+  stdout.write(clearChunk);
+
+  assert.deepEqual(stdout.writes, [f0, '\n'.repeat(5), clearChunk]);
   uninstall();
 });
 

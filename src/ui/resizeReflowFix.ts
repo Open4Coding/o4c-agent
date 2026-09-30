@@ -55,10 +55,12 @@ const CURSOR_UP_ONE = `${CSI}1A`;
  *
  * Known residual limits:
  * - If the live region is taller than the visible viewport, part of the old frame is already in
- *   scrollback and can't be reached - `reconcile()` detects this (`rows >= stdout.rows`) and
- *   skips the erase entirely rather than clamping the cursor at row 1 and wiping the whole
- *   viewport (confirmed live: this is what was actually happening - not a harmless leftover, a
- *   real screen-blanking bug). The trade is a stale frame remnant left on screen instead.
+ *   scrollback and can't be reached with an in-place erase - `reconcile()` detects this
+ *   (`rows >= stdout.rows`) and, rather than attempting one (clamping the cursor at row 1 and
+ *   wiping the whole viewport - confirmed live: this is what was actually happening, a real
+ *   screen-blanking bug, not a harmless leftover), scrolls the stale frame's own true row count
+ *   off the top in blank lines instead - always safe, since scrolling only ever moves rows into
+ *   scrollback, never deletes them.
  * - The row math assumes the terminal REFLOWS wrapped lines on resize. Windows Terminal does
  *   (confirmed with the probe above - the cursor moved up exactly as lines unwrapped), as do
  *   iTerm2, Terminal.app, VTE/GNOME, kitty, Alacritty and tmux. xterm and legacy conhost do not
@@ -89,6 +91,15 @@ export function measureFrame(chunk: string, columns: number): { lines: number; r
  * `eraseLines(n)` from ansi-escapes: (eraseLine cursorUp) x (n-1), eraseLine, cursorLeft. Zero
  * for anything that doesn't start with an erase (a frame written right after a static commit, a
  * static chunk itself, cursor show/hide).
+ *
+ * Counts `cursorUp` occurrences, not `eraseLine` occurrences, deliberately - `n` here is
+ * Ink's own real `previousLineCount`, which log-update.js computes as the frame's true content
+ * line count *plus one* (confirmed directly, `resizeReflowFix.test.ts`'s own `inkFrame()` helper
+ * and its "erase the previous frame (previousLineCount = its lines + 1...)" comment). Counting
+ * `cursorUp`s (`n-1`) exactly cancels that "+1" back out, landing on the frame's real content-line
+ * count - the same convention `measureFrame()` uses, which is what `reconcile()` actually compares
+ * this against. Counting `eraseLine`s instead (tried and reverted - see git history) looks more
+ * "literal" but breaks that cancellation and misaligns every reconcile check by one row.
  */
 export function expectedUp(chunk: string): number {
   let i = 0;
@@ -161,10 +172,26 @@ export function installResizeReflowFix(
     // visible viewport, not just the stale frame - including any already-committed static history
     // currently showing above it, and with no ED2-style scrollback archive to recover it from
     // (confirmed live: a long turn with a tall live region blanked the entire scrollback down to
-    // the input box). Bail out instead: a stale remnant left on screen is a cosmetic leftover,
-    // silently erasing real conversation history is not an acceptable trade for it.
+    // the input box).
+    //
+    // Real user report this closes, 2026-09-30: a plain bail-out here (do nothing, leave a "stale
+    // remnant") was the original fix, but in practice this reads as the screen clearing/losing
+    // content, not a harmless cosmetic leftover - confirmed as still happening on real long runs.
+    // Scrolling is always safe (the terminal moves scrolled-past rows into scrollback, never
+    // deletes them - the exact guarantee `ESC[2J` lacked and this module's own top-level doc
+    // comment already rejected it for) - writing the stale frame's own true row count in blank
+    // lines pushes it entirely off the top of the viewport. `expected` (Ink's own belief about
+    // this same frame's height, ignoring reflow) can never exceed `rows` (the true, reflow-aware
+    // height) - reflow only ever adds rows, never removes them - so this guarantees at least
+    // `rows - expected >= 0` blank rows sit above the cursor afterward, meaning Ink's own
+    // upcoming erase-and-rewrite (forwarded unmodified right after this returns) lands on that
+    // blank space and paints correctly, instead of clamping at row 1 over whatever was there.
     const viewportRows = stdout.rows;
-    if (viewportRows !== undefined && rows >= viewportRows) return;
+    if (viewportRows !== undefined && rows >= viewportRows) {
+      forward('\n'.repeat(rows), []);
+      frameOnScreen = false;
+      return;
+    }
     // Cursor sits just below the frame. Up to its true (reflowed) top, erase to the end of the
     // screen - only ever the live region, it's the last thing on screen - then newlines down to
     // exactly `expected` rows below the top, which is where the chunk is about to move up from.
