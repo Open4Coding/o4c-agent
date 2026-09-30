@@ -15,6 +15,7 @@ import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
 import { ConfigStore } from './session/configStore.js';
+import { installGcWatchdog } from './session/gcWatchdog.js';
 import { App } from './ui/App.js';
 import { installResizeReflowFix } from './ui/resizeReflowFix.js';
 import { theme } from './ui/theme.js';
@@ -324,6 +325,18 @@ program
     // Undefined (unset) falls back to SessionStore's own DEFAULT_MAX_SESSIONS, unchanged.
     const sessionsToSave =
       typeof resolvedConfig.sessionsToSave === 'number' ? resolvedConfig.sessionsToSave : undefined;
+    // Opt-in only, same "no CLI flag, config.json only" shape as the others above - real need
+    // found via direct user report/live monitoring: a long, verbose local-model turn pushed RSS
+    // to 4+GB and crashed with a real "JavaScript heap out of memory" (see loop.ts's own delta-
+    // throttling fix for the O(n²) render-cost bug that mainly caused this). Throttling the
+    // render cost gives V8's own GC a fair chance to run, but doesn't force it to run *proactively*
+    // at a chosen watermark - this does, for anyone who wants memory kept down near a specific
+    // number regardless (e.g. running on an older/lower-RAM machine) rather than trusting V8's own
+    // heuristics for when collection is worthwhile. Requires the process to actually have `global.gc`
+    // available (Node's `--expose-gc` flag, e.g. via `NODE_OPTIONS=--expose-gc`) - installGcWatchdog
+    // itself warns once, rather than silently no-op'ing, if this is configured without it.
+    const gcThresholdMB =
+      typeof resolvedConfig.gcThresholdMB === 'number' ? resolvedConfig.gcThresholdMB : undefined;
 
     // The `-m`/`--model` value means nothing to LocalProvider - it never sends a `model` field
     // at all (llama-server only ever has one model loaded). Without this, the status bar and
@@ -399,6 +412,18 @@ program
     }
 
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
+
+    // Installed before either branch below (interactive REPL or one-shot) so both are covered -
+    // this is a process-wide concern, not specific to the TUI. See gcWatchdog.ts's own doc comment
+    // for why this exists. console.error rather than anything TUI-specific: needs to work
+    // identically in one-shot mode too, and a warning is worth showing even if the interactive
+    // Ink UI takes over the screen right after (it'll simply scroll into the terminal's own
+    // history above the TUI, same as any other startup diagnostic). Fire-and-forget for the
+    // process's whole lifetime, same as installResizeReflowFix above - its own `.unref()`'d timer
+    // already means it never keeps the process alive on its own, so there's nothing to clean up.
+    if (gcThresholdMB !== undefined) {
+      installGcWatchdog(gcThresholdMB, (message) => console.error(`\n${message}\n`));
+    }
 
     if (!prompt) {
       const sessionStore = new SessionStore(sessionsDirFor(projectRoot), sessionsToSave);
