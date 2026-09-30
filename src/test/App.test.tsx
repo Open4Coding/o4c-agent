@@ -186,6 +186,19 @@ class StreamingThinkProvider implements LLMProvider {
   }
 }
 
+// Fires many single-character onToken calls in one tight, synchronous burst (no awaits between
+// them) before resolving - the most demanding case for App.tsx's delta-buffering throttle
+// (deltaBufferRef/flushDeltaBuffer), since every one of these arrives within the same handful of
+// flush windows rather than spread out like a real model's own token pacing would be.
+class RapidChunkProvider implements LLMProvider {
+  readonly name = 'rapid-chunk-test';
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    const full = 'the quick brown fox jumps over the lazy dog';
+    for (const ch of full) request.onToken?.(ch, 'text');
+    return { content: full, toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
 // Calls run_shell once with a harmless command, then ends the turn.
 class RunShellProvider implements LLMProvider {
   readonly name = 'run-shell-test';
@@ -582,6 +595,22 @@ test('a live-streaming think chunk shows "[think] " the instant reasoning starts
     await waitFor(() => (lastFrame() ?? '').includes('the final answer'));
     // Once the answer starts, it's on its own line, not run on from the reasoning text.
     assert.equal((lastFrame() ?? '').includes('reasoning about itthe final answer'), false);
+  });
+});
+
+test('many rapid streamed chunks in one response coalesce correctly, not dropped or corrupted', async () => {
+  // Regression test for the real O(n²) render-cost bug found via direct reproduction, 2026-09-30:
+  // dispatching a full React re-render (plus a whole-frame terminal repaint) for every single raw
+  // streamed chunk made one very long response take minutes of pure CPU time, starving the
+  // garbage collector and crashing the process outright (a real captured
+  // "JavaScript heap out of memory" - not a display bug at all, despite reading like one). Fixed
+  // by buffering deltas and flushing at a bounded rate instead of once per chunk - this proves the
+  // buffering itself doesn't drop or corrupt content under the most demanding case (many chunks in
+  // one tight synchronous burst, not spread out like real token pacing).
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir, provider: new RapidChunkProvider() });
+    await submit(stdin, 'go');
+    await waitFor(() => (lastFrame() ?? '').includes('the quick brown fox jumps over the lazy dog'));
   });
 });
 

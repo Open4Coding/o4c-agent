@@ -97,6 +97,12 @@ export interface AppProps {
 // regardless of this cap.
 const MAX_VISIBLE_TOOL_EVENTS_PER_TURN = 10;
 
+/** How often buffered streamed deltas actually reach a render, at most - see `deltaBufferRef`'s
+ * own doc comment for the O(n²) blowup this bounds. Short enough that streaming still feels live
+ * (20 updates/sec), long enough to coalesce a fast/bursty stream's chunks into far fewer renders
+ * than one per raw chunk. */
+const DELTA_FLUSH_MS = 50;
+
 let nextPrefillToken = 0;
 // Unrelated to the text window's own block ids (textWindow.ts owns those internally now) - just a
 // second, independent React-key source for ConfirmDialog instances.
@@ -328,6 +334,37 @@ export function App({
   // real answer (to start a fresh line rather than run on from the reasoning text). Reset to null
   // at the start of every turn in processTurn, alongside its other per-turn tracking state.
   const lastDeltaKindRef = useRef<'think' | 'text' | null>(null);
+
+  /**
+   * Real bug found via direct reproduction, 2026-09-30: dispatching a React state update (plus
+   * the array-copy + string-concat `appendDelta` does, plus a full terminal repaint each time -
+   * including `resizeReflowFix.ts`'s own whole-frame width scan) for every single raw streamed
+   * chunk is O(current response length) per chunk. For a short response this is nothing; for one
+   * very long, continuous response (a verbose model's single huge `<think>` block) it's O(n²)
+   * total - confirmed directly: 40,000 chunks (200,000 chars) took 5+ minutes of pure synchronous
+   * CPU time in isolation. That's long enough to block Node's event loop outright, starving the
+   * garbage collector of any chance to run while transient allocations from the hot loop keep
+   * piling up - matches a real captured crash (`FATAL ERROR: ... heap out of memory`, `scavenge
+   * might not succeed` - literally GC failing to keep pace) far better than a genuine memory leak
+   * would, since the session that crashed had a small, ordinary amount of overall history.
+   *
+   * Fix: batch raw deltas into this ref instead of dispatching each one - `flushDeltaBuffer`
+   * (below) is what actually calls `dispatchTextWindow`, at most once per `DELTA_FLUSH_MS`,
+   * coalescing however many raw chunks arrived in that window into one state update. This bounds
+   * the number of renders/repaints to a fixed rate regardless of the model's token rate or chunk
+   * size, closing the O(n²) blowup at the source rather than just making each render cheaper.
+   */
+  const deltaBufferRef = useRef<{ text: string; startNewLine: boolean } | null>(null);
+  const deltaFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Dispatches whatever's buffered, if anything - the only place `appendDelta` actually gets
+  // sent. `dispatchTextWindow` itself is stable (useReducer's own guarantee), so this needs no
+  // dependency array/useCallback to stay correct across renders.
+  const flushDeltaBuffer = () => {
+    const pending = deltaBufferRef.current;
+    deltaBufferRef.current = null;
+    if (pending) dispatchTextWindow({ type: 'appendDelta', text: pending.text, startNewLine: pending.startNewLine });
+  };
 
   // Bumped only by handleForceRecover (Ctrl+C) - lets a processTurn invocation that's still
   // stuck in flight when the user force-recovers recognize, whenever it eventually does settle,
@@ -782,6 +819,14 @@ export function App({
         let toolEventCount = 0;
         let summaryLine: Line | undefined;
         lastDeltaKindRef.current = null;
+        // Defensive - the finally block below always flushes and clears these at the end of every
+        // turn, but starting clean here too means a stray leftover timer/buffer can never bleed a
+        // late dispatch into a turn that didn't produce it.
+        if (deltaFlushTimerRef.current !== null) {
+          clearTimeout(deltaFlushTimerRef.current);
+          deltaFlushTimerRef.current = null;
+        }
+        deltaBufferRef.current = null;
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
@@ -821,10 +866,27 @@ export function App({
                   // begins streaming rather than only after the fact; the answer starting after
                   // reasoning gets a clean new line instead of running on from the think text.
                   const kind = event.kind ?? 'text';
-                  const startNewLine = lastDeltaKindRef.current !== kind;
+                  const kindChanged = lastDeltaKindRef.current !== kind;
                   lastDeltaKindRef.current = kind;
-                  const text = startNewLine && kind === 'think' ? `[think] ${event.text}` : event.text;
-                  dispatchTextWindow({ type: 'appendDelta', text, startNewLine });
+                  const text = kindChanged && kind === 'think' ? `[think] ${event.text}` : event.text;
+                  // Buffered, not dispatched directly - see deltaBufferRef's own doc comment for
+                  // the O(n²) render-cost blowup this avoids. A kind change flushes whatever was
+                  // pending under the OLD kind first, so it never gets merged into the new kind's
+                  // own line, then starts a fresh buffer carrying this delta's own startNewLine.
+                  if (kindChanged || !deltaBufferRef.current) {
+                    flushDeltaBuffer();
+                    deltaBufferRef.current = { text, startNewLine: kindChanged };
+                  } else {
+                    deltaBufferRef.current.text += text;
+                  }
+                  if (deltaFlushTimerRef.current === null) {
+                    const timer = setTimeout(() => {
+                      deltaFlushTimerRef.current = null;
+                      flushDeltaBuffer();
+                    }, DELTA_FLUSH_MS);
+                    timer.unref?.();
+                    deltaFlushTimerRef.current = timer;
+                  }
                 }
                 return;
               }
@@ -904,6 +966,14 @@ export function App({
           // that data is real and there's no reason to throw it away.
           const stale = turnGenerationRef.current !== myGeneration;
           if (abortControllerRef.current === controller) abortControllerRef.current = null;
+          // Unconditional, even when stale - a dangling timer must never fire a late dispatch into
+          // whatever turn (or nothing) comes next. The live region gets fully cleared below when
+          // not stale regardless, so any not-yet-flushed buffered text is already moot either way.
+          if (deltaFlushTimerRef.current !== null) {
+            clearTimeout(deltaFlushTimerRef.current);
+            deltaFlushTimerRef.current = null;
+          }
+          deltaBufferRef.current = null;
           if (!stale) {
             if (responseLines.length > 0) pushBlock(responseLines);
             dispatchTextWindow({ type: 'clearLive' });
