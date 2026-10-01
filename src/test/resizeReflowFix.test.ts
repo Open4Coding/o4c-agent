@@ -349,3 +349,85 @@ test("registers ahead of any pre-existing 'resize' listeners (Ink's own), even w
   for (const fn of before) assert.ok(after.includes(fn));
   uninstall();
 });
+
+test('O4C_TERMLOG records one JSON line per chunk with the sequences that wipe or move, and writes still pass through', async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'termlog-'));
+  const logPath = join(dir, 'term.log');
+  const previous = process.env.O4C_TERMLOG;
+  process.env.O4C_TERMLOG = logPath;
+  try {
+    const stdout = new MockStdout();
+    stdout.rows = 30;
+    const restore = installResizeReflowFix(stdout);
+    stdout.write('\x1b[1;1H\x1b[Jhello\nworld\n');
+    stdout.write('\x1b[2J\x1b[7Abye');
+    restore();
+    assert.equal(stdout.writes.length, 2); // pass-through untouched
+    const lines = readFileSync(logPath, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0].rows, 30);
+    assert.equal(lines[0].eraseDown, 1);
+    assert.equal(lines[0].newlines, 2);
+    assert.equal(lines[1].eraseScreen, 1);
+    assert.equal(lines[1].maxUp, 7);
+  } finally {
+    if (previous === undefined) delete process.env.O4C_TERMLOG;
+    else process.env.O4C_TERMLOG = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('O4C_TERMLOG creates a missing folder instead of silently logging nothing', async () => {
+  const { mkdtempSync, existsSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'termlog-'));
+  const logPath = join(dir, 'not', 'yet', 'there', 'term.log');
+  const previous = process.env.O4C_TERMLOG;
+  process.env.O4C_TERMLOG = logPath;
+  try {
+    const stdout = new MockStdout();
+    const restore = installResizeReflowFix(stdout);
+    stdout.write('x');
+    restore();
+    assert.ok(existsSync(logPath));
+  } finally {
+    if (previous === undefined) delete process.env.O4C_TERMLOG;
+    else process.env.O4C_TERMLOG = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('O4C_TERMLOG pointing at a truly unwritable path never throws into stdout.write', () => {
+  const previous = process.env.O4C_TERMLOG;
+  process.env.O4C_TERMLOG = 'Z:/definitely/not/a/drive/term.log';
+  try {
+    const stdout = new MockStdout();
+    const restore = installResizeReflowFix(stdout);
+    assert.doesNotThrow(() => stdout.write('still renders\n'));
+    assert.equal(stdout.writes.length, 1);
+    restore();
+  } finally {
+    if (previous === undefined) delete process.env.O4C_TERMLOG;
+    else process.env.O4C_TERMLOG = previous;
+  }
+});
+
+test('a home+erase-down full-clear chunk is never recorded as the on-screen frame, so the next small frame triggers no corrective erase up through it', () => {
+  const stdout = new MockStdout();
+  stdout.columns = 177;
+  stdout.rows = 131;
+  installResizeReflowFix(stdout);
+  // What the patched Ink writes when a frame that filled the viewport is replaced: home + erase
+  // down, the committed block (90 rows), then the new live frame - the incident of 2026-09-30
+  // where the wrapper then walked 94 rows up and wiped the block it had just been shown.
+  const block = Array.from({ length: 90 }, (_, i) => 'committed line ' + i).join('\n') + '\n';
+  stdout.write(`${CSI}1;1H${CSI}J` + block + 'frame one\nframe two\n');
+  stdout.write(inkFrame('frame one\nframe two', 2));
+  const after = stdout.writes.slice(1).join('');
+  assert.equal(/\x1b\[\d+A\x1b\[J/.test(after), false);
+  assert.ok(after.includes('frame two'));
+});
