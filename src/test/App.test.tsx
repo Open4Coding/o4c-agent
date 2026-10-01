@@ -12,8 +12,17 @@ import { defaultTools } from '../tools/index.js';
 import { SessionStore } from '../session/sessionStore.js';
 import { RunLogger } from '../session/runLog.js';
 import { ConfigStore } from '../session/configStore.js';
-import { userInputEntry, aiResponseEntry, toWireMessages } from '../agent/contextEntry.js';
+import {
+  userInputEntry,
+  aiResponseEntry,
+  aiThinkEntry,
+  aiToolCallEntry,
+  aiToolCallResponseEntry,
+  toWireMessages,
+  type ContextEntry,
+} from '../agent/contextEntry.js';
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
+import type { Mode } from '../ui/modePolicy.js';
 
 // Simulates a turn that never comes back (a hung/runaway local-model generation) so tests can
 // verify /exit isn't stuck waiting behind it in the FIFO queue.
@@ -292,7 +301,7 @@ async function setup(opts: {
   provider?: LLMProvider;
   // As if this process had been launched via `--resume <id>` (a /resume restart handoff) -
   // see the "launched with an initial session" test below for what this actually covers.
-  initialSession?: { id: string; title: string; messages: Message[] };
+  initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[] };
   // Only relevant to Plan-Write mode tests - scopes its write_file exception to
   // `<projectRoot>/.o4c/plans/`. Omitted (as every non-Plan-Write test does) means Plan-Write
   // behaves exactly like plain Plan (see modePolicy.ts's plansDirFor(undefined) fallback).
@@ -300,6 +309,10 @@ async function setup(opts: {
   // Test isolation for /config-global-highlightcolor - see AppProps.configGlobalDir's own doc
   // comment. Omitted means the real ~/.o4c, exactly like every other test that never touches it.
   configGlobalDir?: string;
+  // Mirrors the AppProps of the same names - off/undefined for every test that doesn't exercise the
+  // end-of-turn session reload.
+  reloadAfterTurn?: boolean;
+  initialMode?: Mode;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
@@ -309,8 +322,10 @@ async function setup(opts: {
   // in-place (see AppProps.restart's doc comment) - nothing to actually spawn in a test, so this
   // just records what App asked for.
   const restartCalls: Array<string | undefined> = [];
-  const restart = (resumeId?: string) => {
+  const restartModes: Array<Mode | undefined> = [];
+  const restart = (resumeId?: string, mode?: Mode) => {
     restartCalls.push(resumeId);
+    restartModes.push(mode);
   };
   const instance = render(
     React.createElement(App, {
@@ -326,11 +341,13 @@ async function setup(opts: {
       baseUrl: '',
       initialHighlightColor: '#FFBF00',
       configGlobalDir: opts.configGlobalDir,
+      reloadAfterTurn: opts.reloadAfterTurn,
+      initialMode: opts.initialMode,
     }),
   );
   liveInstances.push(instance);
   await tick();
-  return { ...instance, loop, store, runLogger, fullContextLogger, restartCalls };
+  return { ...instance, loop, store, runLogger, fullContextLogger, restartCalls, restartModes };
 }
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -931,18 +948,61 @@ test('/resume shows a picker; Enter on the default (newest) selection hands off 
     const { stdin, frames, restartCalls } = await setup({ dir });
 
     await submit(stdin, '/resume');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Resume a session'));
     assert.ok(anyFrameIncludes(frames, 'older session'));
     assert.ok(anyFrameIncludes(frames, 'newer session'));
 
+    await tick(100); // the picker's key handler registers just after its first frame paints
     stdin.write(ENTER); // default selection is index 0 = newest
-    await tick(50);
+    await waitFor(() => restartCalls.length > 0);
 
     // The new process (spawned with --resume <newerId>) is what actually loads and displays
     // that session, and autosaves back into it - see the "launched with an initialSession" test
     // below for that side, which this process hands off to instead of doing in-place.
     assert.deepEqual(restartCalls, [newerId]);
     assert.notEqual(newerId, olderId);
+  });
+});
+
+test('/resume bypasses the FIFO queue while a turn is busy: the picker opens immediately and Enter hands off to a restart', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    const savedId = await seedStore.save([userInputEntry('an earlier saved session')]);
+
+    const { stdin, frames, restartCalls } = await setup({ dir, provider: new HangingProvider() });
+
+    // A turn that never settles keeps isProcessing true, the state /resume used to silently queue in.
+    await submit(stdin, 'this will hang forever');
+    await tick(50);
+
+    await submit(stdin, '/resume');
+    await waitFor(() => anyFrameIncludes(frames, 'Resume a session'));
+    assert.equal(anyFrameIncludes(frames, 'Queued #1: /resume'), false);
+    assert.ok(anyFrameIncludes(frames, 'an earlier saved session'));
+
+    await tick(100); // the picker's key handler registers just after its first frame paints
+    stdin.write(ENTER);
+    await waitFor(() => restartCalls.length > 0);
+    assert.deepEqual(restartCalls, [savedId]);
+  });
+});
+
+test('cancelling the /resume picker mid-turn leaves the running turn alone and does not restart', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    await seedStore.save([userInputEntry('an earlier saved session')]);
+
+    const { stdin, frames, restartCalls } = await setup({ dir, provider: new HangingProvider() });
+    await submit(stdin, 'this will hang forever');
+    await tick(50);
+
+    await submit(stdin, '/resume');
+    await waitFor(() => anyFrameIncludes(frames, 'Resume a session'));
+    await tick(100); // the picker's key handler registers just after its first frame paints
+    stdin.write(ESCAPE); // Escape cancels the picker
+    await waitFor(() => anyFrameIncludes(frames, 'Resume cancelled.'));
+
+    assert.deepEqual(restartCalls, []);
   });
 });
 
@@ -969,13 +1029,88 @@ test('launched with an initialSession (as a /resume restart handoff would be), t
 
     // A subsequent turn must autosave back into the resumed session's id, not create a new one.
     await submit(stdin, 'continuing the resumed session');
-    await tick(100);
+    await waitFor(async () => ((await store.readManifest()).find((m) => m.id === id)?.messageCount ?? 0) > 2, 6000);
 
     const manifest = await store.readManifest();
     assert.equal(manifest.length, 1);
     const resumed = manifest.find((m) => m.id === id);
     assert.ok(resumed);
     assert.ok(resumed.messageCount > 2);
+  });
+});
+
+test('with reloadAfterTurn, a turn that thought and used a tool saves and then hands off to a reload of the same session, carrying the mode', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, store, restartCalls, restartModes } = await setup({
+      dir,
+      provider: new ThinkingWithToolProvider(),
+      reloadAfterTurn: true,
+      initialMode: 'auto',
+    });
+    await submit(stdin, 'what is 2+2?');
+    await waitFor(() => restartCalls.length > 0, 6000);
+    const manifest = await store.readManifest();
+    assert.equal(manifest.length, 1);
+    assert.deepEqual(restartCalls, [manifest[0].id]); // reloads exactly the session it just saved
+    assert.deepEqual(restartModes, ['auto']); // and keeps the mode instead of dropping to Manual
+  });
+});
+
+test('a plain reply (no reasoning, no tools) never triggers a reload, even with reloadAfterTurn on', async () => {
+  await withTempDir(async (dir) => {
+    // MockProvider always calls a tool first, so use a provider that really does just reply.
+    const plain: LLMProvider = {
+      name: 'plain-reply-test',
+      async complete(): Promise<CompletionResponse> {
+        return { content: 'just chatting, no tools', toolCalls: [], stopReason: 'end_turn' };
+      },
+    };
+    const { stdin, frames, restartCalls } = await setup({ dir, provider: plain, reloadAfterTurn: true });
+    await submit(stdin, 'hello there');
+    await waitFor(() => anyFrameIncludes(frames, 'just chatting, no tools'));
+    await tick(400);
+    assert.deepEqual(restartCalls, []);
+  });
+});
+
+test('without reloadAfterTurn (the default) a thinking, tool-using turn never reloads', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, restartCalls } = await setup({ dir, provider: new ThinkingWithToolProvider() });
+    await submit(stdin, 'what is 2+2?');
+    await waitFor(() => anyFrameIncludes(frames, 'The answer is 4.'));
+    await tick(400);
+    assert.deepEqual(restartCalls, []);
+  });
+});
+
+test('the app starts in the mode it was launched with (a reload must not drop Auto back to Manual)', async () => {
+  await withTempDir(async (dir) => {
+    const { lastFrame } = await setup({ dir, initialMode: 'auto' });
+    assert.ok((lastFrame() ?? '').includes('Mode: Auto'));
+  });
+});
+
+test('a resumed session repaints from its full entries: [think] blocks and the [scan] collapse reappear, not just the raw wire messages', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    const seeded: ContextEntry[] = [userInputEntry('build the thing'), aiThinkEntry('weigh the options first')];
+    for (let i = 0; i < 8; i++) {
+      seeded.push(aiToolCallEntry({ id: 'c' + i, name: 'read_file', input: { path: 'f' + i } }, false));
+      seeded.push(aiToolCallResponseEntry('c' + i, 'contents ' + i, false));
+    }
+    seeded.push(aiResponseEntry('the thing is built'));
+    const id = await seedStore.save(seeded);
+    const data = await seedStore.load(id);
+    assert.ok(data);
+
+    const { frames } = await setup({
+      dir,
+      initialSession: { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries), entries: data!.entries },
+    });
+
+    assert.ok(anyFrameIncludes(frames, '[think] weigh the options first'));
+    assert.ok(anyFrameIncludes(frames, '[scan] 6 more tool calls collapsed'));
+    assert.ok(anyFrameIncludes(frames, 'the thing is built'));
   });
 });
 
@@ -1012,7 +1147,7 @@ test('a /resume restart handoff also restores the resumed session\'s own submit-
     // A subsequent real turn's submission is appended to that same history, not replacing it -
     // and the resave persists the combined list back into the resumed session's own file.
     await submit(stdin, 'a brand new submission');
-    await tick(100);
+    await waitFor(async () => ((await store.load(id))?.inputHistory ?? []).includes('a brand new submission'), 6000);
 
     const resaved = await store.load(id);
     assert.ok(resaved);
@@ -1027,14 +1162,15 @@ test('/resume: pressing Down before Enter selects the older (second) entry inste
     await tick(100);
     await seedStore.save([userInputEntry('newer session')]);
 
-    const { stdin, restartCalls } = await setup({ dir });
+    const { stdin, frames, restartCalls } = await setup({ dir });
 
     await submit(stdin, '/resume');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Resume a session'));
+    await tick(100); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN);
     await tick(100);
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => restartCalls.length > 0);
 
     assert.deepEqual(restartCalls, [olderId]);
   });
@@ -1048,7 +1184,7 @@ test('/resume: Escape cancels with no change and no session loaded', async () =>
     const { stdin, frames, loop } = await setup({ dir });
 
     await submit(stdin, '/resume');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Resume a session'));
     stdin.write(ESCAPE);
     await tick(50);
 

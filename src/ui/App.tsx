@@ -11,11 +11,12 @@ import { plansDirFor } from '../session/projectContext.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
 import { formatMessage } from './formatMessage.js';
+import { MAX_VISIBLE_TOOL_EVENTS_PER_TURN, formatEntries } from './formatEntries.js';
 import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
 import { parseOsArg } from './osKeyboardNotes.js';
 import { detectCurrentOs } from './platform.js';
 import type { Line } from './types.js';
-import { initialTextWindow, makeBlock, textWindowReducer, type TextBlock } from './textWindow.js';
+import { initialTextWindow, makeBlock, shouldFlushDelta, textWindowReducer, type TextBlock } from './textWindow.js';
 import { theme } from './theme.js';
 import { formatTokenCount, formatElapsed, renderProgressBar, progressBarFilledCells } from './statusBar.js';
 import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
@@ -26,6 +27,7 @@ import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } f
 import { buildSplashText } from './splash.js';
 import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
+import type { ContextEntry } from '../agent/contextEntry.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -51,12 +53,20 @@ export interface AppProps {
   /** Set by cli.ts when this process was launched with `--resume <id>` - seeds the visible
    * scrollback and currentSessionIdRef on mount, since a fresh process handoff (see `restart`
    * below) never gets a chance to append it mid-session. */
-  initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] };
+  initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] };
   /** Requests that /clear or /resume hand off to a brand-new process instead of resetting
    * state in-place - see cli.ts's spawnRestart for why. Call this, then exit() (as /exit does),
    * never both without the other: cli.ts only spawns the replacement after this process's Ink
    * instance has actually unmounted. */
-  restart: (resumeId?: string) => void;
+  restart: (resumeId?: string, mode?: Mode) => void;
+  /** The mode to start in - set by a restart so a reload keeps Auto/Manual instead of dropping back
+   * to Manual. Undefined means the normal default (Manual). */
+  initialMode?: Mode;
+  /** When true, after a turn that thought or used tools finishes and saves, hand off to a fresh
+   * process that reloads this same session by id: the new process repaints the whole history from
+   * the saved entries (think blocks, narration, tool calls, answer) and starts with empty buffers.
+   * Off by default so tests that count restarts are unaffected; cli.ts turns it on. */
+  reloadAfterTurn?: boolean;
   /** Undefined for an untrusted/no-project run. Only consulted to scope Plan-Write mode's
    * write_file exception to `.o4c/plans/` - see modePolicy.ts's classifyToolAccess. */
   projectRoot?: string;
@@ -95,13 +105,39 @@ export interface AppProps {
 // exploration turn that reads dozens of files would otherwise flood both the live region and
 // the permanent scrollback. The full, untruncated event stream is always written to the run log
 // regardless of this cap.
-const MAX_VISIBLE_TOOL_EVENTS_PER_TURN = 10;
 
-/** How often buffered streamed deltas actually reach a render, at most - see `deltaBufferRef`'s
- * own doc comment for the O(n²) blowup this bounds. Short enough that streaming still feels live
- * (20 updates/sec), long enough to coalesce a fast/bursty stream's chunks into far fewer renders
- * than one per raw chunk. */
-const DELTA_FLUSH_MS = 50;
+/** Heartbeat for buffered streamed deltas - the longest a chunk waits before reaching a render
+ * when `shouldFlushDelta` (textWindow.ts) hasn't already flushed it, so a slow stream still
+ * visibly moves. A fast stream flushes by size (5 lines' worth) long before this fires. Bounds
+ * both the O(n²) blowup `deltaBufferRef`'s doc comment describes and the terminal write volume:
+ * at most one repaint per 5 lines or per heartbeat, instead of up to 20/sec. */
+const DELTA_FLUSH_MS = 1500;
+
+/**
+ * Character budget for the in-flight live region, sized to the terminal: `(rows - 10) * cols`
+ * reserves ten rows for the input box, status bar and spinner that share the frame, so the live
+ * frame stays strictly below the viewport height. That is what keeps Ink off its Windows
+ * full-terminal-clear + whole-history-rewrite path (`shouldClearTerminalForFrame` clears on any
+ * frame at or above the viewport on win32) - the visible "screen reset" at the end of a long
+ * think-block turn. Computed once at mount; a terminal resize mid-session only changes the
+ * margin, never the failure mode, because the cap keeps the frame under the viewport either way.
+ */
+function liveRegionCapChars(): number {
+  const rows = process.stdout.rows ?? 30;
+  const cols = process.stdout.columns ?? 80;
+  return Math.max(800, (rows - 10) * cols);
+}
+
+/** Row bound matching `liveRegionCapChars`: the character budget alone doesn't bound rows (many
+ * short lines span far more rows than chars/cols), and a frame at or above the viewport height
+ * routes Ink through its win32 full-clear path. Same ten-row margin for the rest of the frame. */
+function liveRegionCapRows(): number {
+  return Math.max(3, (process.stdout.rows ?? 30) - 10);
+}
+
+function liveRegionCols(): number {
+  return process.stdout.columns ?? 80;
+}
 
 let nextPrefillToken = 0;
 // Unrelated to the text window's own block ids (textWindow.ts owns those internally now) - just a
@@ -229,6 +265,8 @@ export function App({
   fullContextLogger,
   initialSession,
   restart,
+  initialMode,
+  reloadAfterTurn,
   projectRoot,
   model,
   provider,
@@ -274,14 +312,19 @@ export function App({
         text: 'Type your request, or / to see available commands.',
       },
     ]);
-    if (!initialSession) return initialTextWindow([banner]);
+    if (!initialSession) return initialTextWindow([banner], liveRegionCapChars(), liveRegionCapRows(), liveRegionCols());
     const blocks: TextBlock[] = [
       banner,
       makeBlock(id++, [{ kind: 'system', text: `Resumed session: ${initialSession.title}` }]),
     ];
-    const restoredLines = initialSession.messages.flatMap(formatMessage);
+    // Prefer the full entries (think blocks, [scan] collapse, live line format) over the wire
+    // messages, which only hold what the model was sent; messages remain the fallback for callers
+    // that only have those (tests, older handoffs).
+    const restoredLines = initialSession.entries
+      ? formatEntries(initialSession.entries)
+      : initialSession.messages.flatMap(formatMessage);
     if (restoredLines.length > 0) blocks.push(makeBlock(id++, restoredLines));
-    return initialTextWindow(blocks);
+    return initialTextWindow(blocks, liveRegionCapChars(), liveRegionCapRows(), liveRegionCols());
   });
   const [isProcessing, setIsProcessing] = useState(false);
   // Separate from isProcessing (which covers the whole turn, including waiting on /resume's
@@ -297,6 +340,9 @@ export function App({
   // Esc, and un-dismissed again the moment the user types anything further - matching a normal
   // dropdown-menu feel rather than a one-time popup.
   const [inputValue, setInputValue] = useState('');
+  // Mirrors inputValue for code that runs outside React renders (the turn-end reload must not discard
+  // a draft the user is typing).
+  const inputValueRef = useRef('');
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   // Bumped to force InputBox to clear its text after a palette selection fills in and submits a
   // command programmatically (see resetToken's doc comment on InputBox).
@@ -334,6 +380,8 @@ export function App({
   // real answer (to start a fresh line rather than run on from the reasoning text). Reset to null
   // at the start of every turn in processTurn, alongside its other per-turn tracking state.
   const lastDeltaKindRef = useRef<'think' | 'text' | null>(null);
+  // True once the current turn produced any reasoning - with tool use, what makes the turn worth a reload.
+  const turnHadThinkRef = useRef(false);
 
   /**
    * Real bug found via direct reproduction, 2026-09-30: dispatching a React state update (plus
@@ -356,6 +404,14 @@ export function App({
    */
   const deltaBufferRef = useRef<{ text: string; startNewLine: boolean } | null>(null);
   const deltaFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True while openResumePicker is mid-flight, so a second /resume can't stack another picker.
+  const resumePickerOpenRef = useRef(false);
+  // Tracks the previous provider call's request size so the full-context log writes deltas
+  // instead of the whole growing message list every round-trip (see onProviderCall below).
+  const lastProviderLogRef = useRef<{ messageCount: number; systemPrompt: string | undefined }>({
+    messageCount: 0,
+    systemPrompt: undefined,
+  });
 
   // Dispatches whatever's buffered, if anything - the only place `appendDelta` actually gets
   // sent. `dispatchTextWindow` itself is stable (useReducer's own guarantee), so this needs no
@@ -390,7 +446,7 @@ export function App({
   // Governs whether write_file/run_shell run silently, need confirmation, or are blocked outright
   // - see src/ui/modePolicy.ts. Manual is the default: a deliberate behavior change from "nothing
   // is ever confirmed" today, the actual fix for the long-open run_shell/write_file safety gap.
-  const [mode, setMode] = useState<Mode>('manual');
+  const [mode, setMode] = useState<Mode>(initialMode ?? 'manual');
   // Same pending-Promise-resolver pattern as resumePicker, for the /mode command's picker.
   const [modePicker, setModePicker] = useState<{ resolve: (m: Mode | undefined) => void } | null>(
     null,
@@ -569,26 +625,7 @@ export function App({
     async (input: string) => {
       // /exit, /quit, and /clear are intercepted earlier, in handleSubmit, before they can ever
       // be queued behind a busy turn - they never reach here.
-      if (input === '/resume') {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
-        const sessions = await sessionStore.readManifest();
-        if (sessions.length === 0) {
-          pushBlock([{ kind: 'system', text: 'No saved sessions to resume.' }]);
-        } else {
-          const chosenId = await new Promise<string | undefined>((resolve) => {
-            setResumePicker({ sessions, resolve });
-          });
-          if (chosenId) {
-            // Handed off to a brand-new process, started with `--resume <chosenId>` - it loads
-            // and displays that session's history itself, before its first render, instead of
-            // this process appending it mid-session (see AppProps.restart's doc comment).
-            restart(chosenId);
-            setTimeout(() => exit(), 0);
-          } else {
-            pushBlock([{ kind: 'system', text: 'Resume cancelled.' }]);
-          }
-        }
-      } else if (input === '/context' || input === '/ctx') {
+      if (input === '/context' || input === '/ctx') {
         const usage = loop.getUsage();
         const totalTokens = usage.inputTokens + usage.outputTokens;
         const visible = loop.getVisibleTokenEstimate();
@@ -818,6 +855,10 @@ export function App({
         setIsThinking(true);
         let toolEventCount = 0;
         let summaryLine: Line | undefined;
+        // Turn outcome flags for the end-of-turn reload decision below.
+        let turnFailed = false;
+        let turnSaved = false;
+        turnHadThinkRef.current = false;
         lastDeltaKindRef.current = null;
         // Defensive - the finally block below always flushes and clears these at the end of every
         // turn, but starting clean here too means a stray leftover timer/buffer can never bleed a
@@ -847,7 +888,30 @@ export function App({
             // side, split/reshaped for display). Fire-and-forget, same reasoning as runLogger's
             // own calls: a logging failure must never interrupt the turn itself.
             onProviderCall: (call) => {
-              void fullContextLogger.log({ type: 'provider_call', ...call });
+              // Delta logging: the request's messages are the growing visible history, so
+              // logging the full request every round-trip is O(n²) disk over a session (and a
+              // multi-MB stringify per call). The first call of the session - and any call after
+              // a compaction shrank the message list - logs the full request in the original
+              // shape; in between, only the messages new since the previous call. Concatenating
+              // the deltas reconstructs every request exactly, so nothing is lost.
+              const prev = lastProviderLogRef.current;
+              const compacted = call.request.messages.length < prev.messageCount;
+              if (prev.messageCount === 0 || compacted) {
+                void fullContextLogger.log({ type: 'provider_call', ...call });
+              } else {
+                void fullContextLogger.log({
+                  type: 'provider_call_delta',
+                  ...(call.request.systemPrompt !== prev.systemPrompt
+                    ? { systemPrompt: call.request.systemPrompt }
+                    : {}),
+                  messages: call.request.messages.slice(prev.messageCount),
+                  response: call.response,
+                });
+              }
+              lastProviderLogRef.current = {
+                messageCount: call.request.messages.length,
+                systemPrompt: call.request.systemPrompt,
+              };
             },
             onEvent: (event: AgentEvent) => {
               // Raw streamed text - a live-preview-only signal, not logged (the run log already
@@ -866,6 +930,7 @@ export function App({
                   // begins streaming rather than only after the fact; the answer starting after
                   // reasoning gets a clean new line instead of running on from the think text.
                   const kind = event.kind ?? 'text';
+                  if (kind === 'think') turnHadThinkRef.current = true;
                   const kindChanged = lastDeltaKindRef.current !== kind;
                   lastDeltaKindRef.current = kind;
                   const text = kindChanged && kind === 'think' ? `[think] ${event.text}` : event.text;
@@ -879,7 +944,15 @@ export function App({
                   } else {
                     deltaBufferRef.current.text += text;
                   }
-                  if (deltaFlushTimerRef.current === null) {
+                  // Leading-edge flush on a kind change so "[think] ..." (or the answer) appears the
+                  // instant it starts; after that, chunks coalesce until 5 lines or the heartbeat.
+                  if (deltaBufferRef.current && (kindChanged || shouldFlushDelta(deltaBufferRef.current.text, process.stdout.columns ?? 80))) {
+                    if (deltaFlushTimerRef.current !== null) {
+                      clearTimeout(deltaFlushTimerRef.current);
+                      deltaFlushTimerRef.current = null;
+                    }
+                    flushDeltaBuffer();
+                  } else if (deltaFlushTimerRef.current === null) {
                     const timer = setTimeout(() => {
                       deltaFlushTimerRef.current = null;
                       flushDeltaBuffer();
@@ -923,6 +996,7 @@ export function App({
               // fake or a future one might) never emitted any 'delta' for this call, so this event
               // is the only place its content ever reaches the screen. The final answer is still
               // committed to scrollback separately below, exactly once ('think' entries never were).
+              if (event.type === 'think') turnHadThinkRef.current = true;
               if ((event.type === 'think' || event.type === 'text') && event.streamed) return;
 
               const text = formatEvent(event);
@@ -945,6 +1019,7 @@ export function App({
           });
           if (finalAnswer) responseLines.push({ kind: 'final', text: finalAnswer });
         } catch (err) {
+          turnFailed = true;
           if (err instanceof AbortedError) {
             // Escape while thinking: history was already rolled back inside loop.run() itself -
             // just put the prompt that started this turn back in the input box, unedited, so the
@@ -1010,12 +1085,33 @@ export function App({
                 currentSessionIdRef.current,
                 inputHistoryRef.current,
               );
+              turnSaved = true;
             } catch (saveErr) {
               if (!stale) pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
             }
           }
 
           if (stale) return;
+        }
+
+        // Reload the session in a fresh process: the fix for a long thinking/coding turn that ends in a
+        // clear or partial screen. Everything the live view held (streamed think text, narration, the
+        // rolling live region, Ink's buffers, every per-turn string and array) goes away with the old
+        // process; the new one repaints the full saved history (formatEntries) and the user's mode,
+        // input history and session carry over. Only when the turn actually saved (never reload from a
+        // stale save), succeeded, did real work, left nothing queued, and the user isn't mid-draft.
+        if (
+          reloadAfterTurn &&
+          turnSaved &&
+          !turnFailed &&
+          (toolEventCount > 0 || turnHadThinkRef.current) &&
+          queuedInputsRef.current.length === 0 &&
+          inputValueRef.current.trim() === '' &&
+          currentSessionIdRef.current
+        ) {
+          restart(currentSessionIdRef.current, modeRef.current);
+          setTimeout(() => exit(), 0);
+          return;
         }
       }
 
@@ -1027,7 +1123,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir],
+    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit],
   );
 
   const handleModePickerSelect = useCallback(
@@ -1091,6 +1187,7 @@ export function App({
   );
 
   const handleInputChange = useCallback((value: string) => {
+    inputValueRef.current = value;
     setInputValue(value);
     setPaletteDismissed(false);
   }, []);
@@ -1106,6 +1203,40 @@ export function App({
   const handleEscape = useCallback(() => {
     abortControllerRef.current?.abort();
   }, []);
+
+  // /resume is an escape hatch (e.g. after the screen clears or a turn wedges), so it must never sit
+  // behind the FIFO queue like an ordinary message: queued behind a turn still marked busy it did
+  // nothing visible ("same screen") for David. Opens the picker immediately; only once a session is
+  // actually chosen does it abort any in-flight turn (same as /clear) and hand off to a new process.
+  // Cancelling the picker leaves a running turn untouched. isProcessing is deliberately NOT touched -
+  // the picker owns input focus while open, and this isn't a turn.
+  const openResumePicker = useCallback(async () => {
+    if (resumePickerOpenRef.current) return;
+    resumePickerOpenRef.current = true;
+    try {
+      pushBlock([{ kind: 'user', text: '> /resume' }]);
+      const sessions = await sessionStore.readManifest();
+      if (sessions.length === 0) {
+        pushBlock([{ kind: 'system', text: 'No saved sessions to resume.' }]);
+        return;
+      }
+      const chosenId = await new Promise<string | undefined>((resolve) => {
+        setResumePicker({ sessions, resolve });
+      });
+      if (chosenId) {
+        // Handed off to a brand-new process, started with `--resume <chosenId>` - it loads and
+        // displays that session's history itself, before its first render, instead of this process
+        // appending it mid-session (see AppProps.restart's doc comment).
+        abortControllerRef.current?.abort();
+        restart(chosenId, modeRef.current);
+        setTimeout(() => exit(), 0);
+      } else {
+        pushBlock([{ kind: 'system', text: 'Resume cancelled.' }]);
+      }
+    } finally {
+      resumePickerOpenRef.current = false;
+    }
+  }, [pushBlock, sessionStore, restart, exit]);
 
   const handleSubmit = useCallback(
     (raw: string) => {
@@ -1153,8 +1284,13 @@ export function App({
         // old process visible above the new one's fresh banner. Stopping the old turn from
         // rendering anything further shrinks this window as much as possible.
         abortControllerRef.current?.abort();
-        restart();
+        restart(undefined, modeRef.current);
         setTimeout(() => exit(), 0);
+        return;
+      }
+
+      if (input === '/resume') {
+        void openResumePicker();
         return;
       }
 
@@ -1167,7 +1303,7 @@ export function App({
       setIsProcessing(true);
       void processTurn(input);
     },
-    [isProcessing, processTurn, exit, restart],
+    [isProcessing, processTurn, exit, restart, openResumePicker],
   );
 
   const handlePaletteSelect = useCallback(

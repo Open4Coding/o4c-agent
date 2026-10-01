@@ -4,13 +4,16 @@ import React from 'react';
 import { render } from 'ink';
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { RESTART_EXIT_CODE, buildRestartArgs, runSupervisor, writeHandoff } from './restartHandoff.js';
+import { MODES, type Mode } from './ui/modePolicy.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { LocalProvider, fetchLocalModelId, fetchLocalContextWindow } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider, Message } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
 import { AgentLoop, type AgentEvent } from './agent/loop.js';
-import { toWireMessages } from './agent/contextEntry.js';
+import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
@@ -91,10 +94,8 @@ interface RestartableOpts {
  * IT restarts too) has no such race and costs nothing - this process has nothing left to do but
  * wait anyway.
  */
-function spawnRestart(opts: RestartableOpts, resumeId: string | undefined): number {
-  const args = ['-m', opts.model, '-p', opts.provider, '--base-url', opts.baseUrl];
-  if (opts.image) args.push('--image', opts.image);
-  if (resumeId) args.push('--resume', resumeId);
+function spawnRestart(opts: RestartableOpts, resumeId: string | undefined, mode: string | undefined): number {
+  const args = buildRestartArgs({ ...opts, resumeId, mode });
   const result = spawnSync(process.execPath, [process.argv[1], ...args], {
     stdio: 'inherit',
     env: { ...process.env, O4C_FRESH_SCREEN: '1' },
@@ -136,7 +137,8 @@ async function runRepl(
   contextWindow: number | undefined,
   highlightColor: string,
   maxIterations: number | undefined,
-  initialSession?: { id: string; title: string; messages: Message[]; inputHistory?: string[] },
+  initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] },
+  initialMode?: Mode,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -161,9 +163,9 @@ async function runRepl(
   // Must be installed before render() so it sees Ink's very first frame - see the module's own
   // doc comment for the bug this works around.
   installResizeReflowFix(process.stdout);
-  let pendingRestart: { resumeId: string | undefined } | undefined;
-  const restart = (resumeId?: string) => {
-    pendingRestart = { resumeId };
+  let pendingRestart: { resumeId: string | undefined; mode: Mode | undefined } | undefined;
+  const restart = (resumeId?: string, mode?: Mode) => {
+    pendingRestart = { resumeId, mode };
   };
   const { waitUntilExit } = render(
     React.createElement(App, {
@@ -174,6 +176,10 @@ async function runRepl(
       fullContextLogger,
       initialSession,
       restart,
+      initialMode,
+      // Reload the session in a fresh process after a turn that thought or used tools, so the screen
+      // is repainted from the full saved history (see App.tsx). O4C_NO_RELOAD=1 turns it off.
+      reloadAfterTurn: process.env.O4C_NO_RELOAD !== '1',
       projectRoot,
       model: opts.model,
       provider: opts.provider,
@@ -206,7 +212,14 @@ async function runRepl(
   );
   await waitUntilExit();
   if (pendingRestart) {
-    process.exit(spawnRestart(opts, pendingRestart.resumeId));
+    const handoffFile = process.env.O4C_HANDOFF_FILE;
+    if (handoffFile) {
+      // Running under the supervisor (see restartHandoff.ts): hand it the next launch's args and exit
+      // with the restart code, so the chain of live processes never grows.
+      writeHandoff(handoffFile, buildRestartArgs({ ...opts, resumeId: pendingRestart.resumeId, mode: pendingRestart.mode }));
+      process.exit(RESTART_EXIT_CODE);
+    }
+    process.exit(spawnRestart(opts, pendingRestart.resumeId, pendingRestart.mode));
   }
   // Without an explicit exit, a lingering open handle (most likely a keep-alive socket from an
   // in-flight or just-finished fetch to the local model server) can keep the event loop alive
@@ -234,12 +247,37 @@ program
   )
   .option('--image <path>', 'path to an image file to attach (vision-capable providers only)')
   .option('--resume <sessionId>', 'resume a saved session by id (used internally by /resume)')
+  .option('--mode <mode>', 'start in this mode: manual, auto, acceptEdits or plan (used internally when the session reloads)')
   .option(
     '--profile <name>',
     'named preset (~/.o4c/profiles/<name>.json) to seed this project\'s config.json from on first trust - only has an effect the one time a project is first trusted; ignored on an already-trusted project. See "o4c-agent-design.md" §1.5/§5.',
   )
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; profile?: string }) => {
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; profile?: string; mode?: string }) => {
     const prompt = promptParts.join(' ');
+
+    // Interactive launches run under a thin supervisor: this process becomes the launcher, and the real
+    // app runs as its child (O4C_WORKER=1). A session reload is then a loop in the supervisor instead of
+    // a nested process per reload. Skipped for one-shot prompts, non-terminals, nested workers, and when
+    // O4C_NO_SUPERVISOR=1 (falls back to the old nested restart).
+    if (
+      !prompt &&
+      process.env.O4C_WORKER !== '1' &&
+      process.env.O4C_NO_SUPERVISOR !== '1' &&
+      process.stdin.isTTY &&
+      process.stdout.isTTY
+    ) {
+      process.exit(
+        runSupervisor({
+          nodePath: process.execPath,
+          script: process.argv[1],
+          initialArgs: process.argv.slice(2),
+          handoffPath: join(tmpdir(), `o4c-handoff-${process.pid}.json`),
+          env: process.env,
+          spawn: (command, args, options) => spawnSync(command, args, options),
+        }),
+      );
+    }
+    const initialMode: Mode | undefined = MODES.some((m) => m.mode === opts.mode) ? (opts.mode as Mode) : undefined;
 
     // The trust gate: a project that has never used o4c before (no .o4c/ anywhere above cwd) gets
     // asked once, interactively, before anything else happens - including before any project-level
@@ -427,7 +465,7 @@ program
 
     if (!prompt) {
       const sessionStore = new SessionStore(sessionsDirFor(projectRoot), sessionsToSave);
-      let initialSession: { id: string; title: string; messages: Message[]; inputHistory?: string[] } | undefined;
+      let initialSession: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] } | undefined;
       if (opts.resume) {
         const data = await sessionStore.load(opts.resume);
         if (!data) {
@@ -440,6 +478,7 @@ program
           id: data.id,
           title: data.title,
           messages: toWireMessages(data.entries),
+          entries: data.entries,
           inputHistory: data.inputHistory,
         };
       }
@@ -452,6 +491,7 @@ program
         highlightColor,
         maxIterations,
         initialSession,
+        initialMode,
       );
       return;
     }
