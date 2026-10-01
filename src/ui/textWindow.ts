@@ -30,6 +30,21 @@ export interface TextWindowState {
    * summary, ...) that a delta should never be concatenated onto. Reset by everything else that
    * touches `live` - only `appendDelta` itself sets it true. */
   readonly deltaActive: boolean;
+  /** Max characters the in-flight `live` region may hold - older content beyond this is dropped
+   * from the head as new content arrives. The live region is a rolling preview, not a record
+   * (the full content is already persisted: run log, session entries, full-context log), and an
+   * uncapped region is what pushed Ink's live frame past the viewport height: on Windows that
+   * routes every frame through Ink's full-terminal-clear + whole-history-rewrite path (ink.js
+   * `shouldClearTerminalForFrame`), which is the visible screen-reset on long think blocks.
+   * Sized to the terminal by the caller (App.tsx); `DEFAULT_LIVE_CAP_CHARS` is the fallback for
+   * callers without a viewport (tests). */
+  readonly liveCapChars: number;
+  /** Max terminal ROWS the live region may occupy once wrapped to `liveCols` (undefined = no row
+   * bound, characters only). `liveCapChars` alone can't keep the frame under the viewport:
+   * text made of many short lines spans far more rows than chars/cols, and a frame at or above
+   * the viewport height is what triggers Ink's win32 full-terminal-clear path. */
+  readonly liveCapRows?: number;
+  readonly liveCols?: number;
 }
 
 export type TextWindowAction =
@@ -54,12 +69,131 @@ export type TextWindowAction =
 
 const SCAN_SUMMARY_PREFIX = '[scan] ';
 
+/** Fallback live-region budget for callers without a real viewport (tests, one-shot mode). */
+export const DEFAULT_LIVE_CAP_CHARS = 4000;
+
+/** How many lines' worth of streamed text must be buffered before it is flushed to the screen
+ * early, instead of waiting for the heartbeat timer. */
+export const DELTA_FLUSH_LINES = 5;
+
+/**
+ * True once `buffered` holds at least `DELTA_FLUSH_LINES` lines of streamed text - either that
+ * many newlines, or that many terminal widths of characters (prose arrives as long wrapped lines
+ * with few real newlines). Coalescing to line groups instead of repainting every few
+ * milliseconds is what cuts the terminal write volume; the timer in `App.tsx` is only the
+ * heartbeat that keeps a slow stream visibly moving.
+ */
+export function shouldFlushDelta(buffered: string, cols: number): boolean {
+  if (buffered.length >= Math.max(1, cols) * DELTA_FLUSH_LINES) return true;
+  let newlines = 0;
+  for (let i = buffered.indexOf('\n'); i !== -1; i = buffered.indexOf('\n', i + 1)) {
+    if (++newlines >= DELTA_FLUSH_LINES) return true;
+  }
+  return false;
+}
+
+function liveCharCount(live: readonly string[]): number {
+  let total = 0;
+  for (const line of live) total += line.length;
+  return total;
+}
+
+/**
+ * Drops the oldest live content until the region fits `cap` characters, keeping the newest -
+ * the head of the region is exactly what has already scrolled past the user, so trimming it is
+ * loss-free for them (see `liveCapChars`'s own doc comment on where the full record lives).
+ * Whole lines are dropped first; if the overflow ends mid-line, that line is cut to its tail.
+ * Returns the input array unchanged when already within the budget.
+ */
+export function trimLiveToCap(live: readonly string[], cap: number): string[] {
+  const overflow = liveCharCount(live) - cap;
+  if (overflow <= 0) return [...live];
+  const result: string[] = [];
+  let dropped = 0;
+  for (const line of live) {
+    if (dropped >= overflow) {
+      result.push(line);
+    } else if (line.length <= overflow - dropped) {
+      dropped += line.length;
+    } else {
+      result.push(line.slice(overflow - dropped));
+      dropped = overflow;
+    }
+  }
+  return result;
+}
+
+/** Rows `text` occupies in a `cols`-wide terminal: each newline-separated segment wraps to
+ * ceil(len/cols) rows, minimum one. Approximate by design (ignores wide glyphs and ANSI width) -
+ * the 10-row margin in the cap absorbs the error. */
+export function rowsFor(text: string, cols: number): number {
+  const c = Math.max(1, cols);
+  let rows = 0;
+  for (const seg of text.split('\n')) rows += Math.max(1, Math.ceil(seg.length / c));
+  return rows;
+}
+
+/**
+ * Drops the oldest live content until the region fits `maxRows` terminal rows at `cols` width,
+ * keeping the newest - same head-trimming rule as `trimLiveToCap`. Whole entries go first; an
+ * entry that only partly fits is cut to its trailing rows (whole newline-separated segments from
+ * the end, the last kept segment cut to its tail characters). Returns the input copy unchanged
+ * when it already fits.
+ */
+export function trimLiveToRows(live: readonly string[], maxRows: number, cols: number): string[] {
+  const budget = Math.max(1, maxRows);
+  const c = Math.max(1, cols);
+  let used = 0;
+  const kept: string[] = [];
+  for (let i = live.length - 1; i >= 0; i--) {
+    const entry = live[i];
+    const rows = rowsFor(entry, c);
+    if (used + rows <= budget) {
+      kept.push(entry);
+      used += rows;
+      continue;
+    }
+    // Partial fit: take trailing segments while they fit, then a tail slice of the next one.
+    const left = budget - used;
+    if (left > 0) {
+      const segs = entry.split('\n');
+      const tail: string[] = [];
+      let r = 0;
+      for (let j = segs.length - 1; j >= 0 && r < left; j--) {
+        const segRows = Math.max(1, Math.ceil(segs[j].length / c));
+        if (r + segRows <= left) {
+          tail.unshift(segs[j]);
+          r += segRows;
+        } else {
+          tail.unshift(segs[j].slice(-((left - r) * c)));
+          r = left;
+        }
+      }
+      kept.push(tail.join('\n'));
+    }
+    break;
+  }
+  return kept.reverse();
+}
+
+/** Applies both live-region bounds: characters always, rows when the state carries a row cap. */
+function boundLive(live: readonly string[], state: TextWindowState, cap: number): string[] {
+  const byChars = trimLiveToCap(live, cap);
+  if (state.liveCapRows === undefined || state.liveCols === undefined) return byChars;
+  return trimLiveToRows(byChars, state.liveCapRows, state.liveCols);
+}
+
 /** `blocks` lets `/resume` seed a window that already has content (a restored session's
  * formatted history) - `nextId` picks up after the highest id already in use, so ids stay unique
- * even when starting from a non-empty list rather than always starting at 0. */
-export function initialTextWindow(blocks: readonly TextBlock[] = []): TextWindowState {
+ * even when starting from a non-empty list rather than always starting from 0. */
+export function initialTextWindow(
+  blocks: readonly TextBlock[] = [],
+  liveCapChars: number = DEFAULT_LIVE_CAP_CHARS,
+  liveCapRows?: number,
+  liveCols?: number,
+): TextWindowState {
   const nextId = blocks.reduce((max, b) => Math.max(max, b.id + 1), 0);
-  return { blocks, live: [], nextId, deltaActive: false };
+  return { blocks, live: [], nextId, deltaActive: false, liveCapChars, liveCapRows, liveCols };
 }
 
 export function makeBlock(id: number, lines: Line[]): TextBlock {
@@ -67,6 +201,9 @@ export function makeBlock(id: number, lines: Line[]): TextBlock {
 }
 
 export function textWindowReducer(state: TextWindowState, action: TextWindowAction): TextWindowState {
+  // `?? DEFAULT` guards state objects built before `liveCapChars` existed (tests' own literals);
+  // a missing cap must degrade to the default budget, never to a NaN trim.
+  const cap = state.liveCapChars ?? DEFAULT_LIVE_CAP_CHARS;
   switch (action.type) {
     case 'commit': {
       if (action.lines.length === 0) return state;
@@ -77,26 +214,27 @@ export function textWindowReducer(state: TextWindowState, action: TextWindowActi
       };
     }
     case 'appendLive':
-      return { ...state, live: [...state.live, action.text], deltaActive: false };
+      return { ...state, live: boundLive([...state.live, action.text], state, cap), deltaActive: false };
     case 'appendDelta': {
       if (action.startNewLine || state.live.length === 0 || !state.deltaActive) {
-        return { ...state, live: [...state.live, action.text], deltaActive: true };
+        return { ...state, live: boundLive([...state.live, action.text], state, cap), deltaActive: true };
       }
       const live = state.live.slice();
       live[live.length - 1] += action.text;
-      return { ...state, live, deltaActive: true };
+      return { ...state, live: boundLive(live, state, cap), deltaActive: true };
     }
     case 'updateScanSummary':
       return {
         ...state,
-        live: [...state.live.filter((l) => !l.startsWith(SCAN_SUMMARY_PREFIX)), action.text],
+        live: boundLive([...state.live.filter((l) => !l.startsWith(SCAN_SUMMARY_PREFIX)), action.text], state, cap),
         deltaActive: false,
       };
     case 'clearLive':
       return state.live.length === 0 && !state.deltaActive ? state : { ...state, live: [], deltaActive: false };
     case 'reset':
-      return initialTextWindow(action.blocks);
+      return initialTextWindow(action.blocks, cap, state.liveCapRows, state.liveCols);
     default:
       return state;
   }
 }
+

@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import {
   initialTextWindow,
   makeBlock,
+  rowsFor,
+  shouldFlushDelta,
   textWindowReducer,
+  trimLiveToRows,
   type TextWindowState,
 } from '../ui/textWindow.js';
 import type { Line } from '../ui/types.js';
@@ -147,4 +150,69 @@ test('updateScanSummary also ends an active delta run', () => {
   assert.equal(state.deltaActive, false);
   state = textWindowReducer(state, { type: 'appendDelta', text: 'next' });
   assert.deepEqual(state.live, ['streamed', '[scan] 3 collapsed', 'next']);
+});
+
+test('shouldFlushDelta holds back a short buffer', () => {
+  assert.equal(shouldFlushDelta('just a few words', 80), false);
+  assert.equal(shouldFlushDelta('', 80), false);
+});
+
+test('shouldFlushDelta flushes once 5 newlines are buffered', () => {
+  assert.equal(shouldFlushDelta('a\nb\nc\nd\n', 80), false);
+  assert.equal(shouldFlushDelta('a\nb\nc\nd\ne\n', 80), true);
+});
+
+test('shouldFlushDelta flushes once 5 terminal widths of characters are buffered', () => {
+  assert.equal(shouldFlushDelta('x'.repeat(5 * 80 - 1), 80), false);
+  assert.equal(shouldFlushDelta('x'.repeat(5 * 80), 80), true);
+  assert.equal(shouldFlushDelta('x'.repeat(5 * 120 - 1), 120), false);
+});
+
+test('shouldFlushDelta survives a degenerate terminal width', () => {
+  assert.equal(shouldFlushDelta('abcde', 0), true);
+});
+
+test('rowsFor counts wrapped rows per newline-separated segment, minimum one each', () => {
+  assert.equal(rowsFor('', 80), 1);
+  assert.equal(rowsFor('x'.repeat(80), 80), 1);
+  assert.equal(rowsFor('x'.repeat(81), 80), 2);
+  assert.equal(rowsFor('a\nb\nc', 80), 3);
+  assert.equal(rowsFor('a\n\nb', 80), 3);
+});
+
+test('trimLiveToRows leaves a region that already fits untouched', () => {
+  assert.deepEqual(trimLiveToRows(['one', 'two\nthree'], 10, 80), ['one', 'two\nthree']);
+});
+
+test('trimLiveToRows drops whole oldest entries first, keeping the newest', () => {
+  assert.deepEqual(trimLiveToRows(['a', 'b', 'c', 'd'], 2, 80), ['c', 'd']);
+});
+
+test('trimLiveToRows bounds many-short-lines text that the char cap would let through', () => {
+  const manyShortLines = Array.from({ length: 100 }, (_, i) => 'l' + i).join('\n');
+  const out = trimLiveToRows([manyShortLines], 20, 177);
+  assert.ok(rowsFor(out.join('\n'), 177) <= 20);
+  assert.ok(out[0].endsWith('l99'));
+});
+
+test('trimLiveToRows cuts one huge wrapped line to its trailing rows', () => {
+  const out = trimLiveToRows(['y'.repeat(1000)], 3, 80);
+  assert.equal(out.length, 1);
+  assert.ok(rowsFor(out[0], 80) <= 3);
+  assert.equal(out[0].length, 240);
+});
+
+test('the reducer applies the row cap to streamed deltas when the state carries one', () => {
+  let state = initialTextWindow([], 1000000, 5, 80);
+  for (let i = 0; i < 50; i++) state = textWindowReducer(state, { type: 'appendDelta', text: 'line ' + i + '\n' });
+  assert.ok(rowsFor(state.live.join('\n'), 80) <= 5);
+  assert.ok(state.live.join('').includes('line 49'));
+});
+
+test('reset keeps the live caps instead of falling back to the default budget', () => {
+  const state = initialTextWindow([], 1234, 7, 90);
+  const after = textWindowReducer(state, { type: 'reset', blocks: [] });
+  assert.equal(after.liveCapChars, 1234);
+  assert.equal(after.liveCapRows, 7);
+  assert.equal(after.liveCols, 90);
 });

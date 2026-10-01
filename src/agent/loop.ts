@@ -221,6 +221,30 @@ export class AgentLoop {
   }
 
   /**
+   * Frees the heavy payload of an entry the instant compaction/MicroCompact hides it from the
+   * agent. Hidden entries are dropped from `toWireMessages()` (nothing ever resends them), the
+   * UI already displayed them at append time, and the untruncated record already exists on disk
+   * (run log + full-context log), so their in-memory bytes are pure dead weight for the rest of
+   * the process's life - the unbounded accumulator behind the long-session RSS climb: compaction
+   * hid them from the *model* but never from the *heap* (a pruned 10 MB tool output stayed
+   * resident until the process died). Only already-hidden entries are touched here; a
+   * still-visible entry must keep its full content because it may be resent this very turn.
+   * The signature/redacted-thinking replay data goes with it - replay only ever reads visible
+   * think entries (see `toWireMessages()`'s own `agent_visible` skip). Session persistence is
+   * the one consumer that sees the placeholder, by design: the session file is the working
+   * /resume state, not the record (that's the run/full-context logs' job), and a resumed
+   * process re-indexes the placeholder at its (tiny) new size with nothing to lose - the entry
+   * stays `agent_visible=false`, so it stays out of the wire either way.
+   */
+  private releaseEntryContent(entry: ContextEntry): void {
+    if (entry.content.length <= 256) return;
+    entry.content = `[${entry.sub_type} content released from memory after compaction]`;
+    entry.thinking_signature = undefined;
+    entry.redacted_thinking = undefined;
+    entry.images = undefined;
+  }
+
+  /**
    * Real gap found via direct probe (`tmp.tmp/probe-compaction.ts` scenario E): the compaction
    * trigger only ever read `visibleTokenEstimate` (entry content alone) - but every real request
    * this turn sends also carries the system prompt (plus any `modeInstruction`) and every tool's
@@ -298,6 +322,8 @@ export class AgentLoop {
       this.deindexEntry(response);
       response.agent_visible = false;
       this.indexEntry(response);
+      this.releaseEntryContent(call);
+      this.releaseEntryContent(response);
       prunedPairCount += 1;
     }
     if (prunedPairCount === 0) return;
@@ -403,6 +429,7 @@ export class AgentLoop {
       this.deindexEntry(entry);
       entry.agent_visible = false;
       this.indexEntry(entry);
+      this.releaseEntryContent(entry);
     }
 
     // Spliced in at the cut point itself (not appended to the end) so it sits exactly where the
