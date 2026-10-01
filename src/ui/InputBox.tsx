@@ -5,6 +5,9 @@ import { theme } from './theme.js';
 
 export interface InputBoxProps {
   prompt?: string;
+  /** How long the cursor keeps blinking after the last edit or cursor move before it holds solid
+   * (default 10 s). Only the tests shorten it. */
+  blinkWindowMs?: number;
   disabled?: boolean;
   /** When false, this box stops reacting to keystrokes entirely - an overlay (ConfirmDialog,
    * SessionPicker) owns input instead. Default true. */
@@ -80,6 +83,7 @@ const CURSOR_BG_OFF = '\x1B[49m';
  */
 export function InputBox({
   prompt = '> ',
+  blinkWindowMs = 10_000,
   disabled = false,
   active = true,
   suppressNav = false,
@@ -113,14 +117,29 @@ export function InputBox({
   useEffect(() => {
     if (!active) return;
     setCursorVisible(true);
+    // While disabled (a turn is running) the cursor stays solid and visible - never hidden, so typing
+    // still looks alive - but does not blink: every blink tick repaints the whole live frame, and the
+    // box is the one thing animating alongside the spinner during a turn.
+    if (disabled) return;
     const id = setInterval(() => setCursorVisible((v) => !v), 530);
+    // Blink only for a while after the last edit or cursor move (this effect re-runs on each, so the
+    // window restarts), then hold the cursor solid: a blinking cursor on an untouched screen repaints
+    // the whole frame twice a second, forever, for nobody. The next keystroke starts it blinking again.
+    const stopBlinking = setTimeout(() => {
+      clearInterval(id);
+      setCursorVisible(true);
+    }, blinkWindowMs);
+    stopBlinking.unref?.();
     // A cosmetic blink must never be a reason the process won't exit - real bug found running
     // this file's own test suite: none of these tests unmount their rendered InputBox, so a
     // plain (ref'd) interval from every single test accumulated and kept the whole test process
     // alive past every test actually finishing, hanging indefinitely instead of exiting.
     id.unref?.();
-    return () => clearInterval(id);
-  }, [active, value, cursor]);
+    return () => {
+      clearInterval(id);
+      clearTimeout(stopBlinking);
+    };
+  }, [active, disabled, value, cursor, blinkWindowMs]);
 
   useEffect(() => {
     onChange?.(value);

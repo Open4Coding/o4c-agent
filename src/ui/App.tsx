@@ -10,6 +10,8 @@ import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from
 import { plansDirFor } from '../session/projectContext.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
+import { formatConfirmMessage } from './confirmPreview.js';
+import { needsGapBefore } from './lineSpacing.js';
 import { formatMessage } from './formatMessage.js';
 import { MAX_VISIBLE_TOOL_EVENTS_PER_TURN, formatEntries } from './formatEntries.js';
 import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
@@ -18,7 +20,14 @@ import { detectCurrentOs } from './platform.js';
 import type { Line } from './types.js';
 import { initialTextWindow, makeBlock, shouldFlushDelta, textWindowReducer, type TextBlock } from './textWindow.js';
 import { theme } from './theme.js';
-import { formatTokenCount, formatElapsed, renderProgressBar, progressBarFilledCells } from './statusBar.js';
+import {
+  formatTokenCount,
+  formatElapsed,
+  formatElapsedCoarse,
+  elapsedTickMs,
+  renderProgressBar,
+  progressBarFilledCells,
+} from './statusBar.js';
 import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
@@ -146,10 +155,15 @@ let nextDialogId = 0;
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/** Every spinner tick repaints the whole live frame (Ink re-renders and re-tokenizes it), and at the
+ * old 80 ms this alone was ~12 repaints/s during a turn - measured as the bulk of ~100 MB/s of
+ * allocation churn and ~100 KB/s of terminal writes. 250 ms (4 fps) still reads as clearly alive. */
+export const SPINNER_INTERVAL_MS = 250;
+
 function Spinner() {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setFrame((f) => (f + 1) % SPINNER_FRAMES.length), 80);
+    const id = setInterval(() => setFrame((f) => (f + 1) % SPINNER_FRAMES.length), SPINNER_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);
   return (
@@ -170,6 +184,7 @@ function StatusBar({
   contextWindow,
   liveText,
   mode,
+  busy,
 }: {
   loop: AgentLoop;
   model: string;
@@ -187,18 +202,21 @@ function StatusBar({
    * they're nested inside one shared `<Text>` tree, which is what this whole component already is)
    * rather than as a second, separately-positioned line the way it used to be. */
   mode: Mode;
+  /** A turn is running: the clock ticks every second and shows seconds. At idle it ticks once a
+   * minute and shows minutes only, so an untouched screen is not repainted every second. */
+  busy: boolean;
 }) {
   const [, tick] = useState(0);
   const startRef = useRef(Date.now());
   useEffect(() => {
-    const id = setInterval(() => tick((t) => t + 1), 1000);
+    const id = setInterval(() => tick((t) => t + 1), elapsedTickMs(busy));
     return () => clearInterval(id);
-  }, []);
+  }, [busy]);
 
   const liveTokens = Math.ceil(liveText.join('').length / 4);
   const tokens = loop.getVisibleTokenEstimate() + liveTokens;
   const fraction = contextWindow ? tokens / contextWindow : undefined;
-  const elapsed = formatElapsed(Date.now() - startRef.current);
+  const elapsed = busy ? formatElapsed(Date.now() - startRef.current) : formatElapsedCoarse(Date.now() - startRef.current);
 
   return (
     <Text>
@@ -526,7 +544,7 @@ export function App({
       const access = classifyToolAccess(modeRef.current, tool, input, plansDirRef.current);
       if (access === 'allow') return 'allow';
       if (access === 'deny') return 'deny';
-      const ok = await askConfirm(`Allow ${tool.name}(${JSON.stringify(input)})?`, tool, input);
+      const ok = await askConfirm(formatConfirmMessage(tool.name, input), tool, input);
       return ok ? 'allow' : 'deny';
     },
     [askConfirm],
@@ -1384,6 +1402,9 @@ export function App({
           <Box key={block.id} flexDirection="column" marginBottom={1}>
             {block.lines.map((line, i) => (
               <React.Fragment key={i}>
+                {/* A blank row before a labelled line ([think], [tool], ...) so it does not sit directly
+                    under the line above - see lineSpacing.ts. */}
+                {i > 0 && needsGapBefore(block.lines[i - 1], line) && <Text> </Text>}
                 <LineText line={line} />
                 {/* A blank row after every tool_call/tool_result line, per direct instruction -
                     otherwise a turn with several tool calls renders as one dense, hard-to-scan
@@ -1418,7 +1439,7 @@ export function App({
       {/* Front-end plan item #8: context max/current/%used now lives on the same line as Mode,
           under the input box - previously two separate lines (StatusBar above the input box,
           "Mode: X" below it). */}
-      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} />
+      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
       <Text color={theme.border}>Esc interrupt · type to queue · Ctrl+C reset</Text>
       {confirmDialog ? (
         <ConfirmDialog

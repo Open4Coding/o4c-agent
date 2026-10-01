@@ -96,13 +96,13 @@ class ManyToolCallsProvider implements LLMProvider {
 class WriteFileProvider implements LLMProvider {
   readonly name = 'write-file-test';
   private called = false;
-  constructor(private targetPath: string) {}
+  constructor(private targetPath: string, private fileContent = 'hello') {}
   async complete(_request: CompletionRequest): Promise<CompletionResponse> {
     if (!this.called) {
       this.called = true;
       return {
         content: '',
-        toolCalls: [{ id: 'w1', name: 'write_file', input: { path: this.targetPath, content: 'hello' } }],
+        toolCalls: [{ id: 'w1', name: 'write_file', input: { path: this.targetPath, content: this.fileContent } }],
         stopReason: 'tool_use',
       };
     }
@@ -263,7 +263,7 @@ async function type(stdin: { write: (data: string) => void }, text: string): Pro
 // amount avoids that flakiness without just guessing at a bigger number.
 async function waitFor(
   check: () => boolean | Promise<boolean>,
-  timeoutMs = 2000,
+  timeoutMs = 10000,
 ): Promise<void> {
   const start = Date.now();
   while (!(await check())) {
@@ -439,7 +439,7 @@ test('Escape while thinking cancels the turn and restores its prompt to the inpu
     const { stdin, frames } = await setup({ dir, provider: new AbortAwareHangingProvider() });
 
     await submit(stdin, 'this will hang until cancelled');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Thinking...'));
     assert.ok(anyFrameIncludes(frames, 'Thinking...'));
 
     stdin.write(ESCAPE);
@@ -473,6 +473,7 @@ test('a turn with many tool calls collapses the display past the cap, but logs e
     assert.ok(anyFrameIncludes(frames, 'collapsed'));
     assert.ok(anyFrameIncludes(frames, 'done scanning'));
 
+    await waitFor(() => Boolean(runLogger.getFilePath())); // the log file is created lazily by a fire-and-forget write
     const logPath = runLogger.getFilePath();
     assert.ok(logPath);
     // Poll for all 32 lines to actually be on disk, not just read once - runLogger.log() is
@@ -548,14 +549,17 @@ test('a real turn writes a separate <timestamp>.FULLCONTEXT.jsonl with the full 
   });
 });
 
-test('a <think> block shows live as [think], is logged as its own event, and never leaks into the final answer', async () => {
+test('a <think> block is logged as its own event, kept out of the final answer, and never leaks raw tags', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, loop, runLogger } = await setup({ dir, provider: new ThinkingWithToolProvider() });
 
     await submit(stdin, 'what is 2+2?');
     await waitFor(() => anyFrameIncludes(frames, 'The answer is 4.'));
 
-    assert.ok(anyFrameIncludes(frames, '[think] let me check the file first'));
+    // (Whether '[think]' paints in a LIVE frame is not asserted here: with an instant, non-streaming
+    // provider the live line is added and cleared inside one render batch and may never be drawn -
+    // a race, not a behavior. The live label is covered deterministically by the streaming-think
+    // test below, which pauses the provider mid-turn.)
     // The final answer committed to permanent scrollback must be the clean text only - no raw
     // <think> tags leaking through anywhere.
     assert.ok(anyFrameIncludes(frames, 'The answer is 4.'));
@@ -580,6 +584,7 @@ test('a <think> block shows live as [think], is logged as its own event, and nev
     assert.equal(loop.getEntries()[1].content, 'let me check the file first');
     assert.equal(loop.getEntries()[5].content, 'The answer is 4.');
 
+    await waitFor(() => Boolean(runLogger.getFilePath())); // the log file is created lazily by a fire-and-forget write
     const logPath = runLogger.getFilePath();
     assert.ok(logPath);
     let lines: string[] = [];
@@ -636,7 +641,7 @@ test('typing "/" opens a command palette listing every command, alphabetically a
     const { stdin, frames } = await setup({ dir });
 
     await type(stdin, '/');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, '/clear'));
 
     assert.ok(anyFrameIncludes(frames, '/clear'));
     assert.ok(anyFrameIncludes(frames, '/resume'));
@@ -738,7 +743,7 @@ test('/debug no longer exists - treated as an unknown command', async () => {
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/debug');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Unknown command: /debug'));
     assert.ok(anyFrameIncludes(frames, 'Unknown command: /debug'));
   });
 });
@@ -748,7 +753,7 @@ test('an unrecognized slash command gives clear feedback instead of being sent t
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/nonexistent');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Unknown command: /nonexistent'));
 
     assert.ok(anyFrameIncludes(frames, 'Unknown command: /nonexistent'));
   });
@@ -773,7 +778,7 @@ test('/context shows a zero-usage breakdown before any real turn has run', async
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/context');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Session usage'));
 
     assert.ok(anyFrameIncludes(frames, 'Session usage'));
     assert.ok(anyFrameIncludes(frames, 'Requests sent: 0'));
@@ -787,7 +792,7 @@ test('/context reflects real usage after a turn has run', async () => {
     await submit(stdin, 'do something');
     await tick(100);
     await submit(stdin, '/ctx');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Requests sent: 2'));
 
     assert.ok(anyFrameIncludes(frames, 'Requests sent: 2')); // MockProvider: tool call, then final
   });
@@ -798,7 +803,7 @@ test('/keyboardcommands shows the keybinding table without ever touching convers
     const { stdin, frames, loop } = await setup({ dir });
 
     await submit(stdin, '/keyboardcommands');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Ctrl+J'));
 
     assert.ok(anyFrameIncludes(frames, 'Ctrl+J'));
     assert.ok(anyFrameIncludes(frames, 'Kitty terminals only'));
@@ -814,7 +819,7 @@ test('/keyboardcommands <os> shows that OS\'s notes, still without touching conv
     const { stdin, frames, loop } = await setup({ dir });
 
     await submit(stdin, '/keyboardcommands windows');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Windows keyboard notes'));
 
     assert.ok(anyFrameIncludes(frames, 'Windows keyboard notes'));
     assert.ok(anyFrameIncludes(frames, 'AltGr'));
@@ -828,7 +833,7 @@ test('/keyboardcommands <bogus> shows a usage error instead of guessing an OS', 
     const { stdin, frames, loop } = await setup({ dir });
 
     await submit(stdin, '/keyboardcommands nonsense');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Usage: /keyboardcommands [windows|mac|linux]'));
 
     assert.ok(anyFrameIncludes(frames, 'Usage: /keyboardcommands [windows|mac|linux]'));
     assert.equal(loop.getMessages().length, 0);
@@ -841,7 +846,7 @@ test('/help lists every command with its description, and logs itself under [inf
     const { stdin, frames, loop, runLogger } = await setup({ dir });
 
     await submit(stdin, '/help');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Available commands:'));
 
     assert.ok(anyFrameIncludes(frames, 'Available commands:'));
     assert.ok(anyFrameIncludes(frames, '/mode'));
@@ -850,6 +855,7 @@ test('/help lists every command with its description, and logs itself under [inf
     assert.equal(loop.getMessages().length, 0);
     assert.equal(loop.getUsage().requestCount, 0);
 
+    await waitFor(() => Boolean(runLogger.getFilePath())); // the log file is created lazily by a fire-and-forget write
     const logPath = runLogger.getFilePath();
     assert.ok(logPath);
     let lines: string[] = [];
@@ -867,7 +873,7 @@ test('/help-mode explains what /mode does and breaks down all five modes', async
     const { stdin, frames, loop } = await setup({ dir });
 
     await submit(stdin, '/help-mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, '/mode —'));
 
     assert.ok(anyFrameIncludes(frames, '/mode —'));
     assert.ok(anyFrameIncludes(frames, 'Modes:'));
@@ -882,7 +888,7 @@ test('/help-<hidden command> still works by exact name, e.g. /help-set-sessionna
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/help-set-sessionname');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, '/set-sessionname —'));
 
     assert.ok(anyFrameIncludes(frames, '/set-sessionname —'));
     assert.ok(anyFrameIncludes(frames, 'Rename the current session'));
@@ -894,7 +900,7 @@ test('/help-<unknown> shows an error instead of a blank or crashed response', as
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/help-bogus');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'No such command: /bogus'));
 
     assert.ok(anyFrameIncludes(frames, 'No such command: /bogus'));
     assert.ok(anyFrameIncludes(frames, 'Try /help for the full list'));
@@ -931,7 +937,7 @@ test('/resume with no saved sessions says so instead of showing an empty picker'
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/resume');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'No saved sessions to resume'));
 
     assert.ok(anyFrameIncludes(frames, 'No saved sessions to resume'));
   });
@@ -1039,6 +1045,20 @@ test('launched with an initialSession (as a /resume restart handoff would be), t
   });
 });
 
+test('while a turn is running the live frame repaints about half as often as before (spinner 4 fps + clock, no blink)', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir, provider: new HangingProvider() });
+    await submit(stdin, 'this will hang forever');
+    await tick(300); // let the turn start and the spinner mount
+    const before = frames.length;
+    await tick(2000);
+    const repaints = frames.length - before;
+    // Measured: the old rates (80 ms spinner + 530 ms blink + 1 s clock) gave 20 in 2 s here; now 9-10.
+    assert.ok(repaints < 15, `expected under 15 repaints in 2 s, saw ${repaints}`);
+    assert.ok(repaints >= 4, `the spinner should still be animating, saw ${repaints}`);
+  });
+});
+
 test('with reloadAfterTurn, a turn that thought and used a tool saves and then hands off to a reload of the same session, carrying the mode', async () => {
   await withTempDir(async (dir) => {
     const { stdin, store, restartCalls, restartModes } = await setup({
@@ -1090,6 +1110,60 @@ test('the app starts in the mode it was launched with (a reload must not drop Au
   });
 });
 
+test('in the repainted history a [think] / [tool] line has a blank row above it, not glued to the line before', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    const seeded: ContextEntry[] = [
+      userInputEntry('build the thing'),
+      aiThinkEntry('weigh the options first'),
+      aiResponseEntry('some narration before the tool'),
+      aiThinkEntry('a second thought'),
+      aiToolCallEntry({ id: 'c0', name: 'read_file', input: { path: 'f' } }, false),
+      aiToolCallResponseEntry('c0', 'contents', false),
+      aiResponseEntry('the thing is built'),
+    ];
+    const id = await seedStore.save(seeded);
+    const data = await seedStore.load(id);
+    assert.ok(data);
+    const { frames } = await setup({
+      dir,
+      initialSession: { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries), entries: data!.entries },
+    });
+    await waitFor(() => anyFrameIncludes(frames, '[tool] read_file'));
+    const frame = frames.find((f) => f.includes('[tool] read_file') && f.includes('[think] weigh'))!;
+    const rows = frame.split('\n').map((r) => r.trim());
+    const rowAbove = (needle: string) => rows[rows.findIndex((r) => r.startsWith(needle)) - 1];
+    assert.equal(rowAbove('[think] weigh the options first'), '', 'blank row above the first [think]');
+    assert.equal(rowAbove('[think] a second thought'), '', 'blank row above the second [think]');
+    assert.equal(rowAbove('[tool] read_file'), '', 'blank row above [tool]');
+    assert.equal(rowAbove('[result] contents'), '', 'the blank after [tool] separates it from [result], as before');
+  });
+});
+
+test('in the repainted history the final answer is not glued to the [think] line above it', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    const seeded: ContextEntry[] = [
+      userInputEntry('write it'),
+      aiThinkEntry('the file has been written, now explain'),
+      aiResponseEntry('Done - it is written.'),
+    ];
+    const id = await seedStore.save(seeded);
+    const data = await seedStore.load(id);
+    assert.ok(data);
+    const { frames } = await setup({
+      dir,
+      initialSession: { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries), entries: data!.entries },
+    });
+    await waitFor(() => anyFrameIncludes(frames, 'Done - it is written.'));
+    const frame = frames.find((f) => f.includes('Done - it is written.') && f.includes('[think] the file'))!;
+    const rows = frame.split('\n').map((r) => r.trim());
+    const answerRow = rows.findIndex((r) => r.startsWith('Done - it is written.'));
+    assert.ok(answerRow > 0);
+    assert.equal(rows[answerRow - 1], '', 'a blank row between the [think] line and the answer');
+  });
+});
+
 test('a resumed session repaints from its full entries: [think] blocks and the [scan] collapse reappear, not just the raw wire messages', async () => {
   await withTempDir(async (dir) => {
     const seedStore = new SessionStore(dir);
@@ -1137,7 +1211,7 @@ test('a /resume restart handoff also restores the resumed session\'s own submit-
 
     // The resumed session's own submit-history is immediately recallable, before any typing.
     stdin.write(UP);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'old draft two'));
     assert.ok(anyFrameIncludes(frames, 'old draft two'));
     // Back to the empty draft (there was nothing typed yet before UP) - otherwise the recalled
     // text would still be sitting in the box and the next submission would append onto it.
@@ -1186,7 +1260,7 @@ test('/resume: Escape cancels with no change and no session loaded', async () =>
     await submit(stdin, '/resume');
     await waitFor(() => anyFrameIncludes(frames, 'Resume a session'));
     stdin.write(ESCAPE);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Resume cancelled'));
 
     assert.ok(anyFrameIncludes(frames, 'Resume cancelled'));
     assert.deepEqual(loop.getMessages(), []);
@@ -1198,7 +1272,7 @@ test('/mode opens a picker listing all five modes', async () => {
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Choose a mode'));
 
     assert.ok(anyFrameIncludes(frames, 'Choose a mode'));
     assert.ok(anyFrameIncludes(frames, 'Auto'));
@@ -1227,7 +1301,7 @@ test('Ctrl+C force-recovers the UI (not exit) even when the stuck turn never act
     await waitFor(() => (lastFrame() ?? '').includes('Thinking...'));
 
     stdin.write('\u0003'); // Ctrl+C's raw byte
-    await tick(100);
+    await waitFor(() => anyFrameIncludes(frames, 'Stopped (Ctrl+C)'));
 
     assert.ok(anyFrameIncludes(frames, 'Stopped (Ctrl+C)'));
     assert.ok(!(lastFrame() ?? '').includes('Thinking...'));
@@ -1248,7 +1322,7 @@ test('a stale, force-recovered turn that eventually settles anyway never shows i
     await waitFor(() => (lastFrame() ?? '').includes('Thinking...'));
 
     stdin.write('\u0003');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Stopped (Ctrl+C)'));
     assert.ok(anyFrameIncludes(frames, 'Stopped (Ctrl+C)'));
 
     // Wait past the provider's own delay so the abandoned call actually settles in the
@@ -1288,7 +1362,7 @@ test('/set-sessionname with no active session says so instead of renaming', asyn
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/set-sessionname whatever');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'No active session yet'));
 
     assert.ok(anyFrameIncludes(frames, 'No active session yet'));
   });
@@ -1302,7 +1376,7 @@ test('/set-sessionname with no argument shows a usage error instead of renaming'
     await tick(100);
 
     await submit(stdin, '/set-sessionname');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Usage: /set-sessionname'));
 
     assert.ok(anyFrameIncludes(frames, 'Usage: /set-sessionname'));
     const manifest = await store.readManifest();
@@ -1315,12 +1389,12 @@ test('/set-sessionname renames the current session, persisted to both the manife
     const { stdin, frames, store } = await setup({ dir });
 
     await submit(stdin, 'a message to create a session');
-    await tick(100);
+    await waitFor(async () => (await store.readManifest()).length > 0);
     const before = await store.readManifest();
     const id = before[0].id;
 
     await submit(stdin, '/set-sessionname my custom title');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Session renamed to "my custom title".'));
 
     assert.ok(anyFrameIncludes(frames, 'Session renamed to "my custom title".'));
     const data = await store.load(id);
@@ -1335,7 +1409,7 @@ test('/set opens a picker of /set-* commands; selecting one prefills the input b
     const { stdin, frames, lastFrame, store } = await setup({ dir });
 
     await submit(stdin, '/set');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Choose a setting'));
     assert.ok(anyFrameIncludes(frames, 'Choose a setting'));
     assert.ok(anyFrameIncludes(frames, '/set-sessionname'));
 
@@ -1352,7 +1426,7 @@ test('/set opens a picker of /set-* commands; selecting one prefills the input b
     // live in the box (not just painted for one frame).
     await type(stdin, 'finished typing');
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'No active session yet'));
     assert.ok(anyFrameIncludes(frames, 'No active session yet')); // no session exists in this test
   });
 });
@@ -1364,7 +1438,7 @@ test('/set: Escape cancels with no change', async () => {
     await submit(stdin, '/set');
     await tick(50);
     stdin.write(ESCAPE);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Set cancelled'));
 
     assert.ok(anyFrameIncludes(frames, 'Set cancelled'));
   });
@@ -1400,7 +1474,7 @@ test('/config opens a picker of /config-* commands; selecting one prefills the i
     const { stdin, frames, lastFrame } = await setup({ dir });
 
     await submit(stdin, '/config');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Choose a setting'));
     assert.ok(anyFrameIncludes(frames, 'Choose a setting'));
     assert.ok(anyFrameIncludes(frames, '/config-highlightcolor'));
 
@@ -1477,7 +1551,7 @@ test('/config-highlightcolor with no trusted project says so instead of writing 
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/config-highlightcolor #112233');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'No trusted project in this directory'));
 
     assert.ok(anyFrameIncludes(frames, 'No trusted project in this directory'));
   });
@@ -1553,7 +1627,7 @@ test('/set-sessionsToSave with no trusted project says so instead of writing any
     const { stdin, frames } = await setup({ dir });
 
     await submit(stdin, '/set-sessionsToSave 5');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'No trusted project in this directory'));
 
     assert.ok(anyFrameIncludes(frames, 'No trusted project in this directory'));
   });
@@ -1600,7 +1674,7 @@ test('Manual Mode (the default) prompts before write_file, and declining leaves 
     const { stdin, frames } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
 
     await submit(stdin, 'please write the file');
-    await tick(100);
+    await waitFor(() => anyFrameIncludes(frames, 'Allow write_file'));
 
     assert.ok(anyFrameIncludes(frames, 'Allow write_file'));
     stdin.write(ENTER); // ConfirmDialog defaults to "No"
@@ -1626,7 +1700,7 @@ test('Escape on a write_file confirmation stops the whole turn, not just that on
     await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
 
     stdin.write(ESCAPE);
-    await tick(150);
+    await waitFor(() => anyFrameIncludes(frames, 'Cancelled - your message is back in the input box'));
 
     assert.ok(anyFrameIncludes(frames, 'Cancelled - your message is back in the input box'));
     // The second confirm dialog must never appear - the whole turn stopped, not just call #1.
@@ -1660,6 +1734,38 @@ test('Manual Mode: confirming yes actually runs write_file', async () => {
   });
 });
 
+test('a big write_file approval dialog shows a short preview with the choices visible, and the FULL content is still what gets written', async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, 'big-file.txt');
+    const big = Array.from({ length: 300 }, (_, i) => 'const row' + i + ' = ' + i + ';').join('\n');
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new WriteFileProvider(targetPath, big) });
+    await submit(stdin, 'please write the big file');
+    await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
+    const dialog = lastFrame() ?? '';
+    assert.ok(dialog.includes('big-file.txt'));
+    assert.ok(dialog.includes('300 lines'));
+    assert.ok(dialog.includes('more lines'));
+    assert.ok(dialog.includes('const row0 ='));
+    assert.equal(dialog.includes('const row150 ='), false, 'the body of the file is not dumped into the dialog');
+    assert.ok(dialog.includes('No') && dialog.includes('Yes'), 'the choices are on screen');
+    const rows = dialog.split('\n');
+    const start = rows.findIndex((l) => l.includes('Allow write_file'));
+    const end = rows.findIndex((l, i) => i > start && l.includes('Yes'));
+    assert.ok(start >= 0 && end > start && end - start < 16, 'the dialog itself is a small block, not ' + (end - start) + ' rows');
+    await tick(100);
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(async () => {
+      try {
+        return (await readFile(targetPath, 'utf-8')) === big;
+      } catch {
+        return false;
+      }
+    }, 6000);
+  });
+});
+
 test('switching to Auto mid-turn (Tab) takes effect on the very next tool call, not just the next turn', async () => {
   // Real bug found via hands-on testing, 2026-09-26: in a long turn with several sequential tool
   // calls, switching to Auto partway through kept confirming every remaining call anyway, as if
@@ -1689,7 +1795,7 @@ test('switching to Auto mid-turn (Tab) takes effect on the very next tool call, 
     // always active regardless of what else is showing (App.tsx), so this is a real, reachable
     // sequence, not a contrived one.
     stdin.write(TAB);
-    await tick(100);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Auto'));
     assert.ok(anyFrameIncludes(frames, 'Mode set to Auto'));
 
     // Both calls now run with zero further confirmation - before either fix, this would hang here
@@ -1713,7 +1819,8 @@ test('Plan Mode blocks a real write_file call end-to-end - the file is never cre
     const { stdin, frames } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Accept Edits'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN);
     await tick(100);
     stdin.write(DOWN);
@@ -1721,11 +1828,11 @@ test('Plan Mode blocks a real write_file call end-to-end - the file is never cre
     stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan
     await tick(100);
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Plan'));
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan'));
 
     await submit(stdin, 'please write the file');
-    await tick(100);
+    await waitFor(() => anyFrameIncludes(frames, 'Blocked by the current mode'));
 
     assert.ok(anyFrameIncludes(frames, 'Blocked by the current mode'));
     await assert.rejects(() => readFile(targetPath, 'utf-8'));
@@ -1742,7 +1849,8 @@ test('Plan-Write mode allows write_file inside .o4c/plans/, end-to-end', async (
     });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Accept Edits'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN);
     await tick(100);
     stdin.write(DOWN);
@@ -1752,11 +1860,17 @@ test('Plan-Write mode allows write_file inside .o4c/plans/, end-to-end', async (
     stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan -> Plan-Write
     await tick(100);
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Plan-Write'));
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
 
     await submit(stdin, 'please write the plan');
-    await tick(100);
+    await waitFor(async () => {
+      try {
+        return (await readFile(targetPath, 'utf-8')) === 'hello';
+      } catch {
+        return false;
+      }
+    });
 
     assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
   });
@@ -1772,7 +1886,8 @@ test('Plan-Write mode still blocks write_file outside .o4c/plans/, end-to-end', 
     });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Accept Edits'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN);
     await tick(100);
     stdin.write(DOWN);
@@ -1782,11 +1897,11 @@ test('Plan-Write mode still blocks write_file outside .o4c/plans/, end-to-end', 
     stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan -> Plan-Write
     await tick(100);
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Plan-Write'));
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
 
     await submit(stdin, 'please write the file');
-    await tick(100);
+    await waitFor(() => anyFrameIncludes(frames, 'Blocked by the current mode'));
 
     assert.ok(anyFrameIncludes(frames, 'Blocked by the current mode'));
     await assert.rejects(() => readFile(targetPath, 'utf-8'));
@@ -1799,7 +1914,8 @@ test('the current mode is actually told to the model, not just enforced at the t
     const { stdin, frames } = await setup({ dir, provider, projectRoot: dir });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Accept Edits'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN);
     await tick(100);
     stdin.write(DOWN);
@@ -1807,7 +1923,7 @@ test('the current mode is actually told to the model, not just enforced at the t
     stdin.write(DOWN); // Manual -> Auto -> Accept Edits -> Plan
     await tick(100);
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Plan'));
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan'));
 
     await submit(stdin, 'hello');
@@ -1819,7 +1935,7 @@ test('the current mode is actually told to the model, not just enforced at the t
     // Switching mode again changes the very next request's instruction too - proves this is
     // computed fresh per-turn from live state, not captured once at mount.
     stdin.write(TAB);
-    await tick(200);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Plan-Write'));
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
 
     await submit(stdin, 'hello again');
@@ -1833,10 +1949,11 @@ test('the current mode is actually told to the model, not just enforced at the t
 test('Auto Mode runs write_file with no confirmation prompt at all', async () => {
   await withTempDir(async (dir) => {
     const targetPath = join(dir, 'auto.txt');
-    const { stdin, lastFrame } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Accept Edits'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN); // Manual -> Auto
     await tick(100);
     stdin.write(ENTER);
@@ -1856,19 +1973,24 @@ test('Accept Edits mode auto-runs write_file but still confirms run_shell', asyn
     const { stdin, frames } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Accept Edits'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN);
     await tick(100);
     stdin.write(DOWN); // Manual -> Auto -> Accept Edits
     await tick(100);
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Accept Edits'));
     assert.ok(anyFrameIncludes(frames, 'Mode set to Accept Edits'));
 
     await submit(stdin, 'please write the file');
-    await tick(100);
-
-    assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
+    await waitFor(async () => {
+      try {
+        return (await readFile(targetPath, 'utf-8')) === 'hello';
+      } catch {
+        return false;
+      }
+    });
   });
 });
 
@@ -1877,16 +1999,17 @@ test('Accept Edits mode still confirms run_shell even though write_file is autom
     const { stdin, frames } = await setup({ dir, provider: new RunShellProvider() });
 
     await submit(stdin, '/mode');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Accept Edits'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
     stdin.write(DOWN);
     await tick(100);
     stdin.write(DOWN);
     await tick(100);
     stdin.write(ENTER);
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Mode set to Accept Edits'));
 
     await submit(stdin, 'please run a command');
-    await tick(100);
+    await waitFor(() => anyFrameIncludes(frames, 'Allow run_shell'));
 
     assert.ok(anyFrameIncludes(frames, 'Allow run_shell'));
     // Answer "No" - denying is enough to prove the confirmation gate is real, and resolving it

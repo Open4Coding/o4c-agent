@@ -18,6 +18,24 @@ export function formatElapsed(ms: number): string {
   return `${seconds}s`;
 }
 
+/** The idle form of the clock: minutes only (`"<1m"` / `"31m"` / `"1h 9m"`). While nothing is
+ * running the footer only refreshes once a minute, so showing seconds would display a stale value
+ * that looks live. */
+export function formatElapsedCoarse(ms: number): string {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60_000));
+  if (totalMinutes < 1) return '<1m';
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+/** How often the footer clock re-renders: every second while a turn runs (seconds are shown and
+ * worth watching), once a minute at idle. Every re-render repaints the whole live frame, so a
+ * one-second tick on an idle screen was ~1 repaint/s forever. */
+export function elapsedTickMs(busy: boolean): number {
+  return busy ? 1000 : 60_000;
+}
+
 /** How many of `width` cells should render as "filled" - `fraction` clamped to [0, 1] so a token
  * estimate that overshoots a configured `contextWindow` (the chars/4 heuristic is approximate,
  * per `contextEntry.ts`'s own `estimateTokens`) never overflows the bar. Shared by

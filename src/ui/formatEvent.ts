@@ -2,6 +2,11 @@ import type { AgentEvent } from '../agent/loop.js';
 
 const PREVIEW_LENGTH = 200;
 
+/** A tool call's arguments are cut to this many characters wherever they are displayed: a
+ * `write_file` call carries the whole file, which is noise on screen and made committed blocks and
+ * frames enormous. The full input stays in the session file and the run logs. */
+export const TOOL_CALL_PREVIEW_CHARS = 300;
+
 function truncate(text: string): string {
   // Trailing whitespace/newlines are extremely common in real tool output (shell stdout/stderr,
   // file reads almost always end in "\n") - left in, Ink renders that as its own blank row
@@ -28,7 +33,9 @@ export function formatEvent(event: AgentEvent): string | null {
     return event.text ? `[think] ${truncate(event.text)}` : null;
   }
   if (event.type === 'tool_call') {
-    return `[tool] ${event.toolName}(${JSON.stringify(event.toolInput)})`;
+    const json = JSON.stringify(event.toolInput ?? {});
+    const shown = json.length > TOOL_CALL_PREVIEW_CHARS ? `${json.slice(0, TOOL_CALL_PREVIEW_CHARS)}...` : json;
+    return `[tool] ${event.toolName}(${shown})`;
   }
   if (event.type === 'tool_result') {
     return `[result] ${truncate(event.toolOutput ?? '')}`;

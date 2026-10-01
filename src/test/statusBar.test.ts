@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatTokenCount, formatElapsed, renderProgressBar, progressBarFilledCells } from '../ui/statusBar.js';
+import {
+  formatTokenCount,
+  formatElapsed,
+  formatElapsedCoarse,
+  elapsedTickMs,
+  renderProgressBar,
+  progressBarFilledCells,
+} from '../ui/statusBar.js';
 
 test('formatTokenCount leaves sub-1000 values as-is', () => {
   assert.equal(formatTokenCount(0), '0');
@@ -62,4 +69,17 @@ test('progressBarFilledCells shows an all-empty bar for a near-zero fraction, no
   // bar was rendered in one uniform bright color, making the empty cells look nearly as
   // prominent as filled ones even though the fill count itself was already correct (0).
   assert.equal(progressBarFilledCells(211 / 229376, 10), 0);
+});
+
+test('formatElapsedCoarse shows minutes only, for the idle clock', () => {
+  assert.equal(formatElapsedCoarse(0), '<1m');
+  assert.equal(formatElapsedCoarse(59_000), '<1m');
+  assert.equal(formatElapsedCoarse(60_000), '1m');
+  assert.equal(formatElapsedCoarse(31 * 60_000 + 57_000), '31m');
+  assert.equal(formatElapsedCoarse(69 * 60_000), '1h 9m');
+});
+
+test('the clock ticks every second while a turn runs and once a minute at idle', () => {
+  assert.equal(elapsedTickMs(true), 1000);
+  assert.equal(elapsedTickMs(false), 60_000);
 });

@@ -1,6 +1,8 @@
 import type { ContextEntry } from '../agent/contextEntry.js';
 import type { AgentEvent } from '../agent/loop.js';
-import { formatEvent } from './formatEvent.js';
+import { TOOL_CALL_PREVIEW_CHARS, formatEvent } from './formatEvent.js';
+
+export { TOOL_CALL_PREVIEW_CHARS };
 import type { Line } from './types.js';
 
 /** How many tool_call/tool_result events a turn shows before the rest collapse into one `[scan]`
@@ -16,7 +18,6 @@ export const MAX_VISIBLE_TOOL_EVENTS_PER_TURN = 10;
  * session file and the run logs. */
 export const THINK_PREVIEW_CHARS = 1500;
 export const NARRATION_PREVIEW_CHARS = 4000;
-export const TOOL_CALL_PREVIEW_CHARS = 300;
 
 function clip(text: string, max: number): string {
   const trimmed = text.replace(/\s+$/, '');
@@ -64,10 +65,7 @@ export function formatEntries(entries: readonly ContextEntry[], logHint = 'the r
   const pushToolLine = (event: AgentEvent): void => {
     toolEvents += 1;
     if (toolEvents <= MAX_VISIBLE_TOOL_EVENTS_PER_TURN) {
-      const text =
-        event.type === 'tool_call'
-          ? `[tool] ${event.toolName}(${clip(JSON.stringify(event.toolInput ?? {}), TOOL_CALL_PREVIEW_CHARS)})`
-          : formatEvent(event);
+      const text = formatEvent(event);
       if (text) lines.push({ kind: event.type === 'tool_call' ? 'tool_call' : 'tool_result', text });
       return;
     }
