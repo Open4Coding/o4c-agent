@@ -819,39 +819,13 @@ test('the cursor stays on its own (empty) line, not several rows away, when seve
   assert.ok(!highlighted[0].includes('original'), 'the highlight must not have jumped down to "original"');
 });
 
-test('while disabled (a turn running) the cursor stays solid and the box stops repainting on a blink timer', async () => {
-  const { frames } = render(React.createElement(InputBox, { disabled: true }));
-  await tick();
-  const before = frames.length;
-  await new Promise((resolve) => setTimeout(resolve, 1300)); // would have crossed two 530ms blink toggles
-  assert.equal(frames.length, before, 'no blink repaints while disabled');
-  assert.ok(frames[frames.length - 1].includes(CURSOR_ON), 'cursor still visible');
-});
-
-test('when enabled the cursor still blinks', async () => {
-  const { frames } = render(React.createElement(InputBox, {}));
-  await tick();
-  const before = frames.length;
-  await new Promise((resolve) => setTimeout(resolve, 1300));
-  assert.ok(frames.length > before, 'blink repaints while idle');
-});
-
-test('the cursor stops blinking (holds solid) once the blink window after the last keystroke has passed', async () => {
-  const { frames } = render(React.createElement(InputBox, { blinkWindowMs: 700 }));
-  await tick();
-  await new Promise((resolve) => setTimeout(resolve, 1600)); // past the window
-  const before = frames.length;
-  await new Promise((resolve) => setTimeout(resolve, 1600)); // would have toggled ~3 times
-  assert.equal(frames.length, before, 'no repaints while idle');
-  assert.ok(frames[frames.length - 1].includes(CURSOR_ON), 'the cursor is left solid and visible');
-});
-
-test('typing after the cursor has gone solid makes it blink again', async () => {
-  const { frames, stdin } = render(React.createElement(InputBox, { blinkWindowMs: 700 }));
-  await tick();
-  await new Promise((resolve) => setTimeout(resolve, 1600));
-  await type(stdin, 'a');
-  const before = frames.length;
-  await new Promise((resolve) => setTimeout(resolve, 650)); // one 530 ms toggle, inside the new window
-  assert.ok(frames.length > before, 'blinking resumed after the keystroke');
+test('the cursor never blinks: an idle input box does not repaint, enabled or disabled, and the cursor stays visible', async () => {
+  for (const disabled of [false, true]) {
+    const { frames } = render(React.createElement(InputBox, { disabled }));
+    await tick();
+    const before = frames.length;
+    await new Promise((resolve) => setTimeout(resolve, 1300)); // would have crossed two blink toggles
+    assert.equal(frames.length, before, 'no repaints while idle (disabled=' + disabled + ')');
+    assert.ok(frames[frames.length - 1].includes(CURSOR_ON), 'the cursor is visible (disabled=' + disabled + ')');
+  }
 });

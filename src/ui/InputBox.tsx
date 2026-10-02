@@ -5,9 +5,6 @@ import { theme } from './theme.js';
 
 export interface InputBoxProps {
   prompt?: string;
-  /** How long the cursor keeps blinking after the last edit or cursor move before it holds solid
-   * (default 10 s). Only the tests shorten it. */
-  blinkWindowMs?: number;
   disabled?: boolean;
   /** When false, this box stops reacting to keystrokes entirely - an overlay (ConfirmDialog,
    * SessionPicker) owns input instead. Default true. */
@@ -83,7 +80,6 @@ const CURSOR_BG_OFF = '\x1B[49m';
  */
 export function InputBox({
   prompt = '> ',
-  blinkWindowMs = 10_000,
   disabled = false,
   active = true,
   suppressNav = false,
@@ -98,48 +94,9 @@ export function InputBox({
   const [value, setValue] = useState('');
   const [cursor, setCursor] = useState(0);
 
-  // Blinking cursor: toggles visibility on a timer, matching a real terminal caret rather than a
-  // static highlight - only while this box is actually focused, since a blinking cursor on an
-  // unfocused box would be misleading (nothing typed here would go anywhere). Deliberately NOT
-  // gated on `disabled` too - real bug found via direct user report: while a turn is processing
-  // (disabled=true, text grayed out), this box still genuinely accepts keystrokes for queueing
-  // (see the "editing works even when disabled=true" test) - hiding the cursor made it look like
-  // typing wasn't going anywhere when it actually was. 530ms matches common terminal-emulator
-  // cursor blink rates (e.g. Windows Terminal's own default). Resets to visible on every focus
-  // change AND on every edit or cursor move (depends on `value`/`cursor` too, not just `active`) -
-  // matching real terminal behavior, where typing or moving the caret always shows it solid and
-  // restarts the blink phase rather than leaving it to coincidentally land visible or not. Also
-  // what makes this deterministic for tests that type/move and assert right after: without the
-  // reset, a test whose own real elapsed time happened to cross a 530ms boundary since mount could
-  // catch the cursor mid-"off" and see no highlight at all - a real flake found running this
-  // file's own suite, not hypothetical.
-  const [cursorVisible, setCursorVisible] = useState(true);
-  useEffect(() => {
-    if (!active) return;
-    setCursorVisible(true);
-    // While disabled (a turn is running) the cursor stays solid and visible - never hidden, so typing
-    // still looks alive - but does not blink: every blink tick repaints the whole live frame, and the
-    // box is the one thing animating alongside the spinner during a turn.
-    if (disabled) return;
-    const id = setInterval(() => setCursorVisible((v) => !v), 530);
-    // Blink only for a while after the last edit or cursor move (this effect re-runs on each, so the
-    // window restarts), then hold the cursor solid: a blinking cursor on an untouched screen repaints
-    // the whole frame twice a second, forever, for nobody. The next keystroke starts it blinking again.
-    const stopBlinking = setTimeout(() => {
-      clearInterval(id);
-      setCursorVisible(true);
-    }, blinkWindowMs);
-    stopBlinking.unref?.();
-    // A cosmetic blink must never be a reason the process won't exit - real bug found running
-    // this file's own test suite: none of these tests unmount their rendered InputBox, so a
-    // plain (ref'd) interval from every single test accumulated and kept the whole test process
-    // alive past every test actually finishing, hanging indefinitely instead of exiting.
-    id.unref?.();
-    return () => {
-      clearInterval(id);
-      clearTimeout(stopBlinking);
-    };
-  }, [active, disabled, value, cursor, blinkWindowMs]);
+  // The cursor is a solid highlighted cell and never blinks. A blink repainted the whole live frame twice a
+  // second (David could not see it blink in practice), while a solid cursor costs nothing and is always
+  // visible - including while a turn runs and this box only queues keystrokes, so typing never looks dead.
 
   useEffect(() => {
     onChange?.(value);
@@ -434,9 +391,9 @@ export function InputBox({
   // border row below instead of the content row. Concatenating first and giving <Text> a
   // single string child measures correctly. `\x1B[7m`/`\x1B[27m` are exactly what Ink's own
   // `inverse` prop emits, so this is visually identical to the original nested-<Text> version.
-  // Not gated on `disabled` - see the blink effect's own comment above for why: this box stays
-  // genuinely live (queueing) while disabled, so the cursor should too.
-  const cursorCell = !cursorVisible ? at : `${CURSOR_BG_ON}${at}${CURSOR_BG_OFF}`;
+  // Not gated on `disabled` either: this box stays genuinely live (queueing keystrokes) while a turn
+  // runs, so the cursor stays visible too.
+  const cursorCell = `${CURSOR_BG_ON}${at}${CURSOR_BG_OFF}`;
   const line = `${prompt}${before}${cursorCell}${after}`;
 
   return (
