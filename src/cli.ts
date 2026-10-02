@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { RESTART_EXIT_CODE, buildRestartArgs, runSupervisor, writeHandoff } from './restartHandoff.js';
 import { MODES, type Mode } from './ui/modePolicy.js';
+import { parseSessionView, type SessionView } from './ui/formatEntries.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { LocalProvider, fetchLocalModelId, fetchLocalContextWindow } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
@@ -139,6 +140,7 @@ async function runRepl(
   maxIterations: number | undefined,
   initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] },
   initialMode?: Mode,
+  sessionView?: SessionView,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -177,6 +179,7 @@ async function runRepl(
       initialSession,
       restart,
       initialMode,
+      sessionView,
       // Reload the session in a fresh process after a turn that thought or used tools, so the screen
       // is repainted from the full saved history (see App.tsx). O4C_NO_RELOAD=1 turns it off.
       reloadAfterTurn: process.env.O4C_NO_RELOAD !== '1',
@@ -327,6 +330,9 @@ program
     // UI already uses everywhere else.
     const highlightColor =
       typeof resolvedConfig.highlightColor === 'string' ? resolvedConfig.highlightColor : theme.accent;
+    // How much of a saved session the repaint shows (/set-sessionview, + -local-/-global-): re-read on
+    // every launch and restart like the other config keys, so a change needs no handoff argument.
+    const sessionView = parseSessionView(resolvedConfig.sessionView);
     // Opt-in only, same "no CLI flag, config.json only" shape as localApiKey/contextWindow above -
     // extended thinking has a real token-cost impact (thinking tokens are billed as output), so
     // this is never turned on silently. Anthropic-only; harmless (just unread) for other providers.
@@ -492,6 +498,7 @@ program
         maxIterations,
         initialSession,
         initialMode,
+        sessionView,
       );
       return;
     }

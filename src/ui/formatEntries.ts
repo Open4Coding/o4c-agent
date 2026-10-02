@@ -19,6 +19,28 @@ export const MAX_VISIBLE_TOOL_EVENTS_PER_TURN = 10;
 export const THINK_PREVIEW_CHARS = 1500;
 export const NARRATION_PREVIEW_CHARS = 4000;
 
+/** How much of a saved session the screen shows: `compact` is the shortened view above; `full` shows
+ * everything the session stored (the whole think, narration, tool arguments and results, and every
+ * tool event with no `[scan]` collapse). Chosen with /set-sessionview. */
+export type SessionView = 'compact' | 'full';
+
+/** Anything that is not exactly `'full'` is `'compact'`, so a bad or missing config value falls back
+ * to the original behaviour. */
+export function parseSessionView(value: unknown): SessionView {
+  return value === 'full' ? 'full' : 'compact';
+}
+
+/** Full view's one safety limit per entry: a multi-megabyte tool output must not flood the terminal. */
+export const FULL_ENTRY_CAP_CHARS = 200_000;
+
+function capFull(text: string): string {
+  const trimmed = text.replace(/\s+$/, '');
+  if (trimmed.length <= FULL_ENTRY_CAP_CHARS) return trimmed;
+  const hidden = trimmed.length - FULL_ENTRY_CAP_CHARS;
+  return `${trimmed.slice(0, FULL_ENTRY_CAP_CHARS)}
+... (+${hidden.toLocaleString('en-US')} more characters, full text in the session file)`;
+}
+
 function clip(text: string, max: number): string {
   const trimmed = text.replace(/\s+$/, '');
   return trimmed.length > max ? `${trimmed.slice(0, max)}...` : trimmed;
@@ -46,7 +68,12 @@ function toolCallEvent(entry: ContextEntry): AgentEvent {
  * `user_visible` rule in contextEntry.ts. `logHint` is what the `[scan]` line points at for the
  * full detail (the live display passes the run log's path; a resumed session has no such file).
  */
-export function formatEntries(entries: readonly ContextEntry[], logHint = 'the run log'): Line[] {
+export function formatEntries(
+  entries: readonly ContextEntry[],
+  logHint = 'the run log',
+  options: { view?: SessionView } = {},
+): Line[] {
+  const full = options.view === 'full';
   const lines: Line[] = [];
   let toolEvents = 0;
   let summary: Line | null = null;
@@ -64,6 +91,15 @@ export function formatEntries(entries: readonly ContextEntry[], logHint = 'the r
 
   const pushToolLine = (event: AgentEvent): void => {
     toolEvents += 1;
+    if (full) {
+      // Full view: every tool event, whole, no [scan] collapse.
+      const text =
+        event.type === 'tool_call'
+          ? `[tool] ${event.toolName}(${capFull(JSON.stringify(event.toolInput ?? {}))})`
+          : `[result] ${capFull(event.toolOutput ?? '')}`;
+      lines.push({ kind: event.type === 'tool_call' ? 'tool_call' : 'tool_result', text });
+      return;
+    }
     if (toolEvents <= MAX_VISIBLE_TOOL_EVENTS_PER_TURN) {
       const text = formatEvent(event);
       if (text) lines.push({ kind: event.type === 'tool_call' ? 'tool_call' : 'tool_result', text });
@@ -93,15 +129,17 @@ export function formatEntries(entries: readonly ContextEntry[], logHint = 'the r
 
     switch (entry.sub_type) {
       case 'think': {
-        if (entry.content) lines.push({ kind: 'system', text: `[think] ${clip(entry.content, THINK_PREVIEW_CHARS)}` });
+        if (entry.content) {
+          lines.push({ kind: 'system', text: `[think] ${full ? capFull(entry.content) : clip(entry.content, THINK_PREVIEW_CHARS)}` });
+        }
         break;
       }
       case 'response': {
         if (!entry.content) break;
         if (isFinalResponse(index)) {
-          lines.push({ kind: 'final', text: entry.content });
+          lines.push({ kind: 'final', text: full ? capFull(entry.content) : entry.content });
         } else {
-          lines.push({ kind: 'system', text: clip(entry.content, NARRATION_PREVIEW_CHARS) });
+          lines.push({ kind: 'system', text: full ? capFull(entry.content) : clip(entry.content, NARRATION_PREVIEW_CHARS) });
         }
         break;
       }

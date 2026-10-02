@@ -11,9 +11,11 @@ import {
 import {
   MAX_VISIBLE_TOOL_EVENTS_PER_TURN,
   NARRATION_PREVIEW_CHARS,
+  FULL_ENTRY_CAP_CHARS,
   THINK_PREVIEW_CHARS,
   TOOL_CALL_PREVIEW_CHARS,
   formatEntries,
+  parseSessionView,
 } from '../ui/formatEntries.js';
 
 function toolPair(id: string, name: string, output: string): ContextEntry[] {
@@ -98,4 +100,53 @@ test('formatEntries shows far more think/narration than the live preview, but st
   const call = lines.find((l) => l.kind === 'tool_call')!.text;
   assert.ok(call.startsWith('[tool] write_file(') && call.length < TOOL_CALL_PREVIEW_CHARS + 60);
   assert.ok(lines.find((l) => l.kind === 'tool_result')!.text.length < 230);
+});
+
+test('parseSessionView accepts only "full"; anything else (missing, wrong type, typo) is compact', () => {
+  assert.equal(parseSessionView('full'), 'full');
+  assert.equal(parseSessionView('compact'), 'compact');
+  for (const bad of [undefined, null, 'FULL', 'ful', 3, {}]) assert.equal(parseSessionView(bad), 'compact');
+});
+
+test('the full view shows the whole think, narration, tool arguments and result - nothing cut', () => {
+  const big = 'z'.repeat(9000);
+  const lines = formatEntries(
+    [
+      userInputEntry('q'),
+      aiThinkEntry(big),
+      aiResponseEntry(big),
+      aiToolCallEntry({ id: 't', name: 'write_file', input: { path: 'a.html', content: big } }, false),
+      aiToolCallResponseEntry('t', big, false),
+      aiResponseEntry('end'),
+    ],
+    'the run log',
+    { view: 'full' },
+  );
+  assert.ok(lines.find((l) => l.text.startsWith('[think]'))!.text.length > 9000);
+  assert.ok(lines.find((l) => l.kind === 'system' && l.text.startsWith('zzz'))!.text.length === 9000);
+  assert.ok(lines.find((l) => l.kind === 'tool_call')!.text.length > 9000);
+  assert.ok(lines.find((l) => l.kind === 'tool_result')!.text.length > 9000);
+});
+
+test('the full view shows every tool event instead of collapsing past the limit into [scan]', () => {
+  const entries = [userInputEntry('go')];
+  for (let i = 0; i < 12; i++) entries.push(...toolPair('t' + i, 'read_file', 'x'));
+  entries.push(aiResponseEntry('finished'));
+  const lines = formatEntries(entries, 'the run log', { view: 'full' });
+  assert.equal(lines.filter((l) => l.kind === 'tool_call' || l.kind === 'tool_result').length, 24);
+  assert.equal(lines.filter((l) => l.text.startsWith('[scan]')).length, 0);
+});
+
+test('the full view still has a safety cap per entry, with a note saying how much was left out', () => {
+  const huge = 'q'.repeat(FULL_ENTRY_CAP_CHARS + 5000);
+  const lines = formatEntries([userInputEntry('q'), aiThinkEntry(huge), aiResponseEntry('end')], 'the run log', { view: 'full' });
+  const think = lines.find((l) => l.text.startsWith('[think]'))!.text;
+  assert.ok(think.length < FULL_ENTRY_CAP_CHARS + 200);
+  assert.ok(think.includes('(+5,000 more characters, full text in the session file)'));
+});
+
+test('compact is the default and is unchanged by the new option', () => {
+  const entries = [userInputEntry('q'), aiThinkEntry('z'.repeat(9000)), aiResponseEntry('end')];
+  assert.deepEqual(formatEntries(entries), formatEntries(entries, 'the run log', { view: 'compact' }));
+  assert.ok(formatEntries(entries)[1].text.length < THINK_PREVIEW_CHARS + 20);
 });

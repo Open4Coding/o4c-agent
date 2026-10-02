@@ -8,6 +8,7 @@ import {
   commandForHelpTarget,
   KNOWN_COMMANDS,
   COMMANDS,
+  setCommands,
 } from '../ui/slashCommand.js';
 
 test('recognizes a bare slash command', () => {
@@ -50,6 +51,9 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/set-sessionsToSave',
     '/set-local-sessionsToSave',
     '/set-global-sessionsToSave',
+    '/set-sessionview',
+    '/set-local-sessionview',
+    '/set-global-sessionview',
     '/config',
     '/config-highlightcolor',
     '/config-local-highlightcolor',
@@ -103,4 +107,17 @@ test('commandForHelpTarget resolves a canonical name, an alias, and a hidden com
 
 test('commandForHelpTarget returns undefined for a name nothing registers', () => {
   assert.equal(commandForHelpTarget('bogus'), undefined);
+});
+
+test('the three /set-*sessionview commands are registered, hidden, reachable through /set, and listed by /help', () => {
+  const names = ['/set-sessionview', '/set-local-sessionview', '/set-global-sessionview'];
+  for (const name of names) {
+    const cmd = COMMANDS.find((c) => c.name === name);
+    assert.ok(cmd, name + ' is registered');
+    assert.equal(cmd!.hidden, true, name + ' is hidden from the bare "/" list');
+    assert.equal(cmd!.noArgs, true, name + ' takes no typed argument, so choosing it runs it');
+    assert.ok(setCommands().some((c) => c.name === name), name + ' appears in the /set picker');
+    assert.equal(commandForHelpTarget(name.slice(1))?.name, name, name + ' resolves for /help-<name>');
+  }
+  assert.equal(matchCommands('/set-sess').some((c) => names.includes(c.name)), false);
 });

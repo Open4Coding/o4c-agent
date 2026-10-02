@@ -5,6 +5,7 @@ import { SessionPicker } from './SessionPicker.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { CommandPalette } from './CommandPalette.js';
 import { ModePicker } from './ModePicker.js';
+import { SessionViewPicker, type SessionViewChoice } from './SessionViewPicker.js';
 import { CommandFamilyPicker } from './CommandFamilyPicker.js';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { plansDirFor } from '../session/projectContext.js';
@@ -13,7 +14,7 @@ import { formatError } from './formatError.js';
 import { formatConfirmMessage } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
 import { formatMessage } from './formatMessage.js';
-import { MAX_VISIBLE_TOOL_EVENTS_PER_TURN, formatEntries } from './formatEntries.js';
+import { MAX_VISIBLE_TOOL_EVENTS_PER_TURN, formatEntries, parseSessionView, type SessionView } from './formatEntries.js';
 import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
 import { parseOsArg } from './osKeyboardNotes.js';
 import { detectCurrentOs } from './platform.js';
@@ -76,6 +77,9 @@ export interface AppProps {
    * the saved entries (think blocks, narration, tool calls, answer) and starts with empty buffers.
    * Off by default so tests that count restarts are unaffected; cli.ts turns it on. */
   reloadAfterTurn?: boolean;
+  /** How much of a saved session the repaint shows (`compact` or `full`) - read from config.json at
+   * every launch/restart (`/set-sessionview`). Undefined means compact. */
+  sessionView?: SessionView;
   /** Undefined for an untrusted/no-project run. Only consulted to scope Plan-Write mode's
    * write_file exception to `.o4c/plans/` - see modePolicy.ts's classifyToolAccess. */
   projectRoot?: string;
@@ -285,6 +289,7 @@ export function App({
   restart,
   initialMode,
   reloadAfterTurn,
+  sessionView,
   projectRoot,
   model,
   provider,
@@ -339,7 +344,7 @@ export function App({
     // messages, which only hold what the model was sent; messages remain the fallback for callers
     // that only have those (tests, older handoffs).
     const restoredLines = initialSession.entries
-      ? formatEntries(initialSession.entries)
+      ? formatEntries(initialSession.entries, undefined, { view: sessionView })
       : initialSession.messages.flatMap(formatMessage);
     if (restoredLines.length > 0) blocks.push(makeBlock(id++, restoredLines));
     return initialTextWindow(blocks, liveRegionCapChars(), liveRegionCapRows(), liveRegionCols());
@@ -469,6 +474,14 @@ export function App({
   const [modePicker, setModePicker] = useState<{ resolve: (m: Mode | undefined) => void } | null>(
     null,
   );
+  // Same pending-Promise-resolver pattern again, for the /set-*sessionview picklist.
+  const [viewPicker, setViewPicker] = useState<{
+    scope: ConfigScope;
+    currentValue: SessionView;
+    storedValue: SessionView | undefined;
+    globalValue: SessionView;
+    resolve: (c: SessionViewChoice | undefined) => void;
+  } | null>(null);
 
   // Same pending-Promise-resolver pattern as resumePicker, for /set's picker. Resolves to the
   // chosen command, not a result of running it - /set itself decides what "chosen" means
@@ -709,8 +722,12 @@ export function App({
           const chosen = await new Promise<CommandInfo | undefined>((resolve) => {
             setSetPicker({ resolve });
           });
-          if (chosen) {
-            // Prefills rather than auto-submitting (unlike a plain palette selection) - every
+          if (chosen?.noArgs) {
+            // A command that opens its own picklist needs no argument, so run it (queued to run the
+            // moment this /set turn finishes) rather than leaving the user to press Enter again.
+            queuedInputsRef.current.push(chosen.name);
+          } else if (chosen) {
+            // Prefills rather than auto-submitting (unlike a plain palette selection) - every other
             // /set-* command takes an argument the picker itself has no way to collect.
             setPrefill({ token: nextPrefillToken++, text: `${chosen.name} ` });
           } else {
@@ -780,6 +797,73 @@ export function App({
           try {
             await sessionStore.rename(currentSessionIdRef.current, newName);
             pushBlock([{ kind: 'system', text: `Session renamed to "${newName}".` }]);
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
+        }
+      } else if (
+        commandName(input) === '/set-sessionview' ||
+        commandName(input) === '/set-local-sessionview' ||
+        commandName(input) === '/set-global-sessionview'
+      ) {
+        // How much of a saved session the screen shows after a reload or /resume (compact or full). A
+        // picklist, not a typed value: bare and -local- edit the project tier, -global- the machine
+        // tier. "default (global)" copies the current global value into the project (one-time copy).
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const name = commandName(input);
+        const scope: ConfigScope = name === '/set-global-sessionview' ? 'global' : 'local';
+        if (scope === 'local' && !configStore.hasScope('local')) {
+          pushBlock([
+            {
+              kind: 'error',
+              text: 'No trusted project in this directory - nothing to set a local value into. Trust this project first, or use /set-global-sessionview instead.',
+            },
+          ]);
+        } else {
+          try {
+            const globalConfig = await configStore.readScope('global');
+            const storedRaw =
+              scope === 'global' ? globalConfig.sessionView : (await configStore.readScope('local')).sessionView;
+            const globalValue = parseSessionView(globalConfig.sessionView);
+            const storedValue = storedRaw === undefined ? undefined : parseSessionView(storedRaw);
+            const chosen = await new Promise<SessionViewChoice | undefined>((resolve) => {
+              setViewPicker({
+                scope,
+                currentValue: storedValue ?? (scope === 'local' ? globalValue : 'compact'),
+                storedValue,
+                globalValue,
+                resolve,
+              });
+            });
+            if (!chosen) {
+              pushBlock([{ kind: 'system', text: 'Session view unchanged.' }]);
+            } else {
+              const value: SessionView = chosen === 'default' ? globalValue : chosen;
+              await configStore.set(scope, 'sessionView', value);
+              let note = '';
+              if (scope === 'global' && configStore.hasScope('local')) {
+                const localRaw = (await configStore.readScope('local')).sessionView;
+                if (localRaw !== undefined && parseSessionView(localRaw) !== value) {
+                  note = ` This project has its own value (${parseSessionView(localRaw)}), which still wins here.`;
+                }
+              }
+              const sessionId = currentSessionIdRef.current;
+              const repaintNow = Boolean(reloadAfterTurn && sessionId);
+              pushBlock([
+                {
+                  kind: 'system',
+                  text:
+                    `Session view set to ${value} (${scope}${chosen === 'default' ? ', copied from the global value' : ''}).${note}` +
+                    (repaintNow ? '' : ' It takes effect at the next reload or /resume.'),
+                },
+              ]);
+              if (repaintNow) {
+                // Reload into the same session so the screen repaints in the new view right away - the
+                // same handoff the end-of-turn reload uses, keeping the mode.
+                restart(sessionId, modeRef.current);
+                setTimeout(() => exit(), 0);
+              }
+            }
           } catch (err) {
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
@@ -1157,6 +1241,19 @@ export function App({
     setModePicker(null);
   }, [modePicker]);
 
+  const handleViewPickerSelect = useCallback(
+    (choice: SessionViewChoice) => {
+      viewPicker?.resolve(choice);
+      setViewPicker(null);
+    },
+    [viewPicker],
+  );
+
+  const handleViewPickerCancel = useCallback(() => {
+    viewPicker?.resolve(undefined);
+    setViewPicker(null);
+  }, [viewPicker]);
+
   const handleSetPickerSelect = useCallback(
     (command: CommandInfo) => {
       setPicker?.resolve(command);
@@ -1350,14 +1447,26 @@ export function App({
     !confirmDialog &&
     !resumePicker &&
     !modePicker &&
+    !viewPicker &&
     !setPicker &&
     !configPicker &&
     setFamilyMatches.length > 0;
 
-  const handleSetFamilySelect = useCallback((command: CommandInfo) => {
-    setInputValue(`${command.name} `);
-    setPrefill({ token: nextPrefillToken++, text: `${command.name} ` });
-  }, []);
+  const handleSetFamilySelect = useCallback(
+    (command: CommandInfo) => {
+      if (command.noArgs) {
+        // No argument to type: run it now, exactly like a plain palette selection.
+        setInputValue('');
+        setPaletteDismissed(false);
+        setInputResetToken((t) => t + 1);
+        handleSubmit(command.name);
+        return;
+      }
+      setInputValue(`${command.name} `);
+      setPrefill({ token: nextPrefillToken++, text: `${command.name} ` });
+    },
+    [handleSubmit],
+  );
 
   // Live version of what /config's own Enter-triggered picker does - identical shape to
   // composingSetFamily/setFamilyOpen above, just for "/config-" (#6). setFamilyOpen and
@@ -1374,6 +1483,7 @@ export function App({
     !confirmDialog &&
     !resumePicker &&
     !modePicker &&
+    !viewPicker &&
     !setPicker &&
     !configPicker &&
     configFamilyMatches.length > 0;
@@ -1389,6 +1499,7 @@ export function App({
     !confirmDialog &&
     !resumePicker &&
     !modePicker &&
+    !viewPicker &&
     !setPicker &&
     !configPicker &&
     !setFamilyOpen &&
@@ -1426,7 +1537,7 @@ export function App({
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !resumePicker && !modePicker && !setPicker && !configPicker}
+        active={!confirmDialog && !resumePicker && !modePicker && !viewPicker && !setPicker && !configPicker}
         suppressNav={paletteOpen || setFamilyOpen || configFamilyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
@@ -1460,6 +1571,16 @@ export function App({
           currentMode={mode}
           onSelect={handleModePickerSelect}
           onCancel={handleModePickerCancel}
+          highlightColor={highlightColor}
+        />
+      ) : viewPicker ? (
+        <SessionViewPicker
+          scope={viewPicker.scope === 'global' ? 'global' : 'local'}
+          currentValue={viewPicker.currentValue}
+          storedValue={viewPicker.storedValue}
+          globalValue={viewPicker.globalValue}
+          onSelect={handleViewPickerSelect}
+          onCancel={handleViewPickerCancel}
           highlightColor={highlightColor}
         />
       ) : setPicker ? (

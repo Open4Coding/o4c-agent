@@ -8,6 +8,10 @@ export interface CommandInfo {
    * picker (`/set` for every `/set-*`, `/config` for every `/config-*`). See docs/plans/
    * 0001.FrontEndIDEChanges.plan.md item #1. */
   hidden?: boolean;
+  /** The command takes no typed argument - it opens its own picklist (or acts at once). Choosing it
+   * from the `/set` or `/set-` pickers runs it directly; every other `/set-*` command takes an argument
+   * the picker cannot collect, so choosing one only prefills the input box. */
+  noArgs?: boolean;
 }
 
 // Single source of truth for the front end's own commands, used by both the "/" command palette
@@ -62,6 +66,27 @@ export const COMMANDS: CommandInfo[] = [
     name: '/set-global-sessionsToSave',
     description: "Set how many sessions /resume keeps for this machine's global default (~/.o4c/config.json).",
     hidden: true,
+  },
+  // How much of a saved session the screen shows after a reload or /resume - a picklist (compact /
+  // full / default), same local/global naming convention as the trio above.
+  {
+    name: '/set-sessionview',
+    description:
+      'Pick compact or full session view for this project, or copy the global choice.',
+    hidden: true,
+    noArgs: true,
+  },
+  {
+    name: '/set-local-sessionview',
+    description: 'Same as /set-sessionview - explicit alias for the same project-shared tier.',
+    hidden: true,
+    noArgs: true,
+  },
+  {
+    name: '/set-global-sessionview',
+    description: "Pick compact or full session view as this machine's global default.",
+    hidden: true,
+    noArgs: true,
   },
   {
     name: '/config',

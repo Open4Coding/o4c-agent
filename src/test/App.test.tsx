@@ -23,6 +23,7 @@ import {
 } from '../agent/contextEntry.js';
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import type { Mode } from '../ui/modePolicy.js';
+import type { SessionView } from '../ui/formatEntries.js';
 
 // Simulates a turn that never comes back (a hung/runaway local-model generation) so tests can
 // verify /exit isn't stuck waiting behind it in the FIFO queue.
@@ -313,6 +314,7 @@ async function setup(opts: {
   // end-of-turn session reload.
   reloadAfterTurn?: boolean;
   initialMode?: Mode;
+  sessionView?: SessionView;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
@@ -343,6 +345,7 @@ async function setup(opts: {
       configGlobalDir: opts.configGlobalDir,
       reloadAfterTurn: opts.reloadAfterTurn,
       initialMode: opts.initialMode,
+      sessionView: opts.sessionView,
     }),
   );
   liveInstances.push(instance);
@@ -1665,6 +1668,187 @@ test('/set-global-sessionsToSave writes only the global scope, isolated from the
     assert.equal((await configStore.readScope('global')).sessionsToSave, 3);
     // The project-shared (local) scope is untouched.
     assert.equal((await configStore.readScope('local')).sessionsToSave, undefined);
+  });
+});
+
+// ---- /set-sessionview, /set-local-sessionview, /set-global-sessionview (a picklist) ----
+
+async function openViewPicker(
+  stdin: { write: (data: string) => void },
+  frames: string[],
+  command: string,
+): Promise<void> {
+  await submit(stdin, command);
+  await waitFor(() => anyFrameIncludes(frames, 'Choose the session view'));
+  await tick(150); // the picker's key handler registers just after its first frame paints
+}
+
+test('/set-sessionview opens a picklist with default (global), compact and full; Esc leaves everything unchanged', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await openViewPicker(stdin, frames, '/set-sessionview');
+    assert.ok(anyFrameIncludes(frames, 'default (global)'));
+    assert.ok(anyFrameIncludes(frames, 'compact'));
+    assert.ok(anyFrameIncludes(frames, 'full'));
+
+    stdin.write(ESCAPE);
+    await waitFor(() => anyFrameIncludes(frames, 'Session view unchanged.'));
+    assert.equal((await new ConfigStore(dir, configGlobalDir).readScope('local')).sessionView, undefined);
+    assert.equal((await new ConfigStore(dir, configGlobalDir).readScope('global')).sessionView, undefined);
+  });
+});
+
+test('/set-local-sessionview choosing full writes only the project tier and says it applies at the next reload when reloads are off', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, frames, restartCalls } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await openViewPicker(stdin, frames, '/set-local-sessionview');
+    stdin.write(DOWN); // default (global) -> compact
+    await tick(100);
+    stdin.write(DOWN); // -> full
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'Session view set to full (local).'));
+    assert.ok(anyFrameIncludes(frames, 'takes effect at the next reload or /resume'));
+    const store = new ConfigStore(dir, configGlobalDir);
+    assert.equal((await store.readScope('local')).sessionView, 'full');
+    assert.equal((await store.readScope('global')).sessionView, undefined);
+    assert.deepEqual(restartCalls, []); // reloads are off in this test
+  });
+});
+
+test('default (global) copies the current global value into the project', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    await new ConfigStore(dir, configGlobalDir).set('global', 'sessionView', 'full');
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await openViewPicker(stdin, frames, '/set-sessionview'); // opens on default (global): no project value yet
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'Session view set to full (local, copied from the global value).'));
+    assert.equal((await new ConfigStore(dir, configGlobalDir).readScope('local')).sessionView, 'full');
+  });
+});
+
+test('default (global) with no global value copies compact', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await openViewPicker(stdin, frames, '/set-sessionview');
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'Session view set to compact (local, copied from the global value).'));
+    assert.equal((await new ConfigStore(dir, configGlobalDir).readScope('local')).sessionView, 'compact');
+  });
+});
+
+test('/set-global-sessionview offers only compact and full and writes only the global tier', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, frames, lastFrame } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await openViewPicker(stdin, frames, '/set-global-sessionview');
+    assert.equal((lastFrame() ?? '').includes('default (global) '), false, 'no default row on the global picker');
+    stdin.write(DOWN); // compact -> full
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'Session view set to full (global).'));
+    const store = new ConfigStore(dir, configGlobalDir);
+    assert.equal((await store.readScope('global')).sessionView, 'full');
+    assert.equal((await store.readScope('local')).sessionView, undefined);
+  });
+});
+
+test('a global choice mentions a project value that still wins', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    await new ConfigStore(dir, configGlobalDir).set('local', 'sessionView', 'compact');
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await openViewPicker(stdin, frames, '/set-global-sessionview');
+    stdin.write(DOWN); // -> full
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'This project has its own value (compact), which still wins here.'));
+  });
+});
+
+test('/set-sessionview with no trusted project says so instead of opening a picker', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir }); // no projectRoot, same as an untrusted run
+    await submit(stdin, '/set-sessionview');
+    await waitFor(() => anyFrameIncludes(frames, 'No trusted project in this directory'));
+    assert.equal(anyFrameIncludes(frames, 'Choose the session view'), false);
+  });
+});
+
+test('a saved view choice reloads into the same session when reloads are on, keeping the mode', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const plain: LLMProvider = {
+      name: 'plain-reply-test',
+      async complete(): Promise<CompletionResponse> {
+        return { content: 'just chatting, no tools', toolCalls: [], stopReason: 'end_turn' };
+      },
+    };
+    const { stdin, frames, store, restartCalls, restartModes } = await setup({
+      dir,
+      projectRoot: dir,
+      configGlobalDir,
+      provider: plain,
+      reloadAfterTurn: true,
+      initialMode: 'auto',
+    });
+    await submit(stdin, 'hello there');
+    await waitFor(() => anyFrameIncludes(frames, 'just chatting, no tools'));
+    await waitFor(async () => (await store.readManifest()).length > 0);
+    const id = (await store.readManifest())[0].id;
+
+    await openViewPicker(stdin, frames, '/set-sessionview');
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN); // -> full
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => restartCalls.length > 0);
+    assert.deepEqual(restartCalls, [id]);
+    assert.deepEqual(restartModes, ['auto']);
+    assert.equal(anyFrameIncludes(frames, 'takes effect at the next reload'), false);
+  });
+});
+
+test('the configured view decides how a resumed session is repainted: full shows the whole think, compact cuts it', async () => {
+  await withTempDir(async (dir) => {
+    const seedStore = new SessionStore(dir);
+    const longThink = 'z'.repeat(3000) + ' tailmarker';
+    const seeded: ContextEntry[] = [userInputEntry('think hard'), aiThinkEntry(longThink), aiResponseEntry('done')];
+    const id = await seedStore.save(seeded);
+    const data = await seedStore.load(id);
+    assert.ok(data);
+    const initial = { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries), entries: data!.entries };
+
+    const full = await setup({ dir, initialSession: initial, sessionView: 'full' });
+    await waitFor(() => anyFrameIncludes(full.frames, '[think]'));
+    assert.ok(anyFrameIncludes(full.frames, 'tailmarker'), 'full shows the end of the think');
+
+    const compact = await setup({ dir, initialSession: initial, sessionView: 'compact' });
+    await waitFor(() => anyFrameIncludes(compact.frames, '[think]'));
+    assert.equal(anyFrameIncludes(compact.frames, 'tailmarker'), false, 'compact cuts it');
+  });
+});
+
+test('choosing /set-sessionview from the /set picker opens its picklist straight away instead of prefilling the input', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir: join(dir, 'fake-global') });
+    await submit(stdin, '/set');
+    await waitFor(() => anyFrameIncludes(frames, 'Choose a setting'));
+    await tick(150); // the picker's key handler registers just after its first frame paints
+    for (let i = 0; i < 4; i++) {
+      // /set-sessionname, /set-sessionsToSave, -local-, -global- ... then /set-sessionview
+      stdin.write(DOWN);
+      await tick(100);
+    }
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'Choose the session view'));
+    stdin.write(ESCAPE);
+    await waitFor(() => anyFrameIncludes(frames, 'Session view unchanged.'));
   });
 });
 
