@@ -46,12 +46,12 @@ export function SessionPicker({ sessions, onSelect, onCancel, highlightColor }: 
       title="Resume a session (↑/↓ to choose, Enter to resume, Esc to cancel):"
       maxVisible={20}
       borderColor={highlightColor}
+      markerColor={(_, selected) => (selected ? highlightColor : undefined)}
       onSelect={(s) => onSelect(s.id)}
       onCancel={onCancel}
       emptyMessage="No saved sessions to resume."
       renderItem={(s, selected) => (
         <Text color={selected ? highlightColor : undefined} inverse={selected}>
-          {selected ? '> ' : '  '}
           {sortableTimestamp(s.updatedAt)} — {relativeTime(s.updatedAt)} — {s.title} (
           {s.messageCount} messages)
         </Text>

@@ -23,12 +23,12 @@ export function ModePicker({ currentMode, onSelect, onCancel, highlightColor }: 
       getKey={(m) => m.mode}
       title="Choose a mode (↑/↓ to choose, Enter to select, Esc to cancel):"
       initialIndex={currentIndex >= 0 ? currentIndex : 0}
+      markerColor={(m) => m.color}
       borderColor={highlightColor}
       onSelect={(m) => onSelect(m.mode)}
       onCancel={onCancel}
       renderItem={(m, selected) => (
         <Text color={m.color} inverse={selected}>
-          {selected ? '> ' : '  '}
           {m.label} — {m.description}
           {m.mode === currentMode ? ' (current)' : ''}
         </Text>

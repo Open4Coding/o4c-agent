@@ -38,7 +38,6 @@ export function CommandFamilyPicker({
       onCancel={onCancel}
       renderItem={(c, selected) => (
         <Text inverse={selected}>
-          {selected ? '> ' : '  '}
           {c.name} — {c.description}
         </Text>
       )}

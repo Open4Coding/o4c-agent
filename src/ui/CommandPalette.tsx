@@ -25,13 +25,13 @@ export function CommandPalette({ commands, onSelect, onCancel, highlightColor }:
       getKey={(c) => c.name}
       maxVisible={20}
       borderColor={highlightColor}
+      markerColor={(_, selected) => (selected ? highlightColor : undefined)}
       onSelect={onSelect}
       onCancel={onCancel}
       renderItem={(c, selected) => {
         const names = [c.name, ...(c.aliases ?? [])].join(', ');
         return (
           <Text color={selected ? highlightColor : undefined} inverse={selected}>
-            {selected ? '> ' : '  '}
             {names} — {c.description}
           </Text>
         );

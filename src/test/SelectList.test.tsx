@@ -117,3 +117,41 @@ test('selection resets to the top when the item set changes (e.g. a live filter 
   await press(instance.stdin, ENTER);
   assert.equal(selected, 'only-one');
 });
+
+test('a long row wraps with its continuation lines hanging 2 cells in, under the first character of the text - never back under the marker', async () => {
+  const long = Array.from({ length: 60 }, (_, i) => 'word' + i).join(' ');
+  const { lastFrame } = render(
+    React.createElement(SelectList, {
+      items: [long, 'a short row'],
+      getKey: (s: string) => s.slice(0, 10) + s.length,
+      renderItem: (s: string) => React.createElement(Text, null, s),
+      onSelect: () => {},
+    }),
+  );
+  for (let i = 0; i < 40 && !(lastFrame() ?? '').includes('word59'); i++) await tick();
+  const rowLines = (lastFrame() ?? '').split('\n').filter((l) => /word[0-9]/.test(l));
+  assert.ok(rowLines.length >= 3, 'the long row wrapped over several lines, saw ' + rowLines.length);
+  assert.ok(/^.{1} > word0 /.test(rowLines[0]), 'the first line starts with the marker: ' + JSON.stringify(rowLines[0].slice(0, 14)));
+  for (const line of rowLines.slice(1)) {
+    // Border, one cell of padding and the 2-cell marker column = 3 cells before any text; a terminal that keeps the
+    // space at the wrap point puts the text one cell further in. Never fewer (that would be back under the marker).
+    assert.ok(/^.{1} {3,}word[0-9]/.test(line), 'a continuation line hangs under the text: ' + JSON.stringify(line.slice(0, 14)));
+  }
+});
+
+test('the marker keeps its own color when markerColor is given, and unselected rows keep a blank marker column', async () => {
+  const { lastFrame } = render(
+    React.createElement(SelectList, {
+      items: ['alpha', 'beta'],
+      getKey: (s: string) => s,
+      renderItem: (s: string) => React.createElement(Text, null, s),
+      markerColor: () => 'red',
+      onSelect: () => {},
+    }),
+  );
+  for (let i = 0; i < 40 && !(lastFrame() ?? '').includes('beta'); i++) await tick();
+  const frame = lastFrame() ?? '';
+  assert.ok(/> alpha/.test(frame));
+  assert.ok(/ {3}beta/.test(frame), 'the unselected row is indented to the same text column');
+});
+
