@@ -474,6 +474,11 @@ export function App({
   const [modePicker, setModePicker] = useState<{ resolve: (m: Mode | undefined) => void } | null>(
     null,
   );
+  // True while the "Stop now?" check is showing: Esc during a running turn asks before it stops anything.
+  const [stopConfirm, setStopConfirm] = useState(false);
+  // The turn that was running when the check opened - Yes only stops THAT turn, never a later one a queued
+  // message started while the box sat open.
+  const stopTargetRef = useRef<AbortController | null>(null);
   // Same pending-Promise-resolver pattern again, for the /set-*sessionview picklist.
   const [viewPicker, setViewPicker] = useState<{
     scope: ConfigScope;
@@ -1315,9 +1320,32 @@ export function App({
   // non-null for the duration of processTurn's loop.run() call, see its own comment). Pickers
   // (SessionPicker, ModePicker, CommandFamilyPicker, CommandPalette) handle Escape themselves via
   // their own onCancel, independently of this.
-  const handleEscape = useCallback(() => {
+  const abortTurn = useCallback(() => {
     abortControllerRef.current?.abort();
   }, []);
+
+  // Esc in the input box while a turn is running does NOT stop it at once any more: it opens a "Stop now?" check
+  // (No selected by default) because an accidental Esc used to kill a long-running turn outright. The approval
+  // dialog keeps its own Esc (decline AND stop - see ConfirmDialog's onEscape), since that box is already a Yes/No.
+  const handleEscape = useCallback(() => {
+    if (!abortControllerRef.current) return;
+    stopTargetRef.current = abortControllerRef.current;
+    setStopConfirm(true);
+  }, []);
+
+  const handleStopResolve = useCallback(
+    (yes: boolean) => {
+      setStopConfirm(false);
+      if (yes && stopTargetRef.current && abortControllerRef.current === stopTargetRef.current) abortTurn();
+      stopTargetRef.current = null;
+    },
+    [abortTurn],
+  );
+
+  // The check has nothing left to stop once the turn is over: close it so a stale box never lingers.
+  useEffect(() => {
+    if (!isProcessing) setStopConfirm(false);
+  }, [isProcessing]);
 
   // /resume is an escape hatch (e.g. after the screen clears or a turn wedges), so it must never sit
   // behind the FIFO queue like an ordinary message: queued behind a turn still marked busy it did
@@ -1448,6 +1476,7 @@ export function App({
     !resumePicker &&
     !modePicker &&
     !viewPicker &&
+    !stopConfirm &&
     !setPicker &&
     !configPicker &&
     setFamilyMatches.length > 0;
@@ -1484,6 +1513,7 @@ export function App({
     !resumePicker &&
     !modePicker &&
     !viewPicker &&
+    !stopConfirm &&
     !setPicker &&
     !configPicker &&
     configFamilyMatches.length > 0;
@@ -1500,6 +1530,7 @@ export function App({
     !resumePicker &&
     !modePicker &&
     !viewPicker &&
+    !stopConfirm &&
     !setPicker &&
     !configPicker &&
     !setFamilyOpen &&
@@ -1537,7 +1568,7 @@ export function App({
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !resumePicker && !modePicker && !viewPicker && !setPicker && !configPicker}
+        active={!confirmDialog && !stopConfirm && !resumePicker && !modePicker && !viewPicker && !setPicker && !configPicker}
         suppressNav={paletteOpen || setFamilyOpen || configFamilyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
@@ -1551,13 +1582,20 @@ export function App({
           under the input box - previously two separate lines (StatusBar above the input box,
           "Mode: X" below it). */}
       <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
-      <Text color={theme.border}>Esc interrupt · type to queue · Ctrl+C reset</Text>
+      <Text color={theme.border}>Esc stop (asks first) · type to queue · Ctrl+C reset</Text>
       {confirmDialog ? (
         <ConfirmDialog
           key={confirmDialog.id}
           message={confirmDialog.message}
           onResolve={handleConfirmResolve}
-          onEscape={handleEscape}
+          onEscape={abortTurn}
+        />
+      ) : stopConfirm ? (
+        <ConfirmDialog
+          key="stop-confirm"
+          message="Stop now?"
+          yesNote="this stops the current process"
+          onResolve={handleStopResolve}
         />
       ) : resumePicker ? (
         <SessionPicker

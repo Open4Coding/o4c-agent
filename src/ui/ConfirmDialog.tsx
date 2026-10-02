@@ -3,6 +3,9 @@ import { Box, Text, useInput } from 'ink';
 
 export interface ConfirmDialogProps {
   message: string;
+  /** Shown after "Yes" (e.g. `this stops the current process`) so what Yes does is spelled out next to the
+   * choice itself. */
+  yesNote?: string;
   onResolve: (confirmed: boolean) => void;
   /** Real bug found via hands-on testing, 2026-09-26: with only `onResolve`, Escape and "arrow to
    * No, then Enter" were indistinguishable - both just declined the one call in front of you,
@@ -23,7 +26,7 @@ export interface ConfirmDialogProps {
  * cancelling choice, never the destructive one. Esc also cancels - and additionally signals
  * `onEscape`, since it means "stop," not just "not this one" (see that prop's own comment).
  */
-export function ConfirmDialog({ message, onResolve, onEscape }: ConfirmDialogProps) {
+export function ConfirmDialog({ message, yesNote, onResolve, onEscape }: ConfirmDialogProps) {
   const [selected, setSelected] = useState<'no' | 'yes'>('no');
 
   useInput((_input, key) => {
@@ -46,7 +49,7 @@ export function ConfirmDialog({ message, onResolve, onEscape }: ConfirmDialogPro
         {selected === 'no' ? '> ' : '  '}No
       </Text>
       <Text color={selected === 'yes' ? 'cyan' : undefined} inverse={selected === 'yes'}>
-        {selected === 'yes' ? '> ' : '  '}Yes
+        {selected === 'yes' ? '> ' : '  '}Yes{yesNote ? ` — ${yesNote}` : ''}
       </Text>
     </Box>
   );

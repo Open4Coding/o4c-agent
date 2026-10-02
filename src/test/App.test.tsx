@@ -446,10 +446,17 @@ test('Escape while thinking cancels the turn and restores its prompt to the inpu
     assert.ok(anyFrameIncludes(frames, 'Thinking...'));
 
     stdin.write(ESCAPE);
+    // Esc asks first now (No is the default); stopping takes an explicit Yes.
+    await waitFor(() => anyFrameIncludes(frames, 'Stop now?'));
+    await tick(150); // the dialog's key handler registers just after its first frame paints
+    stdin.write(DOWN); // No -> Yes
+    await tick(100);
+    stdin.write(ENTER);
     await waitFor(() => anyFrameIncludes(frames, 'Cancelled'));
 
     const last = frames[frames.length - 1] ?? '';
     assert.equal(last.includes('Thinking...'), false);
+    assert.equal(last.includes('Stop now?'), false, 'the check is gone once it has been answered');
     assert.ok(last.includes('this will hang until cancelled'));
 
     // Not just cosmetic text left sitting in the box - confirm the app is genuinely back to a
@@ -459,6 +466,101 @@ test('Escape while thinking cancels the turn and restores its prompt to the inpu
     stdin.write(ENTER);
     await tick(50);
     assert.ok(frames.slice(framesBeforeResubmit).some((f) => f.includes('Thinking...')));
+  });
+});
+
+// ---- Esc during a running turn asks "Stop now?" first (No by default) ----
+
+// Settles only when the test calls release(): lets a test keep a turn running, then let it finish on cue.
+class ReleasableProvider implements LLMProvider {
+  readonly name = 'releasable-test';
+  private release!: () => void;
+  private gate: Promise<void>;
+  constructor() {
+    this.gate = new Promise((resolve) => {
+      this.release = resolve;
+    });
+  }
+  finish(): void {
+    this.release();
+  }
+  async complete(_request: CompletionRequest): Promise<CompletionResponse> {
+    await this.gate;
+    return { content: 'finished normally', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
+test('Esc during a running turn opens a Stop now? check with No selected and the consequence spelled out next to Yes', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new HangingProvider() });
+    await submit(stdin, 'this keeps running');
+    await waitFor(() => anyFrameIncludes(frames, 'Thinking...'));
+
+    stdin.write(ESCAPE);
+    await waitFor(() => (lastFrame() ?? '').includes('Stop now?'));
+    const box = lastFrame() ?? '';
+    assert.ok(/> No/.test(box), 'No is the selected default');
+    assert.ok(/ Yes . this stops the current process/.test(box), 'Yes sits under No with its consequence beside it');
+    assert.ok(box.indexOf('No') < box.indexOf('Yes'), 'Yes is underneath No');
+    assert.equal(anyFrameIncludes(frames, 'Cancelled'), false, 'nothing has been stopped yet');
+  });
+});
+
+test('Enter on the default No closes the check and the turn keeps running', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new HangingProvider() });
+    await submit(stdin, 'this keeps running');
+    await waitFor(() => anyFrameIncludes(frames, 'Thinking...'));
+    stdin.write(ESCAPE);
+    await waitFor(() => (lastFrame() ?? '').includes('Stop now?'));
+    await tick(150);
+
+    stdin.write(ENTER); // No is the default
+    await waitFor(() => !(lastFrame() ?? '').includes('Stop now?'));
+    assert.ok((lastFrame() ?? '').includes('Thinking...'), 'still running');
+    assert.equal(anyFrameIncludes(frames, 'Cancelled'), false);
+  });
+});
+
+test('Esc inside the check closes it as a No - a second Esc never stops the turn', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new HangingProvider() });
+    await submit(stdin, 'this keeps running');
+    await waitFor(() => anyFrameIncludes(frames, 'Thinking...'));
+    stdin.write(ESCAPE);
+    await waitFor(() => (lastFrame() ?? '').includes('Stop now?'));
+    await tick(150);
+
+    stdin.write(ESCAPE);
+    await waitFor(() => !(lastFrame() ?? '').includes('Stop now?'));
+    await tick(200);
+    assert.ok((lastFrame() ?? '').includes('Thinking...'), 'still running after the second Esc');
+    assert.equal(anyFrameIncludes(frames, 'Cancelled'), false);
+  });
+});
+
+test('the check closes itself if the turn finishes while it is open, and nothing is stopped', async () => {
+  await withTempDir(async (dir) => {
+    const provider = new ReleasableProvider();
+    const { stdin, frames, lastFrame } = await setup({ dir, provider });
+    await submit(stdin, 'finishes soon');
+    await waitFor(() => anyFrameIncludes(frames, 'Thinking...'));
+    stdin.write(ESCAPE);
+    await waitFor(() => (lastFrame() ?? '').includes('Stop now?'));
+
+    provider.finish();
+    await waitFor(() => anyFrameIncludes(frames, 'finished normally'));
+    await waitFor(() => !(lastFrame() ?? '').includes('Stop now?'));
+    assert.equal(anyFrameIncludes(frames, 'Cancelled'), false);
+  });
+});
+
+test('Esc with nothing running does nothing - no check appears', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+    stdin.write(ESCAPE);
+    await tick(400);
+    assert.equal((lastFrame() ?? '').includes('Stop now?'), false);
   });
 });
 
