@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
-import { SelectList } from '../ui/SelectList.js';
+import { CONTINUATION_INDENT, MARKER_WIDTH, SelectList, wrapRow } from '../ui/SelectList.js';
 
 const ESC = String.fromCharCode(27);
 const ENTER = String.fromCharCode(13);
@@ -39,7 +39,7 @@ function renderList(list: string[], onSelect: (item: string) => void, onCancel?:
       maxVisible: 20,
       onSelect,
       onCancel,
-      renderItem: (item: string, selected: boolean) => <Text>{selected ? `> ${item}` : `  ${item}`}</Text>,
+      rowText: (item: string) => item,
     }),
   );
 }
@@ -110,7 +110,7 @@ test('selection resets to the top when the item set changes (e.g. a live filter 
       onSelect: (item: string) => {
         selected = item;
       },
-      renderItem: (item: string, sel: boolean) => <Text>{sel ? `> ${item}` : `  ${item}`}</Text>,
+      rowText: (item: string) => item,
     }),
   );
   await tick();
@@ -118,34 +118,38 @@ test('selection resets to the top when the item set changes (e.g. a live filter 
   assert.equal(selected, 'only-one');
 });
 
-test('a long row wraps with its continuation lines hanging 2 cells in, under the first character of the text - never back under the marker', async () => {
+test('a long row wraps with its continuation lines starting exactly 4 cells in - 2 further than the first line\'s text', async () => {
   const long = Array.from({ length: 60 }, (_, i) => 'word' + i).join(' ');
   const { lastFrame } = render(
     React.createElement(SelectList, {
       items: [long, 'a short row'],
       getKey: (s: string) => s.slice(0, 10) + s.length,
-      renderItem: (s: string) => React.createElement(Text, null, s),
+      rowText: (s: string) => s,
       onSelect: () => {},
     }),
   );
   for (let i = 0; i < 40 && !(lastFrame() ?? '').includes('word59'); i++) await tick();
   const rowLines = (lastFrame() ?? '').split('\n').filter((l) => /word[0-9]/.test(l));
   assert.ok(rowLines.length >= 3, 'the long row wrapped over several lines, saw ' + rowLines.length);
-  assert.ok(/^.{1} > word0 /.test(rowLines[0]), 'the first line starts with the marker: ' + JSON.stringify(rowLines[0].slice(0, 14)));
+  // Left border, then one cell of padding, then the row's own columns.
+  assert.ok(/^.{1} > word0 /.test(rowLines[0]), 'the first line is marker then text: ' + JSON.stringify(rowLines[0].slice(0, 14)));
   for (const line of rowLines.slice(1)) {
-    // Border, one cell of padding and the 2-cell marker column = 3 cells before any text; a terminal that keeps the
-    // space at the wrap point puts the text one cell further in. Never fewer (that would be back under the marker).
-    assert.ok(/^.{1} {3,}word[0-9]/.test(line), 'a continuation line hangs under the text: ' + JSON.stringify(line.slice(0, 14)));
+    assert.ok(
+      /^.{1} {5}word[0-9]/.test(line),
+      'a continuation line starts exactly 4 cells in (5 spaces after the border): ' + JSON.stringify(line.slice(0, 14)),
+    );
   }
+  assert.equal(CONTINUATION_INDENT, 4);
+  assert.equal(MARKER_WIDTH, 2);
 });
 
-test('the marker keeps its own color when markerColor is given, and unselected rows keep a blank marker column', async () => {
+test('an unselected row sits in the same text column as the selected one, with or without a rowColor', async () => {
   const { lastFrame } = render(
     React.createElement(SelectList, {
       items: ['alpha', 'beta'],
       getKey: (s: string) => s,
-      renderItem: (s: string) => React.createElement(Text, null, s),
-      markerColor: () => 'red',
+      rowText: (s: string) => s,
+      rowColor: (_s: string, selected: boolean) => (selected ? 'red' : undefined),
       onSelect: () => {},
     }),
   );
@@ -155,3 +159,18 @@ test('the marker keeps its own color when markerColor is given, and unselected r
   assert.ok(/ {3}beta/.test(frame), 'the unselected row is indented to the same text column');
 });
 
+test('wrapRow puts the first line in firstWidth cells and later lines in continuationWidth cells', () => {
+  assert.deepEqual(wrapRow('aaa bbb ccc ddd', 7, 3), ['aaa bbb', 'ccc', 'ddd']);
+  assert.deepEqual(wrapRow('short', 20, 18), ['short']);
+  assert.deepEqual(wrapRow('', 10, 8), ['']);
+});
+
+test('wrapRow splits a word that is longer than a whole line, and counts wide characters as two cells', () => {
+  assert.deepEqual(wrapRow('abcdefghij', 4, 3), ['abcd', 'efg', 'hij']);
+  // each of these characters is two cells wide: only two fit in 4 cells
+  assert.deepEqual(wrapRow('\u4e2d\u6587\u5b57\u7b26', 4, 4), ['\u4e2d\u6587', '\u5b57\u7b26']);
+});
+
+test('wrapRow joins embedded newlines into single spaces so a row never contains a hard break', () => {
+  assert.deepEqual(wrapRow('one\ntwo   three', 40, 38), ['one two   three']);
+});

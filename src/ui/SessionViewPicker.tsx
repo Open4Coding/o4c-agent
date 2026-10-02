@@ -1,5 +1,4 @@
 import React from 'react';
-import { Text } from 'ink';
 import type { SessionView } from './formatEntries.js';
 import { SelectList } from './SelectList.js';
 
@@ -81,12 +80,7 @@ export function SessionViewPicker({
       borderColor={highlightColor}
       onSelect={(r) => onSelect(r.choice)}
       onCancel={onCancel}
-      renderItem={(r, selected) => (
-        <Text inverse={selected}>
-          {r.label} — {r.description}
-          {r.choice === currentValue ? ' (current)' : ''}
-        </Text>
-      )}
+      rowText={(r) => `${r.label} — ${r.description}${r.choice === currentValue ? ' (current)' : ''}`}
     />
   );
 }

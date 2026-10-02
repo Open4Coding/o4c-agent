@@ -12,10 +12,12 @@ instruction says otherwise — this repo's own rule takes precedence.
 Every dropdown / slash-choice window (`/set`, `/config`, `/mode`, `/resume`, the `/` palette, the session view
 picker, and any future one) follows these rules:
 
-- Build it on `src/ui/SelectList.tsx`. `renderItem` returns the row's **content only** - never its own `> `
-  marker. `SelectList` draws the marker in a fixed 2-cell column and wraps the content beside it, so a row that
-  wraps hangs 2 cells in under the first character of its text instead of falling back under the `>`.
-  (`src/test/pickerRows.test.ts` fails if a picker draws its own marker.)
+- Build it on `src/ui/SelectList.tsx` and give it each row's plain text with `rowText` (and, if the row has its
+  own color, `rowColor`). Never draw your own `> ` marker and never leave wrapping to the terminal: `SelectList`
+  draws the marker in a fixed 2-cell column and wraps the row itself, with the first line's text at column 2 and
+  every continuation line at **column 4** (`CONTINUATION_INDENT`), so a wrapped line reads as part of the row
+  above and not as a new row. (`src/test/pickerRows.test.ts` fails if a picker draws its own marker.)
 - Keep a row's description to **1-3 lines at a 100-column terminal, 3 only in extreme cases** (aim for 2 or
   fewer). Put detail in `/help-<command>` or the docs, not the picker row. The same test fails on a longer row.
-- Color a row's marker with `SelectList`'s `markerColor` prop, not by drawing it yourself.
+- Do not start a command description with the picker's own title text: tests (and people) detect a picker by its
+  title, and the `/set` list shows every description.

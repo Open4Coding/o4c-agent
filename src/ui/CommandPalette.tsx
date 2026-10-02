@@ -1,5 +1,4 @@
 import React from 'react';
-import { Text } from 'ink';
 import type { CommandInfo } from './slashCommand.js';
 import { SelectList } from './SelectList.js';
 
@@ -25,17 +24,10 @@ export function CommandPalette({ commands, onSelect, onCancel, highlightColor }:
       getKey={(c) => c.name}
       maxVisible={20}
       borderColor={highlightColor}
-      markerColor={(_, selected) => (selected ? highlightColor : undefined)}
+      rowColor={(_, selected) => (selected ? highlightColor : undefined)}
       onSelect={onSelect}
       onCancel={onCancel}
-      renderItem={(c, selected) => {
-        const names = [c.name, ...(c.aliases ?? [])].join(', ');
-        return (
-          <Text color={selected ? highlightColor : undefined} inverse={selected}>
-            {names} — {c.description}
-          </Text>
-        );
-      }}
+      rowText={(c) => `${[c.name, ...(c.aliases ?? [])].join(', ')} — ${c.description}`}
     />
   );
 }

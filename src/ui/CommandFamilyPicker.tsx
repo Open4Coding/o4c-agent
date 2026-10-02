@@ -1,5 +1,4 @@
 import React from 'react';
-import { Text } from 'ink';
 import { SelectList } from './SelectList.js';
 import type { CommandInfo } from './slashCommand.js';
 
@@ -36,11 +35,7 @@ export function CommandFamilyPicker({
       borderColor={highlightColor}
       onSelect={onSelect}
       onCancel={onCancel}
-      renderItem={(c, selected) => (
-        <Text inverse={selected}>
-          {c.name} — {c.description}
-        </Text>
-      )}
+      rowText={(c) => `${c.name} — ${c.description}`}
     />
   );
 }
