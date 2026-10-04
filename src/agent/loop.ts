@@ -1,6 +1,8 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
+
+const CUTOFF_CONTINUE_PROMPT = 'Continue exactly where you stopped. Do not repeat anything already written.';
 import {
   aiCompactionEntry,
   aiPruneEntry,
@@ -620,6 +622,10 @@ export class AgentLoop {
     const cutoffChain: ContextEntry[] = [];
     let emptyTurnRetries = 0;
     let hadToolWork = false;
+    // Set after a cutoff with no tool call. Sent as a transient user turn on the next request only,
+    // never stored: a closed assistant turn plus a fresh generation prompt makes the model restate
+    // the cut-off text instead of continuing it (checked live against the server's chat template).
+    let continueAfterCutoff = false;
     const hidePendingCutoffChain = (): void => {
       if (cutoffChain.length === 0) return;
       let tokensFreed = 0;
@@ -698,7 +704,9 @@ export class AgentLoop {
         : undefined;
       const request: CompletionRequest = {
         systemPrompt: systemPromptForRequest,
-        messages: toWireMessages(this.entries),
+        messages: continueAfterCutoff
+          ? [...toWireMessages(this.entries), { role: 'user', content: CUTOFF_CONTINUE_PROMPT }]
+          : toWireMessages(this.entries),
         tools: toolDefs,
         signal: options.signal,
         maxTokens: dynamicMaxTokens,
@@ -787,6 +795,7 @@ export class AgentLoop {
       // the same maxIterations cap as every other round, so a model that never converges still
       // stops eventually rather than looping forever.
       const isMaxTokensCutoff = response.stopReason === 'max_tokens';
+      continueAfterCutoff = isMaxTokensCutoff && response.toolCalls.length === 0;
       // Backstop (2026-10-03): an empty completion that isn't a cutoff and isn't a tool call is
       // almost always the model emitting EOS straight away, not a real answer - the turn would
       // otherwise end silently with nothing done. Retry once with an explicit nudge, visibly, and
