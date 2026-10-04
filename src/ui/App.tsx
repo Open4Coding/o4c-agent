@@ -6,6 +6,9 @@ import { ConfirmDialog } from './ConfirmDialog.js';
 import { CommandPalette } from './CommandPalette.js';
 import { ModePicker } from './ModePicker.js';
 import { SessionViewPicker, type SessionViewChoice } from './SessionViewPicker.js';
+import { ServerDownPicker, SERVER_POLL_MS, type ServerDownChoice, type ServerWaitStatus } from './ServerDownPicker.js';
+import { ServerUnavailableError } from '../providers/types.js';
+import type { ServerProbe, ServerStatus } from '../providers/local.js';
 import { CommandFamilyPicker } from './CommandFamilyPicker.js';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { plansDirFor } from '../session/projectContext.js';
@@ -80,6 +83,16 @@ export interface AppProps {
   /** How much of a saved session the repaint shows (`compact` or `full`) - read from config.json at
    * every launch/restart (`/set-sessionview`). Undefined means compact. */
   sessionView?: SessionView;
+  /** How the local server answered at launch (`up` when unknown/not a local server). When it is `down` or
+   * `loading` the app opens the "Server is down: wait or choose another model" box straight away. */
+  serverStatus?: ServerStatus;
+  /** Asks the server how it is doing right now - polled while the box is open, to notice it coming up. */
+  probeServer?: () => Promise<ServerProbe>;
+  /** Called once with the first probe that finds the server up after a wait, so cli.ts can apply what it learned
+   * (the provider's reply limit follows the context size). */
+  onServerRecovered?: (probe: ServerProbe) => void;
+  /** Milliseconds between checks while waiting (default 5000). Tests shorten it. */
+  serverPollMs?: number;
   /** Undefined for an untrusted/no-project run. Only consulted to scope Plan-Write mode's
    * write_file exception to `.o4c/plans/` - see modePolicy.ts's classifyToolAccess. */
   projectRoot?: string;
@@ -291,15 +304,28 @@ export function App({
   reloadAfterTurn,
   sessionView,
   projectRoot,
-  model,
+  model: modelProp,
   provider,
   baseUrl,
-  contextWindow,
+  contextWindow: contextWindowProp,
+  serverStatus = 'up',
+  probeServer,
+  onServerRecovered,
+  serverPollMs = SERVER_POLL_MS,
   maxIterations,
   initialHighlightColor,
   configGlobalDir,
 }: AppProps) {
   const { exit } = useApp();
+  // The model name and context size can change after launch: a server that was down at startup tells us both
+  // once it is up (see the wait below), so they are state seeded from the launch values.
+  const [model, setModel] = useState(modelProp);
+  const [contextWindow, setContextWindow] = useState(contextWindowProp);
+  // The "Server is down: wait or choose another model" box. Open at launch if the server did not answer, and
+  // reopened when a request fails because the server cannot be reached; `checks` counts the polls since.
+  const [serverWait, setServerWait] = useState<{ status: ServerWaitStatus; checks: number } | null>(() =>
+    serverStatus === 'up' ? null : { status: serverStatus, checks: 0 },
+  );
   const plansDir = plansDirFor(projectRoot);
   // Undefined projectRoot already means "untrusted/no project" (ensureTrusted's own contract,
   // projectContext.ts) - matches exactly what ConfigStore.hasScope('local') needs to correctly
@@ -355,6 +381,11 @@ export function App({
   // is in flight,
   // so the "Thinking..." spinner doesn't run during a turn that's really just waiting on the user.
   const [isThinking, setIsThinking] = useState(false);
+  // Narrower than isThinking: true while waiting on the model itself (including the silent gap
+  // before its first byte), false while a tool is actually executing or the final answer is
+  // already streaming. Drives handleEscape's choice between asking first and stopping at once -
+  // see that callback's own comment for why only the "waiting on the model" case gets asked.
+  const [isInThinkBlock, setIsInThinkBlock] = useState(false);
   const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
 
   // Drives the "/" command palette - mirrors InputBox's own text (InputBox owns the actual
@@ -616,6 +647,7 @@ export function App({
     setQueuedPreview([]);
     dispatchTextWindow({ type: 'clearLive' });
     setIsThinking(false);
+    setIsInThinkBlock(false);
     setIsProcessing(false);
     pushBlock([
       { kind: 'system', text: 'Stopped (Ctrl+C) - background processing cancelled, input is available again.' },
@@ -960,6 +992,11 @@ export function App({
         const responseLines: Line[] = [];
         dispatchTextWindow({ type: 'clearLive' });
         setIsThinking(true);
+        // True by default at the start of every round waiting on the model - including a
+        // non-streaming provider's silent gap before its first byte, which is exactly the
+        // long-running-reasoning case Esc should ask about. Flipped false the instant a 'text'
+        // delta or a tool_call shows the model isn't (or is no longer) reasoning.
+        setIsInThinkBlock(true);
         let toolEventCount = 0;
         let summaryLine: Line | undefined;
         // Turn outcome flags for the end-of-turn reload decision below.
@@ -1040,6 +1077,7 @@ export function App({
                   if (kind === 'think') turnHadThinkRef.current = true;
                   const kindChanged = lastDeltaKindRef.current !== kind;
                   lastDeltaKindRef.current = kind;
+                  if (kindChanged) setIsInThinkBlock(kind === 'think');
                   const text = kindChanged && kind === 'think' ? `[think] ${event.text}` : event.text;
                   // Buffered, not dispatched directly - see deltaBufferRef's own doc comment for
                   // the O(n²) render-cost blowup this avoids. A kind change flushes whatever was
@@ -1082,7 +1120,13 @@ export function App({
               void fullContextLogger.log({ event });
 
               const isToolEvent = event.type === 'tool_call' || event.type === 'tool_result';
-              if (isToolEvent) toolEventCount += 1;
+              if (isToolEvent) {
+                toolEventCount += 1;
+                // tool_call: the tool is now executing (short, minutes at most) - stop asking.
+                // tool_result: the tool finished, so the next model round is starting - back to
+                // the risky long-wait case until its own delta/tool_call says otherwise.
+                setIsInThinkBlock(event.type === 'tool_result');
+              }
 
               if (isToolEvent && toolEventCount > MAX_VISIBLE_TOOL_EVENTS_PER_TURN) {
                 const collapsed = toolEventCount - MAX_VISIBLE_TOOL_EVENTS_PER_TURN;
@@ -1134,6 +1178,16 @@ export function App({
             // deliberate, expected nature of a cancellation better than the red error styling.
             responseLines.push({ kind: 'system', text: 'Cancelled - your message is back in the input box.' });
             setPrefill({ token: nextPrefillToken++, text: err.prompt });
+          } else if (err instanceof ServerUnavailableError) {
+            // Not a failed request: the server cannot answer yet. The loop already rolled the turn back, so put
+            // the message back in the input box and open the wait box - when the server answers the user just
+            // presses Enter again.
+            responseLines.push({
+              kind: 'error',
+              text: `${err.message} Your message is back in the input box - waiting for the server.`,
+            });
+            if (err.prompt) setPrefill({ token: nextPrefillToken++, text: err.prompt });
+            setServerWait({ status: err.loading ? 'loading' : 'down', checks: 0 });
           } else {
             responseLines.push({ kind: 'error', text: formatError(err) });
           }
@@ -1160,6 +1214,7 @@ export function App({
             if (responseLines.length > 0) pushBlock(responseLines);
             dispatchTextWindow({ type: 'clearLive' });
             setIsThinking(false);
+            setIsInThinkBlock(false);
           }
 
           // The [scan] collapse itself is a real event worth finding later (e.g. "how often does
@@ -1230,7 +1285,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit],
+    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow],
   );
 
   const handleModePickerSelect = useCallback(
@@ -1320,18 +1375,75 @@ export function App({
   // non-null for the duration of processTurn's loop.run() call, see its own comment). Pickers
   // (SessionPicker, ModePicker, CommandFamilyPicker, CommandPalette) handle Escape themselves via
   // their own onCancel, independently of this.
+  // While the box is open, ask the server every few seconds whether it is up. There is deliberately no time limit:
+  // a small box on the back of a laptop can take minutes to boot and load a model. When it answers, read its
+  // context size and model name again (they were unknown or stale), let cli.ts apply them, and close the box.
+  const waitingForServer = serverWait !== null;
+  useEffect(() => {
+    if (!waitingForServer || !probeServer) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = async () => {
+      const probe = await probeServer();
+      if (cancelled) return;
+      if (probe.status === 'up') {
+        if (probe.model) setModel(probe.model);
+        if (probe.contextWindow) setContextWindow(probe.contextWindow);
+        onServerRecovered?.(probe);
+        setServerWait(null);
+        pushBlock([
+          {
+            kind: 'system',
+            text: probe.contextWindow
+              ? `Server is back. Context window: ${probe.contextWindow.toLocaleString('en-US')} tokens.`
+              : 'Server is back.',
+          },
+        ]);
+        return;
+      }
+      setServerWait((w) => (w ? { status: probe.status === 'loading' ? 'loading' : 'down', checks: w.checks + 1 } : w));
+      timer = setTimeout(check, serverPollMs);
+    };
+    timer = setTimeout(check, serverPollMs);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [waitingForServer, probeServer, serverPollMs, onServerRecovered, pushBlock]);
+
+  const handleServerPick = useCallback(
+    (choice: ServerDownChoice) => {
+      // Waiting is already what the box is doing; only the other row needs an answer. There is a single
+      // configured model today, so say so and leave the box open.
+      if (choice === 'choose') pushBlock([{ kind: 'system', text: 'No other models are configured yet.' }]);
+    },
+    [pushBlock],
+  );
+
+  const handleServerClose = useCallback(() => {
+    setServerWait(null);
+    pushBlock([{ kind: 'system', text: 'Stopped waiting for the server. Your next message will check it again.' }]);
+  }, [pushBlock]);
+
   const abortTurn = useCallback(() => {
     abortControllerRef.current?.abort();
   }, []);
 
-  // Esc in the input box while a turn is running does NOT stop it at once any more: it opens a "Stop now?" check
-  // (No selected by default) because an accidental Esc used to kill a long-running turn outright. The approval
-  // dialog keeps its own Esc (decline AND stop - see ConfirmDialog's onEscape), since that box is already a Yes/No.
+  // Esc in the input box only asks "Stop now?" (No selected by default) while isInThinkBlock is true -
+  // waiting on the model, including a silent reasoning round that hasn't streamed anything yet, can run
+  // tens of minutes, so an accidental Esc there would be a real loss. Once a tool is actually executing,
+  // or the final answer is already streaming, that phase runs in minutes at most, so Esc just stops at
+  // once there - asking would be more friction than the loss is worth. The approval dialog keeps its own
+  // Esc (decline AND stop - see ConfirmDialog's onEscape), since that box is already a Yes/No.
   const handleEscape = useCallback(() => {
     if (!abortControllerRef.current) return;
-    stopTargetRef.current = abortControllerRef.current;
-    setStopConfirm(true);
-  }, []);
+    if (isInThinkBlock) {
+      stopTargetRef.current = abortControllerRef.current;
+      setStopConfirm(true);
+    } else {
+      abortTurn();
+    }
+  }, [isInThinkBlock, abortTurn]);
 
   const handleStopResolve = useCallback(
     (yes: boolean) => {
@@ -1477,6 +1589,7 @@ export function App({
     !modePicker &&
     !viewPicker &&
     !stopConfirm &&
+    !serverWait &&
     !setPicker &&
     !configPicker &&
     setFamilyMatches.length > 0;
@@ -1514,6 +1627,7 @@ export function App({
     !modePicker &&
     !viewPicker &&
     !stopConfirm &&
+    !serverWait &&
     !setPicker &&
     !configPicker &&
     configFamilyMatches.length > 0;
@@ -1531,6 +1645,7 @@ export function App({
     !modePicker &&
     !viewPicker &&
     !stopConfirm &&
+    !serverWait &&
     !setPicker &&
     !configPicker &&
     !setFamilyOpen &&
@@ -1568,7 +1683,7 @@ export function App({
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !stopConfirm && !resumePicker && !modePicker && !viewPicker && !setPicker && !configPicker}
+        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !viewPicker && !setPicker && !configPicker}
         suppressNav={paletteOpen || setFamilyOpen || configFamilyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
@@ -1582,7 +1697,7 @@ export function App({
           under the input box - previously two separate lines (StatusBar above the input box,
           "Mode: X" below it). */}
       <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
-      <Text color={theme.border}>Esc stop (asks first) · type to queue · Ctrl+C reset</Text>
+      <Text color={theme.border}>Esc stop (asks while thinking) · type to queue · Ctrl+C reset</Text>
       {confirmDialog ? (
         <ConfirmDialog
           key={confirmDialog.id}
@@ -1596,6 +1711,15 @@ export function App({
           message="Stop now?"
           yesNote="this stops the current process"
           onResolve={handleStopResolve}
+        />
+      ) : serverWait ? (
+        <ServerDownPicker
+          status={serverWait.status}
+          checks={serverWait.checks}
+          pollMs={serverPollMs}
+          onSelect={handleServerPick}
+          onCancel={handleServerClose}
+          highlightColor={highlightColor}
         />
       ) : resumePicker ? (
         <SessionPicker

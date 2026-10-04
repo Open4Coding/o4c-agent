@@ -143,27 +143,42 @@ test('compaction never fires when contextWindow is not provided - existing behav
   assert.equal(loop.getEntries().some((e) => e.sub_type === 'compaction'), false);
 });
 
-test('a failed compaction call is swallowed - the turn itself still proceeds normally', async () => {
+test('a failed compaction call is swallowed, and the hard-stop catches the still-oversized content', async () => {
+  // Real bug found via direct reproduction (2026-10-02): this fixture (~1600 est. tokens) is
+  // already bigger than its own 1500-token window even before the hard-stop existed - previously
+  // nothing caught that, so a failed compaction meant sending an oversized request anyway (fine
+  // for this FakeProvider, which doesn't enforce size, but a real server would reject it outright
+  // - confirmed live, twice, as the exceed_context_size_error that drove this whole fix). The
+  // hard-stop now correctly catches this exact case: compaction tried, failed, content still over
+  // -> refuse to send rather than let a real server do it for us.
+  // Always fails (not just once) - the 2026-10-03 pause-and-compact gate (pauseAndCompactIfOverEighty)
+  // retries compaction up to 3 times on its own whenever usage is >=80%, so a summarizer that only
+  // failed once would let a retry quietly succeed and defeat this test's actual point (compaction
+  // that genuinely never works must still end in a clean hard-stop, not an answer).
   let calls = 0;
   const flaky: LLMProvider = {
     name: 'flaky',
-    async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    async complete(_request: CompletionRequest): Promise<CompletionResponse> {
       calls++;
-      if (calls === 1) throw new Error('summarizer is down');
-      return { content: 'answer despite the failed compaction', toolCalls: [], stopReason: 'end_turn' };
+      throw new Error('summarizer is down');
     },
   };
   const loop = new AgentLoop(flaky, [], 'system');
   loop.loadEntries(buildOldTurns(8));
 
+  const events: Array<{ type: string; text?: string }> = [];
   const result = await loop.run('go', {
     contextWindow: 1500,
     compactionSettings: { reserveTokens: 100, keepRecentTokens: 500 },
+    onEvent: (e) => events.push({ type: e.type, text: e.text }),
   });
 
-  assert.equal(result, 'answer despite the failed compaction');
+  assert.equal(result, '', 'the hard-stop ends the turn before any provider call, not with an answer');
+  assert.ok(calls >= 1, 'at least the normal compaction call happened - no attempt to send the oversized real request');
   assert.equal(loop.getEntries().some((e) => e.sub_type === 'compaction'), false);
   assert.equal(loop.getEntries().some((e) => e.agent_visible === false), false); // nothing hidden
+  const warning = events.find((e) => e.type === 'warning' && /nearly full/.test(e.text ?? ''));
+  assert.ok(warning, 'expected the hard-stop warning once compaction failed to free enough room');
 });
 
 test('a single long turn (many tool calls, no new user message in between) compacts mid-turn instead of crashing', async () => {
@@ -199,9 +214,13 @@ test('a single long turn (many tool calls, no new user message in between) compa
 
   let toolCallsIssuedAtCompaction = -1;
   const result = await loop.run('research this deeply', {
-    contextWindow: 2000,
+    // Window and reserveTokens scaled up together (same ratio/trigger logic as the original
+    // 2000/100) to give the hard-stop's own separate safety margin genuine room below window -
+    // see hardStopReserveTokens' own doc comment (2026-10-03 widening) and the two tests above
+    // this one for the same test-calibration-collision pattern.
+    contextWindow: 4000,
     compactionSettings: {
-      reserveTokens: 100, // tier 3 threshold = 1900
+      reserveTokens: 1900, // tier 3 threshold = 2100, same margin over the ~1200-1700 content range as before
       keepRecentTokens: 300,
       // Disabled (never fires - see shouldCompact()'s formula) so this test stays an isolated
       // regression test for tier 3's mid-turn relocation fix specifically, unaffected by tier 2
@@ -431,11 +450,17 @@ test('the compaction trigger accounts for system-prompt + tool-schema overhead, 
   loop.loadEntries(buildOldTurns(3)); // ~600 estimated tokens of entry content - under threshold on its own
 
   const result = await loop.run('go', {
-    contextWindow: 2000,
-    // threshold = 1900. Entry content alone (600) stays under it - only counting the system
-    // prompt's overhead too (600 + ~1500 = ~2100) crosses it, which is the actual point of this
-    // test: without the fix, this would never have fired at all.
-    compactionSettings: { reserveTokens: 100, keepRecentTokens: 50 },
+    // Window and reserveTokens both scaled up together from the original 2000/100 (same ratio,
+    // same trigger-threshold logic) to give the hard-stop's own, separate safety margin (2026-10-03
+    // widening, see hardStopReserveTokens' own doc comment) genuine room below window - this test's
+    // fixed ~1500-token system-prompt overhead plus a small post-compact tail was colliding with
+    // that margin at the original small scale, which was a test-calibration collision, not a real
+    // regression (see the two tests directly above this one for the same pattern/explanation).
+    contextWindow: 3500,
+    // threshold = 1900, same as before. Entry content alone (600) stays under it - only counting
+    // the system prompt's overhead too (600 + ~1500 = ~2100) crosses it, which is the actual point
+    // of this test: without the fix, this would never have fired at all.
+    compactionSettings: { reserveTokens: 1600, keepRecentTokens: 50 },
   });
 
   assert.equal(result, 'answer');
@@ -455,8 +480,9 @@ test('the compaction trigger picks up a per-request modeInstruction as overhead 
   loop.loadEntries(buildOldTurns(3)); // ~600 tokens
 
   const result = await loop.run('go', {
-    contextWindow: 2000, // threshold = 1900 (same settings as above)
-    compactionSettings: { reserveTokens: 100, keepRecentTokens: 50 },
+    // Scaled up with reserveTokens together, same reasoning as the test directly above this one.
+    contextWindow: 3500, // threshold = 1900 (same settings as above)
+    compactionSettings: { reserveTokens: 1600, keepRecentTokens: 50 },
     modeInstruction: 'x'.repeat(6000), // ~1500 tokens, appended onto the small fixed system prompt
   });
 
@@ -473,27 +499,77 @@ test('a compaction whose generated summary would cost more than it removes is de
   // (user_intent/technical_concepts/files/errors_and_fixes/etc.) has its own baseline size, so
   // folding away just a couple of small entries can make visibleTokenEstimate go UP, not down.
   const verboseSummary = { current_work: 'x'.repeat(3000) }; // serializes far larger than the ~400-token region it'd replace
+  // Two copies queued (not one) - the 2026-10-03 pause-and-compact gate makes one extra compaction
+  // attempt of its own (on top of the normal per-round one) whenever usage is still >=80% after
+  // that first attempt, which this fixture's overshoot (~600 tokens against a 500 window) is. Both
+  // attempts decline the same way, so no real progress is ever made and the retry loop gives up
+  // after that - the 'answer' entry is never reached either way (the hard-stop below).
   const provider = new FakeProvider([
+    { content: JSON.stringify(verboseSummary), toolCalls: [], stopReason: 'end_turn' },
     { content: JSON.stringify(verboseSummary), toolCalls: [], stopReason: 'end_turn' },
     { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
   ]);
   const loop = new AgentLoop(provider, [], 'system');
   loop.loadEntries(buildOldTurns(3)); // 3 turns, ~200 tokens each = ~600 total
 
+  // Real bug found via direct reproduction (2026-10-02): this fixture (~600 est. tokens) is
+  // already bigger than its own 500-token window before anything happens. A declined compaction
+  // leaves it that way, so the hard-stop now correctly ends the turn before the second ("answer")
+  // provider call would ever be reached - same reasoning as the failed-compaction test above.
   const beforeVisible = loop.getVisibleTokenEstimate();
+  const events: Array<{ type: string; text?: string }> = [];
   const result = await loop.run('go', {
     contextWindow: 500,
     compactionSettings: { reserveTokens: 50, keepRecentTokens: 10 }, // threshold=450 < 600, tiny keep budget
+    onEvent: (e) => events.push({ type: e.type, text: e.text }),
   });
 
-  assert.equal(result, 'answer');
-  // The compaction WAS attempted (the provider call happened), but its result was declined.
+  assert.equal(result, '', 'the hard-stop ends the turn before the real-answer provider call');
+  // Compaction WAS attempted (normal round + one forced pause-and-compact retry, both declined) -
+  // the hard-stop then stops before the real-answer call would happen.
   assert.equal(provider.callCount, 2);
   assert.equal(loop.getEntries().some((e) => e.sub_type === 'compaction'), false);
   assert.equal(loop.getEntries().some((e) => e.agent_visible === false), false); // nothing hidden
   assert.ok(
     loop.getVisibleTokenEstimate() >= beforeVisible,
     'expected an unhelpful compaction to leave visibleTokenEstimate unchanged, not smaller',
+  );
+  const warning = events.find((e) => e.type === 'warning' && /nearly full/.test(e.text ?? ''));
+  assert.ok(warning, 'expected the hard-stop warning once the declined compaction left content still over window');
+});
+
+test('pause-and-compact: at >=80% usage, compacts down near the 75% target before sending, with no hard-stop needed', async () => {
+  // Per direct instruction (2026-10-03): the positive path for pauseAndCompactIfOverEighty -
+  // content starts above the 80% pause threshold but below the (separate, higher) hard-stop
+  // threshold, compaction genuinely succeeds in shrinking it, and the real turn proceeds normally
+  // with no warning/hard-stop at all. Distinct from the two tests above, which cover compaction
+  // failing/declining and the hard-stop catching that - this one proves the gate's actual job
+  // (proactively keeping things well clear of the edge) when compaction CAN do its job.
+  const tinySummary = { current_work: 'x' }; // genuinely tiny - real shrink, not a decline case
+  const provider = new FakeProvider([
+    { content: JSON.stringify(tinySummary), toolCalls: [], stopReason: 'end_turn' },
+    { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.loadEntries(buildOldTurns(16)); // ~3200 estimated tokens
+
+  const events: Array<{ type: string; text?: string }> = [];
+  const result = await loop.run('go', {
+    contextWindow: 4000, // 80% = 3200 (just crossed), 75% target = 3000, hard-stop threshold = 3400
+    compactionSettings: { reserveTokens: 100, keepRecentTokens: 200 },
+    onEvent: (e) => events.push({ type: e.type, text: e.text }),
+  });
+
+  assert.equal(result, 'answer', 'the real turn completes normally once compaction brought usage back down');
+  assert.ok(loop.getEntries().some((e) => e.sub_type === 'compaction'), 'expected the pause-and-compact gate to have applied a real compaction');
+  assert.ok(
+    loop.getVisibleTokenEstimate() < 4000 * 0.75,
+    'expected usage to land at or below the 75% target after a successful forced compaction',
+  );
+  assert.equal(
+    events.some((e) => e.type === 'warning' && /nearly full/.test(e.text ?? '')),
+    false,
+    'the hard-stop should never fire when the pause-and-compact gate already did its job',
   );
 });
 
@@ -515,4 +591,68 @@ test('a compaction whose generated summary genuinely shrinks a small region is s
 
   assert.equal(result, 'answer');
   assert.ok(loop.getEntries().some((e) => e.sub_type === 'compaction'), 'expected a genuinely helpful compaction to be applied');
+});
+
+test('the hybrid real+delta estimate catches an overflow a pure char-estimate would miss - the actual root cause of the live near-miss', async () => {
+  // Real bug found via direct reproduction (2026-10-02): a live run sent a request at 57,346
+  // tokens against a 57,344-token server limit - only 2 tokens over, because our char/4 estimate
+  // slightly under-counted. Verified against real Claude Code's own source
+  // (tokenCountWithEstimation, src/utils/tokens.ts): anchor on the last real usage.inputTokens,
+  // add only the estimated delta since - bounds the error to just the newest content instead of
+  // re-estimating the whole history from scratch every time. This test proves the mechanism:
+  // the fixture's actual char content is tiny (a pure estimate would stay far under the window),
+  // but the FIRST response's reported real usage is deliberately much higher (simulating the real
+  // tokenizer disagreeing with our rough guess, exactly what happened live) - the hard-stop must
+  // fire on round 2 using that real number, something a pure-estimate-only check would never catch.
+  const tool = makeFakeTool('read_file', 'ok');
+  const provider = new FakeProvider([
+    {
+      content: '',
+      toolCalls: [{ id: 't1', name: 'read_file', input: {} }],
+      stopReason: 'tool_use',
+      usage: { inputTokens: 950, outputTokens: 5 }, // far above what chars/4 of 'go' would estimate
+    },
+    { content: 'should never be reached', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  const events: Array<{ type: string; text?: string }> = [];
+  const result = await loop.run('go', {
+    contextWindow: 1000, // hard-stop reserve = min(3000, 100) = 100 -> threshold 900
+    onEvent: (e) => events.push({ type: e.type, text: e.text }),
+  });
+
+  assert.equal(result, '', 'the hard-stop should end the turn after round 1, using the real usage number');
+  assert.equal(provider.callCount, 1, 'round 2 ("should never be reached") must not be sent');
+  const warning = events.find((e) => e.type === 'warning' && /nearly full/.test(e.text ?? ''));
+  assert.ok(warning, 'expected the hard-stop warning, driven by the real usage count not the char estimate');
+});
+
+test('tier-3 summarization fires inside a single tool-heavy turn with no user boundary (2026-10-04)', async () => {
+  // Real bug: a long single turn has no user message after the first, so the turn-boundary-only
+  // cut rule meant real summarization could never fire there, and reasoning/response growth ran
+  // straight to the hard-stop. Tool rounds are now valid cut points, so tier 3 must act here.
+  const tinySummary = { current_work: 'x' };
+  const provider = new FakeProvider([
+    { content: JSON.stringify(tinySummary), toolCalls: [], stopReason: 'end_turn' },
+    { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.loadEntries(buildOldToolCallPairs(40)); // one turn, no second user message anywhere
+
+  const result = await loop.run('go', {
+    contextWindow: 4000,
+    compactionSettings: {
+      reserveTokens: 500,
+      keepRecentTokens: 500,
+      // Tier 2 disabled so this isolates tier 3 - the path under test.
+      microCompactReserveTokens: -1_000_000,
+    },
+  });
+
+  assert.equal(result, 'answer');
+  assert.ok(
+    loop.getEntries().some((e) => e.sub_type === 'compaction'),
+    'expected a real summarization compaction to fire inside the single turn',
+  );
 });

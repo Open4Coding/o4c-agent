@@ -212,3 +212,36 @@ test('non-"data:" lines (blank keep-alives, comments) are ignored', async () => 
 
   assert.equal(result.content, 'real');
 });
+
+test('a tool call whose arguments were cut off mid-JSON by max_tokens is dropped, not thrown', async () => {
+  // Real bug found via direct reproduction (2026-10-03, a --parallel 1 run at only 16% context
+  // use - so not a context-pressure problem at all): a write_file with a large `content` hit the
+  // max_tokens cap mid-arguments, and the unguarded JSON.parse here threw straight out to the UI
+  // as "Unexpected error: Unterminated string in JSON at position 27918", killing the whole turn.
+  // A truncated tool call is a normal consequence of hitting the output cap - drop it and let
+  // loop.ts's existing max_tokens auto-continue retry the round.
+  const stream = sseStream([
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'write_file' } }] } }] }),
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"path":"a.js","content":"const x = \\"unterminated' } }] } }] }),
+    sse({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+  ]);
+
+  const result = await parseSseStream(stream);
+
+  assert.deepEqual(result.toolCalls, [], 'the unparseable tool call should be dropped');
+  assert.equal(result.finishReason, 'length', 'the max_tokens stop reason still surfaces so the caller can retry');
+});
+
+test('a well-formed tool call alongside a truncated one still comes through', async () => {
+  const stream = sseStream([
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'good', function: { name: 'read_file', arguments: '{"path":"x.js"}' } }] } }] }),
+    sse({ choices: [{ delta: { tool_calls: [{ index: 1, id: 'bad', function: { name: 'write_file', arguments: '{"path":"y.js","content":"oops' } }] } }] }),
+    sse({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+  ]);
+
+  const result = await parseSseStream(stream);
+
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].id, 'good');
+  assert.deepEqual(result.toolCalls[0].input, { path: 'x.js' });
+});

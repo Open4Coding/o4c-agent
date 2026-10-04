@@ -370,9 +370,13 @@ test('emits events for text, tool_call, and tool_result in order', async () => {
 test('a response cut off by max_tokens emits a "warning" event, instead of silently returning nothing', async () => {
   // Real bug this replaces: a provider reporting stopReason 'max_tokens' (the response got cut
   // off, often mid-<think>) used to fall through the exact same path as a normal finish - no
-  // indication anything was truncated, sometimes an entirely empty final answer.
+  // indication anything was truncated, sometimes an entirely empty final answer. A second,
+  // normal response is queued because the loop now also retries a max_tokens cutoff (see the
+  // "auto-continues" test below) - this test is only about the warning still firing on that
+  // first, cut-off round.
   const provider = new FakeProvider([
     { content: '<think>still reasoning, never finished', toolCalls: [], stopReason: 'max_tokens' },
+    { content: 'picking back up - all done', toolCalls: [], stopReason: 'end_turn' },
   ]);
   const loop = new AgentLoop(provider, [], 'system');
 
@@ -382,6 +386,93 @@ test('a response cut off by max_tokens emits a "warning" event, instead of silen
   const warning = events.find((e) => e.type === 'warning');
   assert.ok(warning, 'expected a "warning" event when stopReason is max_tokens');
   assert.match(warning?.text ?? '', /max_tokens/);
+});
+
+test('a max_tokens cutoff with no tool call retries instead of ending the turn, and only warns on the cut-off round', async () => {
+  // Real bug found via direct reproduction (2026-10-02, a --parallel 4 stress test): a model can
+  // burn its entire max_tokens budget on one verbose <think> block before ever reaching a tool
+  // call or a real answer - this used to end the turn right there, stranding the user with
+  // nothing done. The loop should instead retry (same as a tool_use continuation) until the
+  // model actually finishes.
+  const provider = new FakeProvider([
+    { content: '<think>still reasoning, never finished', toolCalls: [], stopReason: 'max_tokens' },
+    { content: 'continuing the thought and now finishing up', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const events: Array<{ type: string; text?: string }> = [];
+  const result = await loop.run('go', { onEvent: (e) => events.push({ type: e.type, text: e.text }) });
+
+  assert.equal(provider.callCount, 2, 'expected a retry call after the max_tokens cutoff');
+  assert.equal(result, 'continuing the thought and now finishing up');
+  assert.equal(events.filter((e) => e.type === 'warning').length, 1, 'only the cut-off round should warn');
+});
+
+test('a model that never converges past max_tokens still stops at maxIterations, not forever', async () => {
+  const neverFinishes = Array.from({ length: 5 }, () => ({
+    content: '<think>still going',
+    toolCalls: [],
+    stopReason: 'max_tokens' as const,
+  }));
+  const provider = new FakeProvider(neverFinishes);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  await assert.rejects(
+    () => loop.run('go', { maxIterations: 5 }),
+    (err: Error) => err.name === 'MaxIterationsError' || /iterations/.test(err.message),
+  );
+  assert.equal(provider.callCount, 5);
+});
+
+test('a second consecutive max_tokens cutoff hides the first round\'s entries - the regression this fix introduced and then closed', async () => {
+  // Real bug found via direct reproduction (2026-10-02): the auto-continue fix above let an
+  // unbroken chain of max_tokens cutoffs grow unchecked (no tool-call pair for MicroCompact, no
+  // new user message for a real compaction cut) until a real run hit the server's hard context
+  // limit outright (exceed_context_size_error, 86016 tokens against a 57344 n_ctx server). Each
+  // new cutoff round should hide the previous one's now-superseded entries.
+  const provider = new FakeProvider([
+    { content: '<think>round one, cut off', toolCalls: [], stopReason: 'max_tokens' },
+    { content: '<think>round two, cut off', toolCalls: [], stopReason: 'max_tokens' },
+    { content: 'round three, finally done', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const events: Array<{ type: string; text?: string }> = [];
+  const result = await loop.run('go', { onEvent: (e) => events.push({ type: e.type, text: e.text }) });
+
+  assert.equal(provider.callCount, 3);
+  assert.equal(result, 'round three, finally done');
+  const prunes = events.filter((e) => e.type === 'prune');
+  assert.equal(prunes.length, 1, 'exactly one prune: round 2 superseding round 1 (round 3 ends the turn, nothing supersedes it)');
+  assert.match(prunes[0].text ?? '', /superseded max_tokens-cutoff entr(y|ies)/);
+});
+
+test('a max_tokens cutoff superseded by a TOOL CALL (not another cutoff) still gets hidden - the second real bug found live', async () => {
+  // Real bug found via direct reproduction (2026-10-02): the first fix above only hid a cutoff's
+  // entries when ANOTHER cutoff followed - but a real run showed a tool call can follow a cutoff
+  // instead. That tool call cleared the chain's tracking without hiding anything, so the original
+  // giant cutoff think block sat as permanent dead weight until ordinary growth pushed the whole
+  // turn past the server's hard context limit outright (exceed_context_size_error, 63622 tokens
+  // against a 57344 n_ctx server). Moving past a cutoff must hide it regardless of what comes next.
+  const tool = makeFakeTool('read_file', 'file contents');
+  const provider = new FakeProvider([
+    { content: '<think>cut off before any tool call', toolCalls: [], stopReason: 'max_tokens' },
+    {
+      content: '',
+      toolCalls: [{ id: 't1', name: 'read_file', input: {} }],
+      stopReason: 'tool_use',
+    },
+    { content: 'done', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  const events: Array<{ type: string; text?: string }> = [];
+  const result = await loop.run('go', { onEvent: (e) => events.push({ type: e.type, text: e.text }) });
+
+  assert.equal(result, 'done');
+  const prunes = events.filter((e) => e.type === 'prune');
+  assert.equal(prunes.length, 1, 'the cutoff round should be hidden once the tool-call round supersedes it');
+  assert.match(prunes[0].text ?? '', /superseded max_tokens-cutoff entr(y|ies)/);
 });
 
 test('a normal end_turn finish never emits a "warning" event', async () => {
@@ -523,4 +614,106 @@ test('loadEntries() excludes agent_visible=false entries from getVisibleTokenEst
   loop.loadEntries([kept, summarizedAway]);
 
   assert.equal(loop.getVisibleTokenEstimate(), estimateTokens(kept));
+});
+
+test('request.maxTokens shrinks to the real remaining budget as the prompt grows, instead of staying a flat half-window value', async () => {
+  // Real bug found via direct reproduction (2026-10-03): max_tokens used to be a single static
+  // value (half the context window, set once at provider construction) for every request
+  // regardless of prompt size - confirmed live, a single response ran 9+ minutes generating
+  // 16,289 tokens straight before the server cut it off at its hard n_ctx (truncated: 1), not a
+  // clean stop from us. The naive static value here would be floor(10000/2) = 5000 on every call;
+  // this proves the actual value sent shrinks as history grows instead.
+  const provider = new FakeProvider([
+    { content: 'first', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'second', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  // ~5000 estimated tokens of prior history - large enough that the real remaining budget
+  // (contextWindow - prompt - safety margin) drops below the naive static half-window value
+  // (5000) the old code would have used regardless of prompt size.
+  const bigEntry = aiResponseEntry('x'.repeat(20000));
+  loop.loadEntries([bigEntry]);
+
+  await loop.run('go', { contextWindow: 10000 });
+
+  const sent = provider.receivedRequests[0].maxTokens;
+  assert.ok(sent !== undefined, 'expected a computed maxTokens override, not the provider default (undefined here)');
+  assert.ok(sent! < 5000, `expected less than the naive static half-window value (5000), got ${sent}`);
+  assert.ok(sent! > 0, 'expected a positive budget, not zero or negative');
+});
+
+test('a single response is never allowed even a quarter of the window, however small the prompt is', async () => {
+  // THE root cause of the 2026-10-03 runaway rounds, proven from a real run's provider-call log
+  // (tmp.tmp3): with a small prompt the old per-response ceiling (half the window) applied, the
+  // model was allowed 28,672 output tokens and used 28,300 of them on one planning block - taking
+  // context from 21K to 49K in a single round, after which every later round is starved and no
+  // amount of compaction recovers. A single response must never be able to eat the window like
+  // that, no matter how much room technically exists at send time.
+  const provider = new FakeProvider([{ content: 'done', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  // Deliberately near-empty history: this is the exact case where the ceiling (not the remaining
+  // budget) is what binds, which is what made the old half-window value so damaging.
+  await loop.run('go', { contextWindow: 57344 });
+
+  const sent = provider.receivedRequests[0].maxTokens;
+  assert.ok(sent !== undefined, 'expected a computed maxTokens override');
+  assert.ok(
+    sent! <= Math.floor(57344 / 4),
+    `one response must never be allocated more than a quarter of the window, got ${sent}`,
+  );
+  assert.ok(
+    sent! < Math.floor(57344 / 2),
+    'must be well under the old half-window value that caused the runaway',
+  );
+});
+
+test('an empty end-of-turn reply after real tool work is retried once with a nudge, not silently ended', async () => {
+  // Real bug (2026-10-03): the model emitted EOS after a single token following a prune, and the
+  // turn ended silently with nothing done. An empty completion that isn't a cutoff or a tool call
+  // is retried once, visibly, before the turn is allowed to end.
+  const tool = makeFakeTool('write_file', 'ok');
+  const provider = new FakeProvider([
+    { content: '', toolCalls: [{ id: 't1', name: 'write_file', input: {} }], stopReason: 'tool_use' },
+    { content: '', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'finished for real', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  const events: Array<{ type: string; text?: string }> = [];
+  const result = await loop.run('go', { onEvent: (e) => events.push({ type: e.type, text: e.text }) });
+
+  assert.equal(result, 'finished for real', 'the empty reply should be retried, not returned as the answer');
+  assert.equal(provider.callCount, 3);
+  assert.ok(
+    events.some((e) => e.type === 'warning' && /empty reply/.test(e.text ?? '')),
+    'the retry must be visible to the user, not silent',
+  );
+});
+
+test('a reply ending mid-sentence after real tool work is retried once, not silently ended (2026-10-04)', async () => {
+  // Real bug: the model returned "...Now" (17 tokens, end_turn) after a long tool-heavy turn, and
+  // the turn ended there with nothing done. Same failure as an empty reply, so it gets one nudge.
+  const tool = makeFakeTool('write_file', 'ok');
+  const provider = new FakeProvider([
+    { content: '', toolCalls: [{ id: 't1', name: 'write_file', input: {} }], stopReason: 'tool_use' },
+    { content: 'Now', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'all files written', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  const events: Array<{ type: string; text?: string }> = [];
+  const result = await loop.run('go', { onEvent: (e) => events.push({ type: e.type, text: e.text }) });
+
+  assert.equal(result, 'all files written');
+  assert.equal(provider.callCount, 3);
+  assert.ok(events.some((e) => e.type === 'warning' && /mid-reply/.test(e.text ?? '')));
+});
+
+test('a short plain answer with no tool work still ends the turn normally (no false retry)', async () => {
+  const provider = new FakeProvider([{ content: 'the answer is 4', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+  const result = await loop.run('what is 2+2');
+  assert.equal(result, 'the answer is 4');
+  assert.equal(provider.callCount, 1);
 });

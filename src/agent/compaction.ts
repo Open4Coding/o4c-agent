@@ -53,6 +53,22 @@ function isTurnBoundary(entry: ContextEntry): boolean {
 }
 
 /**
+ * Whether cutting the log immediately before `entries[i]` is safe. Two kinds of safe cut:
+ * - a turn boundary (a new user message starts at `i`), the original rule; or
+ * - a completed tool round: `entries[i-1]` is a tool result, so the call/result pair ends on the
+ *   summarized side and nothing is split. Real bug (2026-10-04): a single long turn has no user
+ *   message after the first, so the turn-boundary rule alone let tier-3 summarization return 0
+ *   forever, and reasoning/response text grew until the hard-stop. Tool rounds are the only
+ *   boundaries such a turn has.
+ */
+function isSafeCutBefore(entries: readonly ContextEntry[], i: number): boolean {
+  if (i <= 0 || i >= entries.length) return false;
+  if (isTurnBoundary(entries[i])) return true;
+  const prev = entries[i - 1];
+  return prev.type === 'ai' && prev.sub_type === 'toolcallresponse';
+}
+
+/**
  * Finds the index to compact up to (exclusive) - entries `[0, cutPoint)` get folded into a
  * summary and hidden (`agent_visible = false`); entries `[cutPoint, end)` stay untouched.
  *
@@ -91,12 +107,12 @@ export function findCutPoint(entries: readonly ContextEntry[], keepRecentTokens:
   if (accumulated < keepRecentTokens) return 0; // whole log is smaller than the keep-budget
 
   for (let i = candidate - 1; i >= 0; i--) {
-    if (isTurnBoundary(entries[i])) return i;
+    if (isSafeCutBefore(entries, i)) return i;
   }
-  // No turn boundary before the candidate point at all - fall back to snapping forward instead,
+  // No safe cut before the candidate point at all - fall back to snapping forward instead,
   // so there's still a cut (even one that overshoots the keep budget a little) rather than none.
   for (let i = candidate; i < entries.length; i++) {
-    if (isTurnBoundary(entries[i])) return i;
+    if (isSafeCutBefore(entries, i)) return i;
   }
   return 0;
 }
@@ -146,8 +162,16 @@ const SUMMARY_INSTRUCTIONS = `You are compacting an earlier portion of a coding-
 function serializeEntryForSummary(entry: ContextEntry): string {
   if (entry.type === 'user' && entry.sub_type === 'input') return `[User]: ${entry.content}`;
   if (entry.type === 'ai' && entry.sub_type === 'toolcall') {
-    const parsed = JSON.parse(entry.content) as { name: string; input: unknown };
-    return `[Tool call]: ${parsed.name}(${JSON.stringify(parsed.input)})`;
+    // Real failure (2026-10-04): the summarizer is handed everything in the region being compacted,
+    // including entries an earlier pass already hid and released to a placeholder string. Parsing
+    // that threw here and killed the turn before the request was even sent. Fall back to the raw
+    // text instead - a placeholder is a fine thing to show the summarizer.
+    try {
+      const parsed = JSON.parse(entry.content) as { name: string; input: unknown };
+      return `[Tool call]: ${parsed.name}(${JSON.stringify(parsed.input)})`;
+    } catch {
+      return `[Tool call]: ${entry.content}`;
+    }
   }
   if (entry.type === 'ai' && entry.sub_type === 'toolcallresponse') return `[Tool result]: ${entry.content}`;
   if (entry.type === 'ai' && entry.sub_type === 'think') return `[Assistant reasoning]: ${entry.content}`;

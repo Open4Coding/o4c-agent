@@ -1,4 +1,5 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
+import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
 import {
   aiCompactionEntry,
@@ -135,6 +136,16 @@ export class AgentLoop {
    * (indexEntry/deindexEntry) so checking it every turn is O(1), not a rescan of the whole log. */
   private visibleTokenEstimate = 0;
   private usage: CumulativeUsage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
+  /** The real, API-reported prompt-token count from the most recent request, and what
+   * `visibleTokenEstimate` was at that exact moment - together let `hybridPromptTokenEstimate()`
+   * report `realCount + estimatedDelta` instead of re-estimating the whole history from scratch
+   * every time (chars/4 is rough; anchoring on a real count and only estimating what's new since
+   * bounds the error to just the newest content). Verified directly against real Claude Code's own
+   * `tokenCountWithEstimation()` (`src/utils/tokens.ts`) - same technique, confirmed via source
+   * read, not guessed - and Codex's `get_total_token_usage()`, both doing the same thing
+   * independently. `undefined` until the first real response of the process's lifetime. */
+  private lastRealPromptTokens: number | undefined;
+  private visibleEstimateAtLastRealCount = 0;
 
   constructor(
     private provider: LLMProvider,
@@ -262,6 +273,20 @@ export class AgentLoop {
     return estimateTextTokens(systemPromptForRequest) + estimateTextTokens(toolDefsJson);
   }
 
+  /** Real bug found via direct reproduction (2026-10-02): a pure chars/4 estimate was off by just
+   * enough (57346 vs a 57344 hard limit - 2 tokens) to let a request through that the server then
+   * rejected outright. Anchors on the last real `usage.inputTokens` (when we have one) and adds
+   * only the estimated delta since then, instead of re-estimating the whole visible history from
+   * scratch - see the `lastRealPromptTokens` field's own doc comment for where this technique is
+   * verified from. Falls back to the plain estimate (history + overhead) before the first real
+   * response of the process's lifetime. */
+  private hybridPromptTokenEstimate(modeInstruction?: string): number {
+    if (this.lastRealPromptTokens !== undefined) {
+      return this.lastRealPromptTokens + (this.visibleTokenEstimate - this.visibleEstimateAtLastRealCount);
+    }
+    return this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction);
+  }
+
   /**
    * §2.3's MicroCompact tier (2026-09-28) - tier 2 of 3, cheaper than `maybeCompact()`'s real
    * summarization call (tier 3) and run before it. No API call at all: old `toolcall`/
@@ -284,7 +309,10 @@ export class AgentLoop {
     modeInstruction?: string,
   ): void {
     const microCompactReserve = settings.microCompactReserveTokens ?? DEFAULT_MICRO_COMPACT_RESERVE_TOKENS;
-    const effectiveVisible = this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction);
+    // Hybrid real+delta estimate (see hybridPromptTokenEstimate's own doc comment) - falls back to
+    // the exact same plain estimate this line used to compute directly when there's no real usage
+    // yet, so this is a no-op for any scenario without one (every existing test, until now).
+    const effectiveVisible = this.hybridPromptTokenEstimate(modeInstruction);
     if (!shouldCompact(effectiveVisible, contextWindow, microCompactReserve)) return;
 
     const cutoff = microCompactCutoffIndex(this.entries, settings.keepRecentTokens);
@@ -332,7 +360,7 @@ export class AgentLoop {
     // pairs this hid are scattered among still-visible entries (user turns, responses, an earlier
     // summary), so there's no one position that reads as "where they used to be." The end is also
     // exactly where this pass happened chronologically - nothing after it exists yet.
-    const pruneEntry = aiPruneEntry(prunedPairCount, tokensFreed);
+    const pruneEntry = aiPruneEntry(prunedPairCount, tokensFreed, `older tool call${prunedPairCount === 1 ? '' : 's'}`);
     this.entries.push(pruneEntry);
     this.indexEntry(pruneEntry);
     onEntry(pruneEntry);
@@ -359,7 +387,9 @@ export class AgentLoop {
     signal?: AbortSignal,
     modeInstruction?: string,
   ): Promise<void> {
-    const effectiveVisible = this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction);
+    // Hybrid real+delta estimate - see hybridPromptTokenEstimate's own doc comment and
+    // maybeMicroCompact's identical swap above.
+    const effectiveVisible = this.hybridPromptTokenEstimate(modeInstruction);
     if (!shouldCompact(effectiveVisible, contextWindow, settings.reserveTokens)) return;
     const cutPoint = findCutPoint(this.entries, settings.keepRecentTokens);
     if (cutPoint === 0) return; // no safe turn boundary to cut at yet - skip this round
@@ -456,6 +486,78 @@ export class AgentLoop {
     // regardless of whether this turn itself later aborts (it isn't part of what `rollbackTo`
     // below undoes; it already happened as its own, prior, successful step). Tier 2 (free) always
     // runs before tier 3 (one real API call) - §2.3's cheap-first ordering.
+    // Real bug found via direct reproduction (2026-10-02): even with the cutoffChain fix below,
+    // a resumed session whose saved history was ALREADY over the server's hard limit (the
+    // "/resume dies out" case - two failed live runs, both rejected with the same
+    // exceed_context_size_error the first live turn hit) had no way to fail gracefully - it just
+    // repeated the same raw server 400 every time. Verified directly against real Claude Code's
+    // own hard-stop (`src/query.ts`'s blocking-limit check, `calculateTokenWarningState` in
+    // `services/compact/autoCompact.ts`) via source read, not guessed: same idea here - after
+    // compaction has had its chance, if the next request would still be too close to the hard
+    // limit, refuse to send it and say so clearly instead of letting the server reject it.
+    // Started at 3000 (matching real Claude Code's own MANUAL_COMPACT_BUFFER_TOKENS exactly,
+    // confirmed in source) but that wasn't enough in practice: confirmed live AGAIN (2026-10-03,
+    // same 4-session stress test, request 57345 > 57344 n_ctx) - the hybrid estimate's real-usage
+    // anchor was confirmed fresh every round (verified directly: a standalone curl against the
+    // live server shows llama-server DOES send `usage` on a max_tokens cutoff, no staleness bug),
+    // so the miss came from the ESTIMATED DELTA itself - one round's dense code (a hand-written
+    // tokenizer/interpreter, lots of brackets/punctuation) likely tokenizes denser than chars/4
+    // assumes, the same density problem real Claude Code's own reference handles for JSON
+    // specifically (contextwindow.md's bytesPerTokenForFileType) but we don't yet handle for code.
+    // Without real calibration data to fix the estimate itself, widened the safety margin instead
+    // - cheap (a bit of earlier compaction) against a demonstrated multi-thousand-token miss in a
+    // single round. 8000 cap / 15% comfortably covers the ~3000-token miss actually observed, with
+    // real headroom left over; still scaled down for a tiny unit-test window so it can't swallow
+    // the whole window on its own.
+    const hardStopReserveTokens = (contextWindow: number): number => Math.min(8000, Math.floor(contextWindow * 0.15));
+    const hardStopMessage = (): string | null => {
+      if (!options.contextWindow) return null;
+      const estimate = this.hybridPromptTokenEstimate(options.modeInstruction);
+      if (estimate < options.contextWindow - hardStopReserveTokens(options.contextWindow)) return null;
+      return `Context window is nearly full (~${estimate.toLocaleString()} / ${options.contextWindow.toLocaleString()} tokens) and compaction couldn't free enough room to continue safely. Try /clear, or a narrower request.`;
+    };
+
+    // Per direct instruction (2026-10-03): check before every send - if usage is at/above 80% of
+    // the window, pause (don't send yet) and compact, targeting 25% headroom (i.e. back down to
+    // ~75%), THEN send. This runs AFTER the normal every-round compaction calls below (which use
+    // whatever reserveTokens/microCompactReserveTokens this run was actually configured with) -
+    // this is a separate, simple percentage-based escalation for when that wasn't enough: forces
+    // both tiers to retry against a 25%-of-window reserve regardless of their own configured
+    // numbers, bounded to a few attempts (same bounded-retry shape hermes-agent and real Claude
+    // Code's own blocking-limit skip-conditions use - source-verified, not guessed) so a model that
+    // keeps regenerating content compaction can't shrink still stops retrying eventually rather
+    // than looping forever. Falls through to hardStopMessage() above as the final backstop if even
+    // this can't get below 80%.
+    const COMPACT_PAUSE_RATIO = 0.8;
+    const COMPACT_TARGET_RATIO = 0.75;
+    const MAX_FORCED_COMPACT_ATTEMPTS = 3;
+    const pauseAndCompactIfOverEighty = async (): Promise<void> => {
+      if (!options.contextWindow) return;
+      const contextWindow = options.contextWindow;
+      for (let attempt = 0; attempt < MAX_FORCED_COMPACT_ATTEMPTS; attempt++) {
+        const before = this.hybridPromptTokenEstimate(options.modeInstruction);
+        if (before < contextWindow * COMPACT_PAUSE_RATIO) return; // under 80% - nothing to do
+        const forcedReserve = Math.floor(contextWindow * (1 - COMPACT_TARGET_RATIO));
+        const forcedSettings: CompactionSettings = {
+          ...(options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS),
+          reserveTokens: forcedReserve,
+          microCompactReserveTokens: forcedReserve,
+        };
+        this.maybeMicroCompact(contextWindow, forcedSettings, onEvent, onEntry, options.modeInstruction);
+        await this.maybeCompact(
+          contextWindow,
+          forcedSettings,
+          onEvent,
+          onEntry,
+          onProviderCall,
+          options.signal,
+          options.modeInstruction,
+        );
+        const after = this.hybridPromptTokenEstimate(options.modeInstruction);
+        if (after >= before) return; // no progress this round - stop retrying, let hardStopMessage decide
+      }
+    };
+
     if (options.contextWindow) {
       const compactionSettings = options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS;
       this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
@@ -468,6 +570,12 @@ export class AgentLoop {
         options.signal,
         options.modeInstruction,
       );
+      await pauseAndCompactIfOverEighty();
+      const preTurnHardStop = hardStopMessage();
+      if (preTurnHardStop) {
+        onEvent({ type: 'warning', text: preTurnHardStop });
+        return '';
+      }
     }
 
     // Saved so an abort mid-turn can roll history back to exactly this point - see the catch
@@ -498,6 +606,45 @@ export class AgentLoop {
       }
     };
 
+    // Real bug found via direct reproduction (2026-10-02): a max_tokens-cutoff think block (often
+    // tens of thousands of tokens) has no tool_call_id, so MicroCompact never touches it, and
+    // there's no new user message anywhere in this unbroken turn for a real compaction to cut at
+    // (see findCutPoint()'s own doc comment) - neither existing compaction tier can reach it.
+    // Confirmed live twice: once as an unbroken chain of cutoffs (context hit 138% of n_ctx,
+    // request rejected outright), and again when the round AFTER a cutoff made a tool call
+    // instead (the original cutoff entry just sat there as permanent dead weight - 63622 tokens
+    // against a 57344-token server). Tracks the current cutoff round's think/response entries so
+    // the moment we move past them - whether the next round is another cutoff OR a tool call -
+    // they get hidden via hidePendingCutoffChain() below. Only the newest round's content is what
+    // the model actually needs to continue from.
+    const cutoffChain: ContextEntry[] = [];
+    let emptyTurnRetries = 0;
+    let hadToolWork = false;
+    const hidePendingCutoffChain = (): void => {
+      if (cutoffChain.length === 0) return;
+      let tokensFreed = 0;
+      for (const entry of cutoffChain) {
+        tokensFreed += estimateTokens(entry);
+        this.deindexEntry(entry);
+        entry.agent_visible = false;
+        this.indexEntry(entry);
+        this.releaseEntryContent(entry);
+      }
+      const pruneEntry = aiPruneEntry(
+        cutoffChain.length,
+        tokensFreed,
+        `superseded max_tokens-cutoff entr${cutoffChain.length === 1 ? 'y' : 'ies'}`,
+      );
+      this.entries.push(pruneEntry);
+      this.indexEntry(pruneEntry);
+      onEntry(pruneEntry);
+      onEvent({
+        type: 'prune',
+        text: `Pruned ${cutoffChain.length} superseded max_tokens-cutoff entr${cutoffChain.length === 1 ? 'y' : 'ies'} from an earlier retry round (~${tokensFreed} tokens freed).`,
+      });
+      cutoffChain.length = 0;
+    };
+
     for (let i = 0; i < maxIterations; i++) {
       checkAborted();
       let response;
@@ -509,11 +656,52 @@ export class AgentLoop {
       // streamFilter.ts's own doc comment for why this needs to be stateful across chunks).
       const thinkFilter = createThinkTagStripper((text, kind) => onEvent({ type: 'delta', text, kind }));
       let streamed = false;
+      // Snapshotted right before the request goes out - response.usage.inputTokens (below) will
+      // report what was actually sent as of exactly this moment, so this is the estimate value
+      // that real count corresponds to. See hybridPromptTokenEstimate()'s own doc comment.
+      const visibleEstimateAtSendTime = this.visibleTokenEstimate;
+      // Real bug found via direct reproduction (2026-10-03): without this, max_tokens stayed a
+      // single static value (half the context window, set once at startup) for every request
+      // regardless of prompt size - confirmed live, a single response ran 9+ minutes generating
+      // 16,289 tokens straight before the SERVER cut it off at its hard n_ctx (`truncated: 1`),
+      // not a clean stop from us. Computed fresh each round from the actual prompt estimate about
+      // to be sent, reusing the same safety margin as the hard-stop check below so the model is
+      // never even ALLOWED to generate past where that check would refuse the next request anyway
+      // - never larger than whatever max_tokens this provider was actually configured with.
+      const dynamicMaxTokens = options.contextWindow
+        ? Math.max(
+            256,
+            Math.min(
+              // Per-response ceiling. Was contextWindow/2 (matching cli.ts's original static
+              // setter) and that turned out to be the single biggest cause of the runaway rounds
+              // this whole fix chain was chasing - confirmed with hard numbers from a real run's
+              // provider-call log (tmp.tmp3, 2026-10-03): with a small prompt the half-window cap
+              // applied, the model was ALLOWED 28,672 output tokens, and it used 28,300 of them in
+              // one planning block - taking context from 21K to 49K in a single round, after which
+              // every later round is starved and nothing can recover. A single response must never
+              // be able to eat half the window.
+              //
+              // First attempt at this was a flat 8192 ceiling, and that was too tight in the other
+              // direction - confirmed live the same day on a 229K window at only 16% use: a
+              // write_file with a large `content` got cut off mid-JSON by the cap, which used to
+              // crash the turn outright (see parseSseStream's own comment for that half of the
+              // fix). 8192 was also the binding constraint on BOTH window sizes, i.e. only 3.6% of
+              // a 229K window, throttling legitimate file writes for no benefit. 25% of the window
+              // with a 32768 absolute ceiling keeps real file writes workable (14,336 at 57K;
+              // 32,768 at 229K) while staying well under the half-window value that caused the
+              // original runaway - and this ceiling is only a backstop anyway: the remaining-budget
+              // term below is the real constraint as context fills.
+              Math.min(32768, Math.floor(options.contextWindow / 4)),
+              options.contextWindow - this.hybridPromptTokenEstimate(options.modeInstruction) - hardStopReserveTokens(options.contextWindow),
+            ),
+          )
+        : undefined;
       const request: CompletionRequest = {
         systemPrompt: systemPromptForRequest,
         messages: toWireMessages(this.entries),
         tools: toolDefs,
         signal: options.signal,
+        maxTokens: dynamicMaxTokens,
         onToken: (delta, kind) => {
           streamed = true;
           thinkFilter.feed(delta, kind);
@@ -523,6 +711,10 @@ export class AgentLoop {
         response = await this.provider.complete(request);
         onProviderCall({ request, response });
         thinkFilter.flush();
+        if (response.usage) {
+          this.lastRealPromptTokens = response.usage.inputTokens;
+          this.visibleEstimateAtLastRealCount = visibleEstimateAtSendTime;
+        }
       } catch (err) {
         // Checked on the caller's own signal, not the error's name/type - a provider may wrap
         // or rename the underlying abort error (e.g. LocalProvider merges this signal with its
@@ -531,6 +723,13 @@ export class AgentLoop {
         if (options.signal?.aborted) {
           this.rollbackTo(lengthBeforeTurn);
           throw new AbortedError(userMessage);
+        }
+        // The local server cannot answer (not reachable, or still loading its model): this was never a real
+        // attempt, so roll the turn back as if it had not been sent and hand the message to the caller, which
+        // waits for the server and puts it back in the input box (same contract as AbortedError.prompt).
+        if (err instanceof ServerUnavailableError) {
+          this.rollbackTo(lengthBeforeTurn);
+          err.prompt = userMessage;
         }
         throw err;
       }
@@ -563,19 +762,74 @@ export class AgentLoop {
       // A redacted thinking block (Anthropic-only) has no readable text at all - `think` stays
       // empty in that case (there's nothing for splitThinkBlock() to find), but the opaque
       // redacted_thinking data still needs an entry to carry it forward for replay, or it's lost.
+      const roundEntries: ContextEntry[] = [];
       if (think || response.redactedThinking) {
         if (think) onEvent({ type: 'think', text: think, streamed });
-        this.appendEntry(aiThinkEntry(think ?? '', response.thinkingSignature, response.redactedThinking), onEntry);
+        const thinkEntry = aiThinkEntry(think ?? '', response.thinkingSignature, response.redactedThinking);
+        this.appendEntry(thinkEntry, onEntry);
+        roundEntries.push(thinkEntry);
       }
       if (responseText) {
         onEvent({ type: 'text', text: responseText, streamed });
       }
 
       const isToolUse = response.stopReason === 'tool_use' && response.toolCalls.length > 0;
-      this.appendEntry(aiResponseEntry(responseText), onEntry);
+      const responseEntry = aiResponseEntry(responseText);
+      this.appendEntry(responseEntry, onEntry);
+      roundEntries.push(responseEntry);
 
-      if (!isToolUse) {
+      // Real bug found via direct reproduction (2026-10-02, a --parallel 4 stress test): a
+      // max_tokens cutoff with no tool call used to return here immediately, ending the whole
+      // turn - most often caught mid-<think>, before the model ever reached a tool call or a
+      // real answer, silently stranding the user with nothing done. Looping back for another
+      // provider call instead (same as a tool_use continuation) lets the model pick up where it
+      // left off - the cut-off content is already in history via appendEntry above. Bounded by
+      // the same maxIterations cap as every other round, so a model that never converges still
+      // stops eventually rather than looping forever.
+      const isMaxTokensCutoff = response.stopReason === 'max_tokens';
+      // Backstop (2026-10-03): an empty completion that isn't a cutoff and isn't a tool call is
+      // almost always the model emitting EOS straight away, not a real answer - the turn would
+      // otherwise end silently with nothing done. Retry once with an explicit nudge, visibly, and
+      // only once per streak (reset whenever real work happens).
+      // A short reply ending mid-sentence with no tool call (2026-10-04: "...Now", 17 tokens,
+      // end_turn - the turn ended there silently) is the same failure as an empty one. Only counted
+      // once the turn has done real tool work, so a plain one-line answer to a question still ends.
+      const trimmedReply = responseText.trim();
+      const isEmptyReply = trimmedReply === '';
+      // Narrow on purpose: only a reply that visibly trails off (a dangling connective or a
+      // trailing comma/colon). A normal short final answer after tool work must still end the turn.
+      const isMidSentence =
+        hadToolWork &&
+        trimmedReply.length > 0 &&
+        trimmedReply.length < 300 &&
+        (/[,;:]$/.test(trimmedReply) ||
+          /\b(now|and|or|the|a|an|to|then|next|so|but|let|let's|with|of|for|in|on|is|are|i'll|i'm|we'll)$/i.test(trimmedReply));
+      const isIncompleteEndTurn = !isToolUse && !isMaxTokensCutoff && (isEmptyReply || isMidSentence);
+      if (isIncompleteEndTurn && emptyTurnRetries < 1) {
+        emptyTurnRetries += 1;
+        onEvent({
+          type: 'warning',
+          text: isEmptyReply
+            ? 'The model returned an empty reply - asking it to continue once.'
+            : 'The model stopped mid-reply - asking it to continue once.',
+        });
+        this.appendEntry(userInputEntry('Continue with the task.'), onEntry);
+        continue;
+      }
+      if (isToolUse) {
+        emptyTurnRetries = 0;
+        hadToolWork = true;
+      }
+      if (!isToolUse && !isMaxTokensCutoff) {
         return responseText;
+      }
+
+      // Either way, we're moving past whatever cutoff round was pending (if any) - a tool call or
+      // a fresh cutoff both supersede it equally; only re-arm the chain when THIS round is itself
+      // another cutoff that might in turn need hiding later.
+      hidePendingCutoffChain();
+      if (isMaxTokensCutoff) {
+        cutoffChain.push(...roundEntries);
       }
 
       for (const call of response.toolCalls) {
@@ -627,6 +881,12 @@ export class AgentLoop {
           options.signal,
           options.modeInstruction,
         );
+        await pauseAndCompactIfOverEighty();
+        const hardStop = hardStopMessage();
+        if (hardStop) {
+          onEvent({ type: 'warning', text: hardStop });
+          return responseText;
+        }
       }
     }
 

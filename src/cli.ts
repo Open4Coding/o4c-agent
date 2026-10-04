@@ -9,7 +9,7 @@ import { RESTART_EXIT_CODE, buildRestartArgs, runSupervisor, writeHandoff } from
 import { MODES, type Mode } from './ui/modePolicy.js';
 import { parseSessionView, type SessionView } from './ui/formatEntries.js';
 import { AnthropicProvider } from './providers/anthropic.js';
-import { LocalProvider, fetchLocalModelId, fetchLocalContextWindow } from './providers/local.js';
+import { LocalProvider, probeLocalServer, type ServerProbe, type ServerStatus } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider, Message } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
@@ -141,6 +141,7 @@ async function runRepl(
   initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] },
   initialMode?: Mode,
   sessionView?: SessionView,
+  serverHooks?: { status: ServerStatus; probe: () => Promise<ServerProbe>; onRecovered: (probe: ServerProbe) => void },
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -180,6 +181,9 @@ async function runRepl(
       restart,
       initialMode,
       sessionView,
+      serverStatus: serverHooks?.status,
+      probeServer: serverHooks?.probe,
+      onServerRecovered: serverHooks?.onRecovered,
       // Reload the session in a fresh process after a turn that thought or used tools, so the screen
       // is repainted from the full saved history (see App.tsx). O4C_NO_RELOAD=1 turns it off.
       reloadAfterTurn: process.env.O4C_NO_RELOAD !== '1',
@@ -391,14 +395,17 @@ program
     // blocking startup on it. Run alongside the context-window probe below (Promise.all, not
     // sequential awaits) - two independent, best-effort GETs against the same server, no reason
     // to pay their latency twice at startup.
+    // One probe tells model, context size AND whether the server is up at all (down: nothing answered, loading: it
+    // answered 503 while loading its model). When it is not up the app opens the "Server is down: wait or choose
+    // another model" box, waits however long a small laptop-sized server needs, and re-reads the context size once
+    // it answers - startup never blocks on it.
     let autoContextWindow: number | undefined;
+    let serverStatus: ServerStatus = 'up';
     if (opts.provider === 'local') {
-      const [detectedModel, detectedContextWindow] = await Promise.all([
-        fetchLocalModelId(opts.baseUrl, localApiKey),
-        fetchLocalContextWindow(opts.baseUrl, localApiKey),
-      ]);
-      if (detectedModel) opts = { ...opts, model: detectedModel };
-      autoContextWindow = detectedContextWindow;
+      const probe = await probeLocalServer(opts.baseUrl, localApiKey);
+      serverStatus = probe.status;
+      if (probe.model) opts = { ...opts, model: probe.model };
+      autoContextWindow = probe.contextWindow;
     }
     // Front-end plan item #8: auto-detected max context, not a guess or a required manual value -
     // a manually-configured contextWindow (above) still wins when set. Local comes from the real
@@ -417,13 +424,17 @@ program
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
     // PHOEBE: the turn just ended with an empty answer, no error). Undefined (no contextWindow
     // known at all) falls back to each provider's own pre-existing default.
-    const providerMaxTokens = contextWindow ? Math.floor(contextWindow / 2) : undefined;
+    // Was contextWindow/2 until 2026-10-03 - see the setMaxTokens call below (and loop.ts's
+    // dynamicMaxTokens comment) for the real run that showed a half-window per-response budget is
+    // what starves every round after the first big one.
+    const providerMaxTokens = contextWindow ? Math.min(32768, Math.floor(contextWindow / 4)) : undefined;
 
     let provider: LLMProvider;
+    let localProvider: LocalProvider | undefined;
     if (opts.provider === 'mock') {
       provider = new MockProvider();
     } else if (opts.provider === 'local') {
-      provider = new LocalProvider({
+      provider = localProvider = new LocalProvider({
         baseUrl: opts.baseUrl,
         apiKey: localApiKey,
         maxTokens: providerMaxTokens,
@@ -499,6 +510,24 @@ program
         initialSession,
         initialMode,
         sessionView,
+        opts.provider === 'local'
+          ? {
+              status: serverStatus,
+              probe: () => probeLocalServer(opts.baseUrl, localApiKey),
+              onRecovered: (probe) => {
+                // The reply limit follows the context size - but only when the size came from the
+                // server; a size set in config.json was already applied at launch and stays.
+                // Was half the context size until 2026-10-03, when a real run showed that letting
+                // one response consume half the window is exactly what starves every round after
+                // it (loop.ts's dynamicMaxTokens comment has the measured numbers). This is only
+                // the fallback anyway - loop.ts computes a tighter per-request budget from the
+                // actual prompt size and overrides it on every real call.
+                if (probe.contextWindow && configuredContextWindow === undefined) {
+                  localProvider?.setMaxTokens(Math.min(32768, Math.floor(probe.contextWindow / 4)));
+                }
+              },
+            }
+          : undefined,
       );
       return;
     }

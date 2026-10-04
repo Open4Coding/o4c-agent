@@ -8,6 +8,7 @@ import type {
   StopReason,
   ToolCall,
 } from './types.js';
+import { ServerUnavailableError } from './types.js';
 
 interface OpenAIToolCall {
   id: string;
@@ -116,6 +117,55 @@ const DEFAULT_MAX_TOKENS = 4096;
  * Best-effort: returns undefined on any failure (server down, non-OpenAI-compatible response,
  * timeout) so a display-only lookup never blocks startup or crashes it.
  */
+export type ServerStatus = 'up' | 'loading' | 'down';
+
+export interface ServerProbe {
+  status: ServerStatus;
+  /** The served model's id, when the server is up and says so. */
+  model?: string;
+  /** The server's real context size (`/props` n_ctx - per slot, which is what one conversation gets). */
+  contextWindow?: number;
+}
+
+/**
+ * Asks the local server how it is doing, in one place: `down` (nothing answered - powered off, still booting,
+ * wrong address), `loading` (it answered but is still loading the model: llama-server replies 503), or `up`
+ * with the model id and context size. Any other HTTP answer, even a 404 from a server without `/props`, counts
+ * as up - only a failure to connect or a silent timeout is `down`. Never throws.
+ */
+export async function probeLocalServer(baseUrl: string, apiKey?: string): Promise<ServerProbe> {
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/props`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    return { status: 'down' };
+  }
+  if (response.status === 503) return { status: 'loading' };
+  let contextWindow: number | undefined;
+  if (response.ok) {
+    try {
+      const data = (await response.json()) as { default_generation_settings?: { n_ctx?: number } };
+      const nCtx = data.default_generation_settings?.n_ctx;
+      if (typeof nCtx === 'number' && nCtx > 0) contextWindow = nCtx;
+    } catch {
+      // an unparseable /props just means no context size; the server itself is up
+    }
+  }
+  return { status: 'up', model: await fetchLocalModelId(baseUrl, apiKey), contextWindow };
+}
+
+/** True for the error fetch() raises when it could not reach the server at all (connection refused, host or
+ * network unreachable, DNS failure) - as opposed to a timeout or a deliberate abort. */
+function isUnreachable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return false;
+  const code = (err as { cause?: { code?: string } }).cause?.code ?? '';
+  return err instanceof TypeError || ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET'].includes(code);
+}
+
 export async function fetchLocalModelId(baseUrl: string, apiKey?: string): Promise<string | undefined> {
   try {
     const response = await fetch(`${baseUrl}/v1/models`, {
@@ -193,6 +243,12 @@ export class LocalProvider implements LLMProvider {
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
   }
 
+  /** Lets the app raise or lower the reply limit once it learns the real context size - e.g. when the server
+   * was down at launch and its size was unknown until it came back. */
+  setMaxTokens(maxTokens: number): void {
+    this.maxTokens = maxTokens;
+  }
+
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     // Own controller, not just AbortSignal.timeout() directly - its timer is explicitly cleared
     // the moment fetch() resolves (success or failure), below, so it can only ever fire while
@@ -242,7 +298,9 @@ export class LocalProvider implements LLMProvider {
             type: 'function',
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
           })),
-          max_tokens: this.maxTokens,
+          // Per-request override preferred when given - see CompletionRequest.maxTokens's own
+          // doc comment for the exact mid-generation truncation bug this closes.
+          max_tokens: request.maxTokens ?? this.maxTokens,
           stream: true,
           // Without this, a streaming response omits usage entirely (the standard OpenAI-API
           // convention llama-server also implements - confirmed directly against its source,
@@ -253,6 +311,12 @@ export class LocalProvider implements LLMProvider {
         }),
         signal: connectSignal,
       });
+    } catch (err) {
+      // The server could not be reached at all: say so with a type the app acts on (it waits for the server and
+      // puts the message back), rather than a bare "fetch failed". A deliberate cancel or the connect timeout
+      // (the server answered the connection but not the request) keep their own handling.
+      if (request.signal?.aborted || !isUnreachable(err)) throw err;
+      throw new ServerUnavailableError(`The local server at ${this.baseUrl} is not reachable.`, false);
     } finally {
       // Whether fetch resolved, rejected, or was aborted - either way this timer must never fire
       // again after this point (see connectController's own comment for why). A TimeoutError
@@ -268,7 +332,11 @@ export class LocalProvider implements LLMProvider {
             : `Local server requires an API key (401) - set the O4C_LOCAL_API_KEY environment variable.`,
         );
       }
-      throw new Error(`Local server error (status ${response.status}): ${await response.text()}`);
+      const body = await response.text();
+      if (response.status === 503 && /loading/i.test(body)) {
+        throw new ServerUnavailableError('The local server is still loading the model.', true);
+      }
+      throw new Error(`Local server error (status ${response.status}): ${body}`);
     }
 
     if (!response.body) {
@@ -445,9 +513,23 @@ export async function parseSseStream(
     reader.releaseLock();
   }
 
-  const toolCalls: ToolCall[] = [...toolCallsByIndex.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([, call]) => ({ id: call.id, name: call.name, input: JSON.parse(call.args || '{}') as Record<string, unknown> }));
+  // Real bug found via direct reproduction (2026-10-03, a --parallel 1 run at only 16% context
+  // use): a tool call whose arguments got cut off mid-JSON by the max_tokens cap - e.g. a
+  // write_file with a large `content` - used to throw straight out of here ("Unterminated string
+  // in JSON at position 27918"), surfacing as a raw "Unexpected error" that killed the whole turn.
+  // A truncated tool call is a NORMAL consequence of hitting the output cap, not a crash: drop the
+  // unparseable call and let the caller's existing max_tokens handling (loop.ts auto-continues on
+  // a `max_tokens` stopReason) retry the round, exactly as it would for any other cut-off response.
+  const toolCalls: ToolCall[] = [];
+  for (const [, call] of [...toolCallsByIndex.entries()].sort(([a], [b]) => a - b)) {
+    let input: Record<string, unknown>;
+    try {
+      input = JSON.parse(call.args || '{}') as Record<string, unknown>;
+    } catch {
+      continue; // truncated/malformed arguments - see above
+    }
+    toolCalls.push({ id: call.id, name: call.name, input });
+  }
 
   // Reassembled into the same `<think>...</think>` convention `splitThinkBlock()` already expects
   // from every other provider - the rest of the pipeline (AgentLoop, ContextEntry) needs no

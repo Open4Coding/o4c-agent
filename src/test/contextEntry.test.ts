@@ -4,6 +4,7 @@ import {
   aiResponseEntry,
   aiThinkEntry,
   aiToolCallEntry,
+  aiPruneEntry,
   aiToolCallResponseEntry,
   estimateTokens,
   liftLegacyMessages,
@@ -287,4 +288,39 @@ test('liftLegacyMessages: a tool-call-only assistant message (empty content) pro
     entries.map((e) => e.sub_type),
     ['input', 'toolcall', 'toolcallresponse'],
   );
+});
+
+test('toWireMessages: a prune marker is sent as a user-role note, never as the final assistant message', () => {
+  // Real bug (2026-10-03): a prune marker sent as assistant-role became the last message the
+  // model saw, so it treated its own turn as finished and emitted EOS after one token - a silent
+  // end-of-turn with nothing done. Ending on a user-role note prompts the model to continue.
+  const messages = toWireMessages([
+    userInputEntry('build it'),
+    aiToolCallEntry({ id: 't1', name: 'write_file', input: { path: 'a.js' } }),
+    aiToolCallResponseEntry('t1', 'Wrote 100 characters'),
+    aiPruneEntry(3, 1200, 'older tool calls'),
+  ]);
+
+  const last = messages[messages.length - 1];
+  assert.equal(last.role, 'user', 'the wire must not end on an assistant message after a prune');
+  assert.match(last.content as string, /pruned from context/);
+});
+
+test('toWireMessages: an unreadable tool call is dropped with its result, instead of throwing', () => {
+  // Real failure (2026-10-04): a visible tool-call entry whose content was a released placeholder
+  // threw "Unexpected token ... is not valid JSON" and killed the whole turn. Dropping the call
+  // and its orphaned result keeps the request valid.
+  const good = aiToolCallEntry({ id: 'ok1', name: 'read_file', input: { path: 'a' } });
+  const bad = aiToolCallEntry({ id: 'bad1', name: 'write_file', input: {} });
+  bad.content = '[toolcall content released from memory after compaction]';
+  const messages = toWireMessages([
+    userInputEntry('go'),
+    good,
+    aiToolCallResponseEntry('ok1', 'contents'),
+    bad,
+    aiToolCallResponseEntry('bad1', 'orphaned result'),
+  ]);
+
+  const toolIds = messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId);
+  assert.deepEqual(toolIds, ['ok1'], 'the orphaned result for the unreadable call must not be sent');
 });

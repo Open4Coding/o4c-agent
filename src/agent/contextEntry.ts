@@ -224,11 +224,15 @@ export function aiCompactionEntry(
  * nothing to summarize - a fixed-template line is all this needs, so `content` is plain text, not
  * a JSON shape a wire-formatter has to unpack.
  */
-export function aiPruneEntry(prunedPairCount: number, tokensFreed: number): ContextEntry {
+/** `what` is the already-pluralized noun phrase for what got pruned (e.g. `"older tool calls"`
+ * or `"superseded max_tokens-cutoff entries"`) - callers own their own pluralization since a
+ * generic count+singular-noun scheme can't pluralize every noun shape correctly (`"entry"` ->
+ * `"entries"`, not `"entrys"`). */
+export function aiPruneEntry(prunedCount: number, tokensFreed: number, what: string): ContextEntry {
   return newEntry({
     type: 'ai',
     sub_type: 'prune',
-    content: `[${prunedPairCount} older tool call${prunedPairCount === 1 ? '' : 's'} pruned from context (~${tokensFreed} tokens freed) - still visible in scrollback and the run log]`,
+    content: `[${prunedCount} ${what} pruned from context (~${tokensFreed} tokens freed) - still visible in scrollback and the run log]`,
   });
 }
 
@@ -289,6 +293,7 @@ function formatCompactionForWire(content: string): string {
 
 export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
   const messages: Message[] = [];
+  const emittedCallIds = new Set<string>();
   let pending: {
     content: string;
     toolCalls: ToolCall[];
@@ -327,13 +332,22 @@ export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
       continue;
     }
 
+    // Real bug (2026-10-03, 1-token silent end-of-turn after a prune): a prune marker sent as an
+    // assistant message became the final message the model saw, so it treated its own turn as
+    // already finished and emitted EOS immediately. As a user-role note the model is prompted to
+    // continue instead.
+    if (entry.type === 'ai' && entry.sub_type === 'prune') {
+      flush();
+      messages.push({ role: 'user', content: entry.content });
+      continue;
+    }
+
     if (
       entry.type === 'ai' &&
       (entry.sub_type === 'response' ||
         entry.sub_type === 'info' ||
         entry.sub_type === 'think' ||
-        entry.sub_type === 'compaction' ||
-        entry.sub_type === 'prune')
+        entry.sub_type === 'compaction')
     ) {
       const text = entry.sub_type === 'compaction' ? formatCompactionForWire(entry.content) : entry.content;
       if (!pending) pending = { content: text, toolCalls: [] };
@@ -363,15 +377,28 @@ export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
     }
 
     if (entry.type === 'ai' && entry.sub_type === 'toolcall') {
+      // Real failure (2026-10-04): a tool-call entry whose content was no longer JSON (a released
+      // placeholder) threw here and killed the whole turn with "Unexpected token ... is not valid
+      // JSON". A call that can't be read is dropped, and so is its result below - an unpaired
+      // tool result would make the request itself invalid.
+      let parsed: { name: string; input: Record<string, unknown> };
+      try {
+        parsed = JSON.parse(entry.content) as { name: string; input: Record<string, unknown> };
+      } catch {
+        continue;
+      }
       if (!pending) pending = { content: '', toolCalls: [] };
-      const parsed = JSON.parse(entry.content) as { name: string; input: Record<string, unknown> };
-      pending.toolCalls.push({ id: entry.tool_call_id ?? entry.id, name: parsed.name, input: parsed.input });
+      const callId = entry.tool_call_id ?? entry.id;
+      pending.toolCalls.push({ id: callId, name: parsed.name, input: parsed.input });
+      emittedCallIds.add(callId);
       continue;
     }
 
     if (entry.type === 'ai' && entry.sub_type === 'toolcallresponse') {
       flush();
-      messages.push({ role: 'tool', content: entry.content, toolCallId: entry.tool_call_id ?? entry.id });
+      const toolCallId = entry.tool_call_id ?? entry.id;
+      if (!emittedCallIds.has(toolCallId)) continue;
+      messages.push({ role: 'tool', content: entry.content, toolCallId });
       continue;
     }
   }

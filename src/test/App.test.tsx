@@ -24,6 +24,8 @@ import {
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import type { Mode } from '../ui/modePolicy.js';
 import type { SessionView } from '../ui/formatEntries.js';
+import type { ServerProbe, ServerStatus } from '../providers/local.js';
+import { ServerUnavailableError } from '../providers/types.js';
 
 // Simulates a turn that never comes back (a hung/runaway local-model generation) so tests can
 // verify /exit isn't stuck waiting behind it in the FIFO queue.
@@ -196,6 +198,34 @@ class StreamingThinkProvider implements LLMProvider {
   }
 }
 
+// Same streamed think-then-pause shape as StreamingThinkProvider, but after resuming it streams
+// the answer and then hangs forever instead of resolving - gives a test a deterministic window
+// where the think block has already ended (so Esc should stop at once, no "Stop now?" check) while
+// a turn is still genuinely in flight to press Esc against.
+class ThinkThenHangingTextProvider implements LLMProvider {
+  readonly name = 'think-then-hanging-text-test';
+  private release!: () => void;
+  private paused: Promise<void>;
+  constructor() {
+    this.paused = new Promise((resolve) => {
+      this.release = resolve;
+    });
+  }
+  resume(): void {
+    this.release();
+  }
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    request.onToken?.('reasoning about it', 'think');
+    await this.paused;
+    request.onToken?.('the final answer', 'text');
+    // Abort-aware, like AbortAwareHangingProvider above - Esc's abortTurn() only has something to
+    // observe if the fake actually reacts to the signal, same as a real provider would.
+    return new Promise((_, reject) => {
+      request.signal?.addEventListener('abort', () => reject(new Error('simulated in-flight cancellation')));
+    });
+  }
+}
+
 // Fires many single-character onToken calls in one tight, synchronous burst (no awaits between
 // them) before resolving - the most demanding case for App.tsx's delta-buffering throttle
 // (deltaBufferRef/flushDeltaBuffer), since every one of these arrives within the same handful of
@@ -315,6 +345,12 @@ async function setup(opts: {
   reloadAfterTurn?: boolean;
   initialMode?: Mode;
   sessionView?: SessionView;
+  // The local-server wait box (see ServerDownPicker): how the server answered at launch, how to re-check it, and
+  // how fast to poll while waiting.
+  serverStatus?: ServerStatus;
+  probeServer?: () => Promise<ServerProbe>;
+  onServerRecovered?: (probe: ServerProbe) => void;
+  serverPollMs?: number;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
@@ -346,6 +382,10 @@ async function setup(opts: {
       reloadAfterTurn: opts.reloadAfterTurn,
       initialMode: opts.initialMode,
       sessionView: opts.sessionView,
+      serverStatus: opts.serverStatus,
+      probeServer: opts.probeServer,
+      onServerRecovered: opts.onServerRecovered,
+      serverPollMs: opts.serverPollMs,
     }),
   );
   liveInstances.push(instance);
@@ -552,6 +592,24 @@ test('the check closes itself if the turn finishes while it is open, and nothing
     await waitFor(() => anyFrameIncludes(frames, 'finished normally'));
     await waitFor(() => !(lastFrame() ?? '').includes('Stop now?'));
     assert.equal(anyFrameIncludes(frames, 'Cancelled'), false);
+  });
+});
+
+test('Esc once the think block has ended (final answer streaming) stops at once, no Stop now? check', async () => {
+  await withTempDir(async (dir) => {
+    const provider = new ThinkThenHangingTextProvider();
+    const { stdin, frames, lastFrame } = await setup({ dir, provider });
+
+    await submit(stdin, 'explain it');
+    await waitFor(() => anyFrameIncludes(frames, '[think] reasoning about it'));
+
+    provider.resume();
+    await waitFor(() => anyFrameIncludes(frames, 'the final answer'));
+
+    stdin.write(ESCAPE);
+    await tick(200);
+    assert.equal((lastFrame() ?? '').includes('Stop now?'), false, 'no confirmation once thinking has ended');
+    await waitFor(() => anyFrameIncludes(frames, 'Cancelled'));
   });
 });
 
@@ -1951,6 +2009,120 @@ test('choosing /set-sessionview from the /set picker opens its picklist straight
     await waitFor(() => anyFrameIncludes(frames, 'Choose the session view'));
     stdin.write(ESCAPE);
     await waitFor(() => anyFrameIncludes(frames, 'Session view unchanged.'));
+  });
+});
+
+// ---- the local-server wait box: "Server is down, wait or choose another model" ----
+
+/** A probeServer that answers from a script (the last answer repeats) and counts how often it was asked. */
+function scriptedProbe(answers: ServerProbe[]) {
+  const state = { calls: 0 };
+  const probe = async (): Promise<ServerProbe> => {
+    const answer = answers[Math.min(state.calls, answers.length - 1)];
+    state.calls++;
+    return answer;
+  };
+  return { probe, state };
+}
+
+test('a server that is down at launch opens the wait box straight away, with Wait as the default', async () => {
+  await withTempDir(async (dir) => {
+    const { probe } = scriptedProbe([{ status: 'down' }]);
+    const { lastFrame } = await setup({ dir, serverStatus: 'down', probeServer: probe, serverPollMs: 60_000 });
+    await waitFor(() => (lastFrame() ?? '').includes('Server is down, wait or choose another model'));
+    const box = lastFrame() ?? '';
+    assert.ok(/> Wait for the server/.test(box), 'Wait is selected by default');
+    assert.ok(box.includes('Choose another model'));
+  });
+});
+
+test('a server that is up but still loading its model says so', async () => {
+  await withTempDir(async (dir) => {
+    const { probe } = scriptedProbe([{ status: 'loading' }]);
+    const { lastFrame } = await setup({ dir, serverStatus: 'loading', probeServer: probe, serverPollMs: 60_000 });
+    await waitFor(() => (lastFrame() ?? '').includes('Server is loading the model, wait or choose another model'));
+  });
+});
+
+test('a server that is up at launch shows no box at all', async () => {
+  await withTempDir(async (dir) => {
+    const { lastFrame } = await setup({ dir });
+    await tick(300);
+    assert.equal((lastFrame() ?? '').includes('wait or choose another model'), false);
+  });
+});
+
+test('while waiting, o4c keeps checking, counts the checks, and when the server answers it re-reads the context size and model and closes the box', async () => {
+  await withTempDir(async (dir) => {
+    const { probe } = scriptedProbe([
+      { status: 'down' },
+      { status: 'loading' },
+      { status: 'up', model: 'back-model', contextWindow: 123456 },
+    ]);
+    const recovered: ServerProbe[] = [];
+    const { frames, lastFrame } = await setup({
+      dir,
+      serverStatus: 'down',
+      probeServer: probe,
+      onServerRecovered: (p) => recovered.push(p),
+      serverPollMs: 40,
+    });
+    await waitFor(() => anyFrameIncludes(frames, 'checked 1 time'));
+    await waitFor(() => anyFrameIncludes(frames, 'Server is loading the model'), 5000); // it noticed the server came partway up
+    await waitFor(() => anyFrameIncludes(frames, 'Server is back. Context window: 123,456 tokens.'), 5000);
+    await waitFor(() => !(lastFrame() ?? '').includes('wait or choose another model'));
+    const footer = lastFrame() ?? '';
+    assert.ok(footer.includes('/123K'), 'the footer now shows the context size read from the server');
+    assert.ok(footer.includes('back-model'), 'and the model name');
+    assert.deepEqual(recovered, [{ status: 'up', model: 'back-model', contextWindow: 123456 }]);
+  });
+});
+
+test('Choose another model says none are configured yet and leaves the box open', async () => {
+  await withTempDir(async (dir) => {
+    const { probe } = scriptedProbe([{ status: 'down' }]);
+    const { stdin, frames, lastFrame } = await setup({ dir, serverStatus: 'down', probeServer: probe, serverPollMs: 60_000 });
+    await waitFor(() => (lastFrame() ?? '').includes('wait or choose another model'));
+    await tick(150); // the list's key handler registers just after its first frame paints
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'No other models are configured yet.'));
+    assert.ok((lastFrame() ?? '').includes('wait or choose another model'), 'the box is still open');
+  });
+});
+
+test('Esc closes the box, stops waiting, and the checking stops with it', async () => {
+  await withTempDir(async (dir) => {
+    const { probe, state } = scriptedProbe([{ status: 'down' }]);
+    const { stdin, frames, lastFrame } = await setup({ dir, serverStatus: 'down', probeServer: probe, serverPollMs: 40 });
+    await waitFor(() => (lastFrame() ?? '').includes('wait or choose another model'));
+    await tick(150);
+    stdin.write(ESCAPE);
+    await waitFor(() => anyFrameIncludes(frames, 'Stopped waiting for the server.'));
+    await waitFor(() => !(lastFrame() ?? '').includes('wait or choose another model'));
+    const callsAtClose = state.calls;
+    await tick(400);
+    assert.equal(state.calls, callsAtClose, 'no more checks after the box is closed');
+  });
+});
+
+test('a server that dies mid-session rolls the turn back, puts the message back, opens the box, and recovers', async () => {
+  await withTempDir(async (dir) => {
+    const dying: LLMProvider = {
+      name: 'dying-server',
+      async complete(): Promise<CompletionResponse> {
+        throw new ServerUnavailableError('The local server at test is not reachable.', false);
+      },
+    };
+    const { probe } = scriptedProbe([{ status: 'down' }, { status: 'up', model: 'm', contextWindow: 5000 }]);
+    const { stdin, frames, lastFrame, loop } = await setup({ dir, provider: dying, probeServer: probe, serverPollMs: 40 });
+    await submit(stdin, 'please do the thing');
+    await waitFor(() => anyFrameIncludes(frames, 'Your message is back in the input box'));
+    await waitFor(() => anyFrameIncludes(frames, 'Server is back. Context window: 5,000 tokens.'), 5000);
+    await waitFor(() => !(lastFrame() ?? '').includes('wait or choose another model'));
+    assert.ok((lastFrame() ?? '').includes('please do the thing'), 'the message is waiting in the input box');
+    assert.deepEqual(loop.getEntries(), [], 'the history is as if the turn was never sent');
   });
 });
 

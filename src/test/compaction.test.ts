@@ -49,8 +49,11 @@ test('findCutPoint snaps to a turn boundary, never inside a turn', () => {
   const cut = findCutPoint(entries, 1500);
   assert.ok(cut > 0);
   assert.ok(cut < entries.length);
-  assert.equal(entries[cut].type, 'user');
-  assert.equal(entries[cut].sub_type, 'input');
+  // A safe cut is either a new user message, or right after a completed tool result (2026-10-04:
+  // single-turn tool rounds are now valid boundaries too). Never mid-round.
+  const atUser = entries[cut].type === 'user' && entries[cut].sub_type === 'input';
+  const afterToolResult = entries[cut - 1].sub_type === 'toolcallresponse';
+  assert.ok(atUser || afterToolResult, 'cut must be a user message or immediately after a tool result');
 });
 
 test('findCutPoint never separates a toolcall from its toolcallresponse', () => {
@@ -153,7 +156,11 @@ test('microCompactCutoffIndex finds a real cutoff even in a single turn with no 
     entries.push(aiToolCallEntry(call, false));
     entries.push(aiToolCallResponseEntry(call.id, `output ${i} ${'y'.repeat(100)}`, false));
   }
-  assert.equal(findCutPoint(entries, 500), 0); // confirms the gap this is meant to close
+  // Previously findCutPoint returned 0 here - the exact single-turn gap. Now a completed tool round
+  // is a valid tier-3 cut, so it finds one too (2026-10-04).
+  const tier3Cut = findCutPoint(entries, 500);
+  assert.ok(tier3Cut > 0, 'tier-3 should now find a cut inside a single tool-heavy turn');
+  assert.equal(entries[tier3Cut - 1].sub_type, 'toolcallresponse');
   const cutoff = microCompactCutoffIndex(entries, 500);
   assert.ok(cutoff > 0, 'expected a real cutoff, not 0, for the exact case findCutPoint cannot handle');
 });
@@ -225,4 +232,41 @@ test('parseSummary degrades to plain text on malformed JSON, never throws', () =
 test('DEFAULT_COMPACTION_SETTINGS matches the benchmarked/documented pi-derived defaults', () => {
   assert.equal(DEFAULT_COMPACTION_SETTINGS.reserveTokens, 16384);
   assert.equal(DEFAULT_COMPACTION_SETTINGS.keepRecentTokens, 20000);
+});
+
+test('findCutPoint: a single turn with no user message still cuts at a completed tool round', () => {
+  // Real bug (2026-10-04): a long single turn has one user message at the start and none after,
+  // so the turn-boundary rule alone returned 0 forever and tier-3 summarization never fired while
+  // reasoning/response text grew to the hard-stop. A completed tool round is a valid cut point.
+  const entries: ContextEntry[] = [userInputEntry('build it')];
+  for (let i = 0; i < 6; i++) {
+    entries.push(aiResponseEntry('x'.repeat(400)));
+    entries.push(aiToolCallEntry({ id: `t${i}`, name: 'write_file', input: {} }));
+    entries.push(aiToolCallResponseEntry(`t${i}`, 'ok'));
+  }
+  const cut = findCutPoint(entries, 200);
+  assert.ok(cut > 0, 'expected a cut point inside the single turn, not 0');
+  assert.equal(entries[cut - 1].sub_type, 'toolcallresponse', 'the cut must land right after a completed tool result');
+});
+
+test('findCutPoint never splits a tool call from its result', () => {
+  const entries: ContextEntry[] = [userInputEntry('go')];
+  for (let i = 0; i < 4; i++) {
+    entries.push(aiToolCallEntry({ id: `s${i}`, name: 'read_file', input: {} }));
+    entries.push(aiToolCallResponseEntry(`s${i}`, 'y'.repeat(200)));
+  }
+  const cut = findCutPoint(entries, 100);
+  if (cut > 0) {
+    assert.notEqual(entries[cut].sub_type, 'toolcallresponse', 'the first kept entry must not be an orphaned result');
+    assert.notEqual(entries[cut - 1].sub_type, 'toolcall', 'the last summarized entry must not be an orphaned call');
+  }
+});
+
+test('buildCompactionPrompt survives a tool-call entry whose content was released to a placeholder (2026-10-04)', () => {
+  // Real failure: compaction serialized every entry in the region it folds away, including ones an
+  // earlier pass already released, and JSON.parse on the placeholder threw - killing the turn.
+  const released = aiToolCallEntry({ id: 'r1', name: 'write_file', input: {} });
+  released.content = '[toolcall content released from memory after compaction]';
+  const prompt = buildCompactionPrompt({ entries: [userInputEntry('go'), released], previousSummary: undefined, maxContentChars: 10_000 });
+  assert.match(prompt, /released from memory/);
 });

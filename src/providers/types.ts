@@ -40,6 +40,17 @@ export interface CompletionRequest {
   systemPrompt?: string;
   messages: Message[];
   tools: ToolDefinition[];
+  /** Real bug found via direct reproduction (2026-10-03): LocalProvider's own `max_tokens` used to
+   * be a single static value (half the context window, set once at startup) - fine for a short
+   * prompt, but for anything else `prompt + maxTokens` can exceed the server's real `n_ctx` before
+   * the model ever reaches that cap, so the SERVER truncates mid-generation instead (confirmed
+   * live: a single response ran 9+ minutes generating 16,289 tokens straight before the server cut
+   * it off at `n_ctx` with `truncated: 1` - not a clean stop). When set, this overrides the
+   * provider's own static default with a per-request budget computed from the actual prompt size
+   * about to be sent (loop.ts, right before each call) - optional so a provider without this
+   * problem (Anthropic's cloud context dwarfs anything a single agent turn could approach) can
+   * simply ignore it. */
+  maxTokens?: number;
   /** Lets the caller cancel an in-flight request (e.g. the user pressed Escape while the
    * "Thinking..." spinner was showing). Providers that make a real network call should pass it
    * straight through to that call's own cancellation mechanism. */
@@ -82,4 +93,21 @@ export interface CompletionResponse {
 export interface LLMProvider {
   readonly name: string;
   complete(request: CompletionRequest): Promise<CompletionResponse>;
+}
+
+/**
+ * A local model server that cannot answer right now: not reachable at all (powered off, still booting, wrong
+ * network), or reachable but still loading its model (`loading`). Not a failure of the request itself, so the
+ * app waits for the server instead of just printing an error, and puts the user's message back in the input
+ * box. `prompt` is filled in by AgentLoop after it rolls the interrupted turn back.
+ */
+export class ServerUnavailableError extends Error {
+  prompt?: string;
+  constructor(
+    message: string,
+    public readonly loading: boolean,
+  ) {
+    super(message);
+    this.name = 'ServerUnavailableError';
+  }
 }

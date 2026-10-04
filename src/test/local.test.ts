@@ -42,6 +42,11 @@ function capturedHeaders(): Record<string, string> {
   return (init?.headers as Record<string, string>) ?? {};
 }
 
+function capturedBody(): Record<string, unknown> {
+  const init = (withMockedFetch as unknown as { lastCaptured?: RequestInit }).lastCaptured;
+  return JSON.parse((init?.body as string) ?? '{}');
+}
+
 test('sends no Authorization header when no API key is configured', async () => {
   const provider = new LocalProvider({});
   await withMockedFetch(() => okResponse(), () => provider.complete(baseRequest));
@@ -52,6 +57,24 @@ test('sends an Authorization: Bearer header when apiKey is passed explicitly', a
   const provider = new LocalProvider({ apiKey: 'test-key-123' });
   await withMockedFetch(() => okResponse(), () => provider.complete(baseRequest));
   assert.equal(capturedHeaders().Authorization, 'Bearer test-key-123');
+});
+
+test('request.maxTokens overrides the provider\'s own static default when given', async () => {
+  // Real bug found via direct reproduction (2026-10-03): max_tokens used to be a single static
+  // value (set once via setMaxTokens, half the context window) for every request regardless of
+  // prompt size - confirmed live, a single response ran 9+ minutes generating 16,289 tokens
+  // straight before the SERVER cut it off at its hard n_ctx, not a clean stop from us. loop.ts now
+  // computes a fresh, per-request budget from the actual prompt size and passes it here - this
+  // just confirms LocalProvider actually honors that override instead of its own static value.
+  const provider = new LocalProvider({ maxTokens: 20000 });
+  await withMockedFetch(() => okResponse(), () => provider.complete({ ...baseRequest, maxTokens: 437 }));
+  assert.equal(capturedBody().max_tokens, 437);
+});
+
+test('omitting request.maxTokens falls back to the provider\'s own static default, as before', async () => {
+  const provider = new LocalProvider({ maxTokens: 20000 });
+  await withMockedFetch(() => okResponse(), () => provider.complete(baseRequest));
+  assert.equal(capturedBody().max_tokens, 20000);
 });
 
 test('falls back to O4C_LOCAL_API_KEY when no explicit apiKey option is given', async () => {
