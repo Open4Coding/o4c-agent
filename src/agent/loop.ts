@@ -2,7 +2,11 @@ import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
 
-const CUTOFF_CONTINUE_PROMPT = 'Continue exactly where you stopped. Do not repeat anything already written.';
+const INITIAL_TOKEN_RATIO = 1.5;
+const MIN_TOKEN_RATIO = 0.5;
+const MAX_TOKEN_RATIO = 3;
+
+const CUTOFF_CONTINUE_PROMPT ='Continue exactly where you stopped. Do not repeat anything already written.';
 import {
   aiCompactionEntry,
   aiPruneEntry,
@@ -23,7 +27,7 @@ import {
   microCompactCutoffIndex,
   parseSummary,
   shouldCompact,
-  DEFAULT_COMPACTION_SETTINGS,
+  compactionSettingsForWindow,
   DEFAULT_MICRO_COMPACT_RESERVE_TOKENS,
   type CompactionSettings,
 } from './compaction.js';
@@ -148,6 +152,9 @@ export class AgentLoop {
    * independently. `undefined` until the first real response of the process's lifetime. */
   private lastRealPromptTokens: number | undefined;
   private visibleEstimateAtLastRealCount = 0;
+  /** Real prompt tokens per plain chars/4 estimate, measured from the last real response. Measured live
+   * against the local server: prose ~0.76, code-heavy ~1.9. */
+  private tokenRatio = INITIAL_TOKEN_RATIO;
 
   constructor(
     private provider: LLMProvider,
@@ -284,9 +291,11 @@ export class AgentLoop {
    * response of the process's lifetime. */
   private hybridPromptTokenEstimate(modeInstruction?: string): number {
     if (this.lastRealPromptTokens !== undefined) {
-      return this.lastRealPromptTokens + (this.visibleTokenEstimate - this.visibleEstimateAtLastRealCount);
+      const delta = this.visibleTokenEstimate - this.visibleEstimateAtLastRealCount;
+      // Only growth is scaled up, and never below 1x: a shrink (compaction) stays at chars/4, which keeps the estimate high.
+      return this.lastRealPromptTokens + Math.ceil(delta > 0 ? Math.max(1, this.tokenRatio) * delta : delta);
     }
-    return this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction);
+    return Math.ceil(this.tokenRatio * (this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction)));
   }
 
   /**
@@ -541,7 +550,7 @@ export class AgentLoop {
         if (before < contextWindow * COMPACT_PAUSE_RATIO) return; // under 80% - nothing to do
         const forcedReserve = Math.floor(contextWindow * (1 - COMPACT_TARGET_RATIO));
         const forcedSettings: CompactionSettings = {
-          ...(options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS),
+          ...(options.compactionSettings ?? compactionSettingsForWindow(contextWindow)),
           reserveTokens: forcedReserve,
           microCompactReserveTokens: forcedReserve,
         };
@@ -561,7 +570,7 @@ export class AgentLoop {
     };
 
     if (options.contextWindow) {
-      const compactionSettings = options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS;
+      const compactionSettings = options.compactionSettings ?? compactionSettingsForWindow(options.contextWindow);
       this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
       await this.maybeCompact(
         options.contextWindow,
@@ -720,6 +729,10 @@ export class AgentLoop {
         onProviderCall({ request, response });
         thinkFilter.flush();
         if (response.usage) {
+          const plainEstimateAtSend = visibleEstimateAtSendTime + this.overheadTokenEstimate(options.modeInstruction);
+          if (plainEstimateAtSend > 0) {
+            this.tokenRatio = Math.min(MAX_TOKEN_RATIO, Math.max(MIN_TOKEN_RATIO, response.usage.inputTokens / plainEstimateAtSend));
+          }
           this.lastRealPromptTokens = response.usage.inputTokens;
           this.visibleEstimateAtLastRealCount = visibleEstimateAtSendTime;
         }
@@ -757,7 +770,7 @@ export class AgentLoop {
       if (response.stopReason === 'max_tokens') {
         onEvent({
           type: 'warning',
-          text: 'Response cut off - the model hit its max_tokens output limit before finishing. Consider raising contextWindow in config.json (max_tokens is derived from it) or asking a narrower question.',
+          text: 'Response cut off at the output limit (max_tokens) - continuing from where it stopped.',
         });
       }
 
@@ -879,7 +892,7 @@ export class AgentLoop {
       // and already-pruned pairs are skipped, so calling it again with zero new entries since the
       // last pass is simply a cheap, correct no-op.
       if (options.contextWindow) {
-        const compactionSettings = options.compactionSettings ?? DEFAULT_COMPACTION_SETTINGS;
+        const compactionSettings = options.compactionSettings ?? compactionSettingsForWindow(options.contextWindow);
         this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
         await this.maybeCompact(
           options.contextWindow,

@@ -50,6 +50,9 @@ export interface TextWindowState {
 export type TextWindowAction =
   | { type: 'commit'; lines: Line[] }
   | { type: 'appendLive'; text: string }
+  /** Re-bounds the live region after a terminal resize. The caps are otherwise fixed at mount, so a
+   * window that shrinks mid-session would let the live frame grow past the viewport. */
+  | { type: 'setLiveCaps'; liveCapChars: number; liveCapRows?: number; liveCols?: number }
   /** Raw streamed text chunks (`AgentEvent.type === 'delta'`) - appended onto the current live
    * line while a stream is in progress (`deltaActive`), or start a fresh line otherwise. This is
    * the one `live`-mutating action that doesn't mean "a new, distinct line" - see `deltaActive`.
@@ -212,6 +215,10 @@ export function textWindowReducer(state: TextWindowState, action: TextWindowActi
         blocks: [...state.blocks, { id: state.nextId, lines: action.lines }],
         nextId: state.nextId + 1,
       };
+    }
+    case 'setLiveCaps': {
+      const next = { ...state, liveCapChars: action.liveCapChars, liveCapRows: action.liveCapRows, liveCols: action.liveCols };
+      return { ...next, live: boundLive(state.live, next, action.liveCapChars) };
     }
     case 'appendLive':
       return { ...state, live: boundLive([...state.live, action.text], state, cap), deltaActive: false };

@@ -216,3 +216,13 @@ test('reset keeps the live caps instead of falling back to the default budget', 
   assert.equal(after.liveCapRows, 7);
   assert.equal(after.liveCols, 90);
 });
+
+test('setLiveCaps re-bounds the live region to a smaller terminal, keeping the newest rows', () => {
+  let state = initialTextWindow([], 100000, 50, 80);
+  for (let i = 0; i < 40; i++) state = textWindowReducer(state, { type: 'appendLive', text: `line ${i}` });
+  assert.equal(state.live.length, 40);
+  const shrunk = textWindowReducer(state, { type: 'setLiveCaps', liveCapChars: 100000, liveCapRows: 10, liveCols: 80 });
+  assert.ok(rowsFor(shrunk.live.join('\n'), 80) <= 10, 'live region must fit the new row cap');
+  assert.equal(shrunk.live.at(-1), 'line 39', 'the newest content is kept');
+  assert.equal(shrunk.liveCapRows, 10);
+});

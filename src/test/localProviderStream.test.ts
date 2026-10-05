@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSseStream } from '../providers/local.js';
+import { LocalProvider, parseSseStream } from '../providers/local.js';
 
 /** Builds a real ReadableStream<Uint8Array> from a list of raw string chunks - each array
  * element is delivered as its own `reader.read()` result, so tests can control exactly where a
@@ -244,4 +244,25 @@ test('a well-formed tool call alongside a truncated one still comes through', as
   assert.equal(result.toolCalls.length, 1);
   assert.equal(result.toolCalls[0].id, 'good');
   assert.deepEqual(result.toolCalls[0].input, { path: 'x.js' });
+});
+
+test('reasoning_budget_tokens is sent to the server only when a budget is configured', async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(sseStream([sse({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] })]), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  }) as typeof fetch;
+  try {
+    const request = { messages: [{ role: 'user' as const, content: 'hi' }], tools: [] };
+    await new LocalProvider({ baseUrl: 'http://localhost:1', reasoningBudgetTokens: 1000 }).complete(request);
+    await new LocalProvider({ baseUrl: 'http://localhost:1' }).complete(request);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(bodies[0].reasoning_budget_tokens, 1000);
+  assert.equal('reasoning_budget_tokens' in bodies[1], false);
 });

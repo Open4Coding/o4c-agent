@@ -145,8 +145,8 @@ const DELTA_FLUSH_MS = 1500;
  * frame stays strictly below the viewport height. That is what keeps Ink off its Windows
  * full-terminal-clear + whole-history-rewrite path (`shouldClearTerminalForFrame` clears on any
  * frame at or above the viewport on win32) - the visible "screen reset" at the end of a long
- * think-block turn. Computed once at mount; a terminal resize mid-session only changes the
- * margin, never the failure mode, because the cap keeps the frame under the viewport either way.
+ * think-block turn. Recomputed on every terminal resize (see the resize effect in App), so the
+ * frame stays under the viewport after a resize too.
  */
 function liveRegionCapChars(): number {
   const rows = process.stdout.rows ?? 30;
@@ -375,6 +375,20 @@ export function App({
     if (restoredLines.length > 0) blocks.push(makeBlock(id++, restoredLines));
     return initialTextWindow(blocks, liveRegionCapChars(), liveRegionCapRows(), liveRegionCols());
   });
+  useEffect(() => {
+    const onResize = (): void => {
+      dispatchTextWindow({
+        type: 'setLiveCaps',
+        liveCapChars: liveRegionCapChars(),
+        liveCapRows: liveRegionCapRows(),
+        liveCols: liveRegionCols(),
+      });
+    };
+    process.stdout.on('resize', onResize);
+    return () => {
+      process.stdout.off('resize', onResize);
+    };
+  }, []);
   const [isProcessing, setIsProcessing] = useState(false);
   // Separate from isProcessing (which covers the whole turn, including waiting on /resume's
   // picker or a write_file/run_shell confirmation) - this is only true while an actual LLM call

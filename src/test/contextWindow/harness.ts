@@ -40,18 +40,32 @@ export interface TurnResult {
   error?: string;
 }
 
+/** A context-management event, tagged with the provider request it happened before. */
+export interface TierEvent {
+  kind: 'prune' | 'compaction' | 'hard-stop';
+  at: number;
+}
+
 export interface ScenarioResult {
   name: string;
   window: number;
   turns: TurnResult[];
   violations: Violation[];
   events: AgentEvent[];
+  timeline: TierEvent[];
   finalEntries: readonly ContextEntry[];
   stats: ProviderStats;
   compactions: number;
   prunes: number;
   hardStops: number;
   requests: number;
+}
+
+function tierKind(event: AgentEvent): TierEvent['kind'] | undefined {
+  if (event.type === 'prune') return 'prune';
+  if (event.type === 'compaction') return 'compaction';
+  if (event.type === 'warning' && (event.text ?? '').includes('nearly full')) return 'hard-stop';
+  return undefined;
 }
 
 const DEFAULT_SYSTEM_PROMPT = 'You are a coding agent under test.';
@@ -102,6 +116,7 @@ export async function runScenario(spec: ScenarioSpec, window: number): Promise<S
 
   const turns: TurnResult[] = [];
   const events: AgentEvent[] = [];
+  const timeline: TierEvent[] = [];
   for (const turn of spec.build(window)) {
     provider.script = turn.rounds;
     provider.cursor = 0;
@@ -114,7 +129,11 @@ export async function runScenario(spec: ScenarioSpec, window: number): Promise<S
         contextWindow: window,
         maxIterations: 500,
         signal: controller?.signal,
-        onEvent: (event) => turnEvents.push(event),
+        onEvent: (event) => {
+          turnEvents.push(event);
+          const kind = tierKind(event);
+          if (kind) timeline.push({ kind, at: provider.stats.requests });
+        },
         onEntry: (entry) => provider.noteEntry(entry),
       });
       result.outcome = result.text ? 'text' : 'empty';
@@ -142,6 +161,7 @@ export async function runScenario(spec: ScenarioSpec, window: number): Promise<S
     turns,
     violations: provider.violations,
     events,
+    timeline,
     finalEntries: loop.getEntries(),
     stats: provider.stats,
     compactions: events.filter((e) => e.type === 'compaction').length,
@@ -166,6 +186,20 @@ export function formatReport(r: ScenarioResult): string {
     `overrun=${r.stats.overrun}`,
     `summarizerOver=${r.stats.summarizerOverWindow}`,
     `requests=${r.requests}`,
+    `tiers=${tierSummary(r.timeline)}`,
     `stop=${stop}`,
   ].join(' ');
+}
+
+/** First request index for each tier, e.g. "prune@12,compact@40,stop@77" (or "-" for none). */
+export function tierSummary(timeline: readonly TierEvent[]): string {
+  const first = (kind: TierEvent['kind']): number | undefined => timeline.find((e) => e.kind === kind)?.at;
+  const parts: string[] = [];
+  const prune = first('prune');
+  const compact = first('compaction');
+  const stop = first('hard-stop');
+  if (prune !== undefined) parts.push(`prune@${prune}`);
+  if (compact !== undefined) parts.push(`compact@${compact}`);
+  if (stop !== undefined) parts.push(`stop@${stop}`);
+  return parts.length ? parts.join(',') : '-';
 }

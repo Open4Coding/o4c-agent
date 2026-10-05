@@ -28,6 +28,7 @@ import { formatError } from './ui/formatError.js';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultLogsDir } from './session/runLog.js';
+import { platformPromptLine } from './ui/platform.js';
 
 /**
  * Installed at module load, before anything else runs, so it's live for the entire process
@@ -295,7 +296,7 @@ program
     const cwd = process.cwd();
     const { trusted, projectRoot } = await ensureTrusted(cwd, undefined, undefined, opts.profile);
     const projectContext = trusted ? await resolveO4cMd(cwd, projectRoot) : '';
-    const systemPrompt = projectContext ? `${SYSTEM_PROMPT}\n\n${projectContext}` : SYSTEM_PROMPT;
+    const systemPrompt = [SYSTEM_PROMPT, platformPromptLine(), projectContext].filter(Boolean).join('\n\n');
 
     // An explicit CLI flag always wins; otherwise fall back to the resolved config.json (global
     // -> local -> personal, see configStore.ts), and only then to the option's own hardcoded
@@ -328,6 +329,10 @@ program
     // yet, but a hand-set config value should still take precedence over whatever gets detected).
     const configuredContextWindow =
       typeof resolvedConfig.contextWindow === 'number' ? resolvedConfig.contextWindow : undefined;
+    const reasoningBudgetTokens =
+      typeof resolvedConfig.reasoningBudgetTokens === 'number' && resolvedConfig.reasoningBudgetTokens > 0
+        ? resolvedConfig.reasoningBudgetTokens
+        : undefined;
     // /config-highlightcolor (+ -local-/-global-, App.tsx) - read fresh on every launch/restart,
     // same "config.json only, re-read each time" shape as localApiKey above. Defaults to the
     // amber theme's own accent rather than an arbitrary color, since that's what the rest of the
@@ -438,6 +443,7 @@ program
         baseUrl: opts.baseUrl,
         apiKey: localApiKey,
         maxTokens: providerMaxTokens,
+        reasoningBudgetTokens,
         connectTimeoutMs,
         idleTimeoutMs,
       });

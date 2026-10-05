@@ -226,6 +226,10 @@ export class LocalProvider implements LLMProvider {
   // direct reproduction against PHOEBE: the turn just ended with an empty answer, no error, no
   // work done). Set from config.json's own contextWindow (cli.ts), not guessed here.
   private maxTokens: number;
+  // Thinking-token cap sent as llama-server's per-request `reasoning_budget_tokens` (verified live
+  // against the server: a 1000 budget cut reasoning from ~12K to ~4K chars). Off unless set in
+  // config.json, since other OpenAI-compatible servers do not implement this field.
+  private reasoningBudgetTokens: number | undefined;
 
   constructor(
     options: {
@@ -234,8 +238,10 @@ export class LocalProvider implements LLMProvider {
       idleTimeoutMs?: number;
       apiKey?: string;
       maxTokens?: number;
+      reasoningBudgetTokens?: number;
     } = {},
   ) {
+    this.reasoningBudgetTokens = options.reasoningBudgetTokens;
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -301,6 +307,7 @@ export class LocalProvider implements LLMProvider {
           // Per-request override preferred when given - see CompletionRequest.maxTokens's own
           // doc comment for the exact mid-generation truncation bug this closes.
           max_tokens: request.maxTokens ?? this.maxTokens,
+          ...(this.reasoningBudgetTokens ? { reasoning_budget_tokens: this.reasoningBudgetTokens } : {}),
           stream: true,
           // Without this, a streaming response omits usage entirely (the standard OpenAI-API
           // convention llama-server also implements - confirmed directly against its source,

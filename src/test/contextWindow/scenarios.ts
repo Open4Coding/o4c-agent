@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import type { ScenarioSpec, TurnSpec } from './harness.js';
+import type { ScenarioResult, ScenarioSpec, TurnSpec } from './harness.js';
 import type { ScriptRound, SummarizerMode } from './scriptedProvider.js';
 
 export const DEFAULT_WINDOWS = [4096, 8192, 16384, 32768, 57344, 114688, 229376];
@@ -71,7 +71,63 @@ function summarizerScenario(mode: SummarizerMode): ScenarioSpec {
   };
 }
 
+/**
+ * A long session: `turns` user turns of `roundsPerTurn` mixed rounds each (think, response, tool calls),
+ * so the window fills over hundreds of entries and every tier of context management gets exercised.
+ */
+export function longRunTurns(window: number, turns: number, roundsPerTurn: number, seed: number): TurnSpec[] {
+  const rng = mulberry32(seed);
+  const upTo = (fraction: number): number => Math.floor(rng() * fraction * window);
+  return many(turns, (t) => ({
+    prompt: `long task ${t}`,
+    rounds: [
+      ...many(roundsPerTurn, () => ({
+        thinkTokens: rng() < 0.5 ? upTo(0.01) : 0,
+        responseTokens: Math.max(1, upTo(0.005)),
+        // Every round but the last calls a tool: a round without one ends the turn, as in the real loop.
+        calls: many(1 + Math.floor(rng() * 2), () => ({ argTokens: upTo(0.008), resultTokens: upTo(0.012) })),
+      })),
+      { responseTokens: 20 },
+    ],
+  }));
+}
+
+/** Checks the order the tiers fire in across a long run: prune first, then compaction, hard-stop last. */
+function checkTierOrder(r: ScenarioResult): void {
+  if (r.window < 57344) return;
+  const firstPrune = r.timeline.find((e) => e.kind === 'prune')?.at;
+  const firstCompact = r.timeline.find((e) => e.kind === 'compaction')?.at;
+  const firstStop = r.timeline.find((e) => e.kind === 'hard-stop')?.at;
+  assert.ok(r.prunes >= 1, 'pruning should fire during a long run at this window');
+  if (firstCompact !== undefined && firstPrune !== undefined) {
+    assert.ok(firstPrune <= firstCompact, `prune (request ${firstPrune}) should come before compaction (${firstCompact})`);
+  }
+  if (firstStop !== undefined) {
+    assert.ok(
+      firstCompact !== undefined && firstStop > firstCompact,
+      `hard-stop (request ${firstStop}) should only happen after compaction (${firstCompact ?? 'never'})`,
+    );
+  }
+}
+
 export const SCENARIOS: ScenarioSpec[] = [
+  {
+    name: 'long-run-steady',
+    build: (window) => longRunTurns(window, 8, 25, 21),
+    check: checkTierOrder,
+  },
+  {
+    name: 'soak-long-session',
+    windows: [65536, 114688, 229376],
+    build: (window) => longRunTurns(window, 30, 50, 31),
+    check: checkTierOrder,
+  },
+  {
+    name: 'long-run-code-heavy',
+    drift: 1.5,
+    build: (window) => longRunTurns(window, 8, 25, 22),
+    check: checkTierOrder,
+  },
   {
     name: 'cutoff-chain',
     build: () => [

@@ -15,3 +15,18 @@ export function detectCurrentOs(platform: NodeJS.Platform = process.platform): O
   if (platform === 'darwin') return 'macos';
   return 'linux';
 }
+
+/** The shell `run_shell` actually uses: Node's `exec` picks `ComSpec` on Windows and `/bin/sh` elsewhere. */
+export function shellFor(os: OsKey, env: NodeJS.ProcessEnv = process.env): string {
+  if (os === 'windows') return env.ComSpec || 'cmd.exe';
+  return '/bin/sh';
+}
+
+/** A line for the system prompt stating the real OS and shell, so the model doesn't guess Unix commands. */
+export function platformPromptLine(os: OsKey = detectCurrentOs(), env: NodeJS.ProcessEnv = process.env): string {
+  const shell = shellFor(os, env);
+  if (os === 'windows') {
+    return `Platform: Windows. Shell commands run in ${shell}, not a Unix shell: use Windows commands (dir, type, findstr, where, cd) and backslash paths. Do not assume Unix commands such as ls, cat, pwd, or grep exist.`;
+  }
+  return `Platform: ${os === 'macos' ? 'macOS' : 'Linux'}. Shell commands run in ${shell}.`;
+}

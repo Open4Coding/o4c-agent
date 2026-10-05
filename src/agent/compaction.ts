@@ -38,6 +38,24 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
   microCompactReserveTokens: DEFAULT_MICRO_COMPACT_RESERVE_TOKENS,
 };
 
+/** Windows at or above this keep the fixed defaults; below it, keep-recent scales with the window. */
+const FIXED_KEEP_RECENT_FROM_WINDOW = 200_000;
+const SMALL_WINDOW_KEEP_RECENT_FRACTION = 0.5;
+const SMALL_WINDOW_COMPACT_RESERVE_FRACTION = 0.2;
+const SMALL_WINDOW_PRUNE_RESERVE_FRACTION = 0.3;
+
+/** Below 200K every budget scales with the window. The fixed defaults are a small share of a large window, but on a
+ * small one they are most of it - a 16K window with a 16K reserve compacts every round. Keeping half the window
+ * verbatim leaves a larger share after each compaction, at the cost of compacting more often. */
+export function compactionSettingsForWindow(contextWindow: number): CompactionSettings {
+  if (contextWindow >= FIXED_KEEP_RECENT_FROM_WINDOW) return DEFAULT_COMPACTION_SETTINGS;
+  return {
+    reserveTokens: Math.max(1, Math.round(contextWindow * SMALL_WINDOW_COMPACT_RESERVE_FRACTION)),
+    keepRecentTokens: Math.max(1, Math.round(contextWindow * SMALL_WINDOW_KEEP_RECENT_FRACTION)),
+    microCompactReserveTokens: Math.max(1, Math.round(contextWindow * SMALL_WINDOW_PRUNE_RESERVE_FRACTION)),
+  };
+}
+
 /** Trigger: compact once the visible context estimate is within `reserveTokens` of the model's
  * real window. Pure and trivial on purpose - the real complexity is in `findCutPoint()`. */
 export function shouldCompact(
