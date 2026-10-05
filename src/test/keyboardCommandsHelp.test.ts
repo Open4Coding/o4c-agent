@@ -37,6 +37,7 @@ test('documents the keybindings this project actually confirmed, not a generic/a
     'Ctrl+C',
     'Home / End',
     'Ctrl+U',
+    'Ctrl+O',
     'Tab',
   ]) {
     assert.ok(help.includes(needle), `expected the table to mention "${needle}"`);

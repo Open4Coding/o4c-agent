@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { InputBox } from '../ui/InputBox.js';
+import stringWidth from 'string-width';
+import { InputBox, sanitizeInputText } from '../ui/InputBox.js';
 
 // Standard terminal escape/control sequences Ink's useInput parses into named keys. Built via
 // String.fromCharCode rather than string-literal escapes so the exact bytes sent are unambiguous.
@@ -40,6 +41,11 @@ const KITTY_SHIFT_ENTER = ESC + '[13;2u'; // modifier 2 = shift(1) + 1
 // measurably longer to settle a keypress into a committed state update than the previous stack
 // did. Confirmed empirically: 10ms was flaky, 20ms was reliable in isolation; 30ms gives margin
 // for real test-runner contention.
+/** Paste chunks settle into one insert after PASTE_SETTLE_MS in InputBox, so tests that paste wait past it. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 120));
+}
+
 function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 30));
 }
@@ -55,6 +61,25 @@ async function press(stdin: { write: (data: string) => void }, key: string): Pro
   stdin.write(key);
   await tick();
 }
+
+test('ctrl-O prints each collapsed paste in full above the box, in order, and leaves the box alone', async () => {
+  const shown: string[] = [];
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, { onSubmit: (v) => submitted.push(v), onShowPaste: (text: string) => shown.push(text) }),
+  );
+  const first = Array.from({ length: 7 }, (_, i) => `first ${i}`).join('\n');
+  const second = Array.from({ length: 7 }, (_, i) => `second ${i}`).join('\n');
+  stdin.write(first);
+  await settle();
+  stdin.write(second);
+  await settle();
+  await press(stdin, '');
+  assert.deepEqual(shown, [first, second], 'each collapsed paste must be printed in full, in order');
+  assert.ok(lastFrame()?.includes('ctrl-O to view'), 'the box keeps its placeholders');
+  await press(stdin, '\r');
+  assert.equal(submitted[0], first + second, 'submit still sends the full text');
+});
 
 test('typing then pressing Enter submits the typed value and clears the box', async () => {
   const submitted: string[] = [];
@@ -323,7 +348,7 @@ test('Home then End on row 1 of a wrapped line round-trips to that row\'s start 
 
   const wrapped = `${'A'.repeat(94)}BBBB`;
   stdin.write(wrapped);
-  await tick(); // cursor at the end (98), row 1
+  await settle(); // cursor at the end (98), row 1
 
   await press(stdin, HOME); // row 1's home is index 94, the first 'B' - not index 0
   await type(stdin, 'Z'); // splits the B's: confirms Home actually moved the cursor
@@ -448,7 +473,7 @@ test('up arrow moves the cursor up one wrapped row, preserving column, before ev
   // fast. Cursor ends at the very end (index 98), which is row 1, column 4 (one past the last
   // "B") - column 4 on row 0 is the 3rd and 4th 'A' (columns 0-1 are the prompt itself).
   stdin.write(WRAPPED_TWO_ROW_VALUE);
-  await tick();
+  await settle();
 
   await press(stdin, UP);
   // Landing on row 0 at column 4 means the cursor is now 2 characters into the 'A' run (column 4
@@ -525,7 +550,7 @@ test('a pasted chunk with embedded carriage returns is normalized to real newlin
   await tick();
 
   stdin.write('line one\r\rline two\rline three');
-  await tick();
+  await settle();
   await press(stdin, ENTER);
 
   assert.deepEqual(submitted, ['line one\n\nline two\nline three']);
@@ -537,7 +562,7 @@ test('a pasted chunk with Windows-style CRLF line endings does not double every 
   await tick();
 
   stdin.write('line one\r\nline two\r\nline three');
-  await tick();
+  await settle();
   await press(stdin, ENTER);
 
   assert.deepEqual(submitted, ['line one\nline two\nline three']);
@@ -828,4 +853,160 @@ test('the cursor never blinks: an idle input box does not repaint, enabled or di
     assert.equal(frames.length, before, 'no repaints while idle (disabled=' + disabled + ')');
     assert.ok(frames[frames.length - 1].includes(CURSOR_ON), 'the cursor is visible (disabled=' + disabled + ')');
   }
+});
+
+test('a long pasted value keeps the rendered box within the terminal height and still shows the newest text', async () => {
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
+  const pasted = Array.from({ length: 300 }, (_, i) => `pasted line ${i}`).join('\n');
+  stdin.write(pasted);
+  await settle();
+  const frame = lastFrame() ?? '';
+  assert.ok(frame.split('\n').length < 30, `frame is ${frame.split('\n').length} rows, must stay under 30`);
+  assert.ok(frame.includes('300 lines pasted'), 'the paste must show as its placeholder');
+});
+
+test('a pasted block of six or more lines shows as one placeholder, and submit sends the full text', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const pasted = Array.from({ length: 8 }, (_, i) => `pasted line ${i}`).join('\n');
+  stdin.write(pasted);
+  await settle();
+  assert.ok(lastFrame()?.includes('8 lines pasted #') && lastFrame()?.includes('ctrl-O to view'), 'placeholder must show');
+  assert.equal(lastFrame()?.includes('pasted line 3'), false, 'the collapsed text must not show');
+  await press(stdin, '\r');
+  assert.equal(submitted[0], pasted, 'submit must send the full pasted text');
+});
+
+test('recalling a long history entry with the up arrow shows a placeholder, not the full text', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const pasted = Array.from({ length: 9 }, (_, i) => `history line ${i}`).join('\n');
+  stdin.write(pasted);
+  await settle();
+  await press(stdin, '\r');
+  await press(stdin, '\x1b[A');
+  assert.ok(lastFrame()?.includes('9 lines pasted'), 'recalled text must show as a placeholder');
+  assert.equal(lastFrame()?.includes('history line 4'), false, 'full recalled text must not be drawn');
+  await press(stdin, '\r');
+  assert.equal(submitted[1], pasted, 'submitting the recalled entry must send the full text');
+});
+
+test('a restored (prefill) long prompt submits its full text after ctrl-o or Enter', async () => {
+  const submitted: string[] = [];
+  const full = Array.from({ length: 9 }, (_, i) => `restored line ${i}`).join('\n');
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, { onSubmit: (v) => submitted.push(v), prefill: { token: 1, text: full } }),
+  );
+  await tick();
+  assert.ok(lastFrame()?.includes('9 lines pasted'), 'restored text must show as a placeholder');
+  await press(stdin, '\r');
+  assert.equal(submitted[0], full, 'submitting a restored placeholder must send the full text');
+});
+
+test('clearing a collapsed paste with down-arrow then recalling it again does not duplicate history or the placeholder', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const pasted = Array.from({ length: 8 }, (_, i) => `cycle line ${i}`).join('\n');
+  stdin.write(pasted);
+  await settle();
+  for (let i = 0; i < 3; i++) {
+    await press(stdin, '\x1b[B');
+    await press(stdin, '\x1b[A');
+  }
+  assert.ok(lastFrame()?.includes('8 lines pasted #'), 'recalled text is still a placeholder');
+  await press(stdin, '\r');
+  assert.equal(submitted[0], pasted, 'the full text must still be sent after repeated recall');
+});
+
+test('a collapsed paste cleared with down-arrow, then recalled after an Enter, still submits the full text', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const pasted = Array.from({ length: 8 }, (_, i) => `recall line ${i}`).join('\n');
+  stdin.write(pasted);
+  await settle();
+  await press(stdin, '\x1b[B');
+  await press(stdin, '\r');
+  await press(stdin, '\x1b[A');
+  await press(stdin, '\r');
+  assert.equal(submitted.at(-1), pasted, 'the recalled entry must send the full text, not its placeholder');
+});
+
+test('one paste that arrives as several chunks becomes a single placeholder and submits the full text', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const lines = Array.from({ length: 8 }, (_, i) => `chunk line ${i}`);
+  stdin.write(lines.slice(0, 4).join('\n'));
+  stdin.write('\n' + lines.slice(4).join('\n'));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const frame = lastFrame() ?? '';
+  assert.equal((frame.match(/lines pasted #/g) ?? []).length, 1, 'chunks of one paste must form one placeholder');
+  assert.ok(frame.includes('8 lines pasted'), 'the placeholder must count all eight lines');
+  await press(stdin, '\r');
+  assert.equal(submitted[0], lines.join('\n'), 'submit must send the whole paste');
+});
+
+test('a tab-indented paste never reaches the frame as a raw tab, and no frame line outgrows the terminal', async () => {
+  // The stacked-input-box artifact: string-width scores a tab as zero columns, so Ink measures a
+  // tab-indented line as fitting, never wraps it, and the raw tab reaches the terminal - which
+  // expands it to the next tab stop. The line then occupies more rows than Ink counted, its
+  // eraseLines() undercounts, and the top of the previous box is left on screen. Measured against
+  // real Ink on a fake TTY (.tmp-repro/erase-audit.tsx, 2026-10-05): tab-indented input left two
+  // stale rows per repaint; the same text space-indented left none.
+  const { lastFrame, stdin } = render(React.createElement(InputBox, { onSubmit: () => {} }));
+  await tick();
+  // Four lines, under PASTE_COLLAPSE_LINES, so this renders in the box instead of collapsing.
+  stdin.write('\tone\n\t\ttwo\n\tthree\n\t\t\tfour');
+  await settle();
+  const frame = lastFrame() ?? '';
+  assert.ok(!frame.includes('\t'), 'no raw tab may reach the rendered frame');
+  assert.ok(frame.includes('        one'), 'a leading tab expands to the first tab stop');
+  // ink-testing-library's stdout reports 100 columns.
+  for (const line of frame.split('\n')) {
+    const width = stringWidth(line);
+    assert.ok(width <= 100, `frame line of width ${width} outgrows the 100-column terminal: ${JSON.stringify(line)}`);
+  }
+});
+
+test('pasted ANSI escapes are stripped whole, not left behind as literal text', async () => {
+  const submitted: string[] = [];
+  const { lastFrame, stdin } = render(
+    React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }),
+  );
+  await tick();
+  stdin.write(`before${ESC}[31mRED${ESC}[0mafter`);
+  // The rendered frame carries the cursor cell's own SGR pair, which can land mid-word and split
+  // it, so these checks run against the frame with SGR codes removed. Polling rather than waiting a
+  // fixed time: the paste buffer flushes PASTE_SETTLE_MS after the last chunk, and under full-suite
+  // load that plus React's commit can outlast a single settle().
+  const sgr = new RegExp(`${ESC}\[[0-9;]*m`, 'g');
+  const whole = (f: string) => ['before', 'RED', 'after'].every((part) => f.replace(sgr, '').includes(part));
+  let frame = '';
+  for (let i = 0; i < 40 && !whole(frame); i++) {
+    await tick();
+    frame = lastFrame() ?? '';
+  }
+  assert.ok(whole(frame), 'all of the pasted text must reach the box before Enter is pressed');
+  assert.ok(!frame.includes('[31m') && !frame.includes('[0m'), 'the escape payload must not survive as text');
+  await press(stdin, ENTER);
+  // Deliberately not asserting the ORDER of the three fragments. An ESC byte makes Ink's keypress
+  // parser split one write into several same-tick useInput calls, and each insert path still reads
+  // the `cursor` from its render closure rather than the ref - so same-tick inserts land in reverse
+  // ('abc' typed in one tick renders 'cba'; this input submits 'REDafterbefore'). That is a real,
+  // separate bug with its own reproduction (.tmp-repro/order-probe.tsx) and its own fix; what this
+  // test pins is that no escape byte survives into the submitted text.
+  const sent = submitted[0] ?? '';
+  assert.ok(!sent.includes(ESC), 'no escape byte may survive into the submitted text');
+  for (const part of ['before', 'RED', 'after']) {
+    assert.ok(sent.includes(part), `the visible text "${part}" must survive`);
+  }
+});
+
+test('sanitizeInputText expands tabs to real tab stops and drops stray control characters', () => {
+  assert.equal(sanitizeInputText('a\tb'), 'a       b', 'a tab advances to column 8');
+  assert.equal(sanitizeInputText('\tx'), '        x', 'a leading tab fills a whole stop');
+  assert.equal(sanitizeInputText('abcdefgh\tx'), 'abcdefgh        x', 'a tab on a stop boundary advances a full stop');
+  assert.equal(sanitizeInputText('a\tb\nc\td'), 'a       b\nc       d', 'each line counts columns from its own start');
+  assert.equal(sanitizeInputText('a\u0007b\u0008c'), 'abc', 'BEL and BS are dropped');
+  assert.equal(sanitizeInputText('a\r\nb\rc'), 'a\nb\nc', 'CRLF collapses to one newline, a bare CR becomes one');
+  assert.equal(sanitizeInputText('plain text'), 'plain text', 'text needing nothing is returned unchanged');
 });

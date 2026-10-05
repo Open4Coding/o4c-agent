@@ -77,6 +77,20 @@ test('measureFrame: narrowing wraps only the lines wider than the new width', ()
   assert.deepEqual(measureFrame(chunk, 30), { lines: 4, rows: 14 });
 });
 
+test('measureFrame: a tab costs its real columns, not the zero string-width reports', () => {
+  // string-width scores a tab as zero columns, so a tab-carrying line used to measure as narrower
+  // than it draws - and reconcile() would then see rows === expected, conclude Ink's erase lands
+  // correctly, and pass a chunk through that leaves stale rows on screen. InputBox keeps tabs out
+  // of the input box (see sanitizeInputText); this is the backstop for every other path into a frame.
+  // Ten tabs from column 0 = 80 columns, plus 30 characters = 110, which needs 2 rows at width 100.
+  const line = '\t'.repeat(10) + 'y'.repeat(30);
+  const chunk = inkFrame([line, MODE].join('\n'), 2);
+  assert.deepEqual(measureFrame(chunk, 100), { lines: 2, rows: 3 });
+  // A tab lands on the next stop, not a fixed width: 'ab' + tab reaches column 8, not 9.
+  assert.deepEqual(measureFrame(inkFrame('ab\ty', 1), 8), { lines: 1, rows: 2 });
+  assert.deepEqual(measureFrame(inkFrame('ab\ty', 1), 9), { lines: 1, rows: 1 });
+});
+
 test('measureFrame: an empty line still occupies one row', () => {
   assert.deepEqual(measureFrame(inkFrame('a\n\nb'), 80), { lines: 3, rows: 3 });
 });

@@ -717,3 +717,11 @@ test('a short plain answer with no tool work still ends the turn normally (no fa
   assert.equal(result, 'the answer is 4');
   assert.equal(provider.callCount, 1);
 });
+
+test('addNotice keeps a UI note in history without sending it to the model or counting it toward context', () => {
+  const loop = new AgentLoop(new FakeProvider([]), [], 'system');
+  loop.addNotice('x'.repeat(4000));
+  assert.equal(loop.getEntries().length, 1, 'the note must be kept in history so the session saves it');
+  assert.equal(loop.getMessages().length, 0, 'the note must never reach the model');
+  assert.equal(loop.getVisibleTokenEstimate(), 0, 'the note must not count toward the context estimate');
+});

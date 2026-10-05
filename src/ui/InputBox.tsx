@@ -1,6 +1,93 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
+import stringWidth from 'string-width';
 import { moveVisualRow, rowStart, rowEnd } from './inputBoxLayout.js';
+
+/** A paste this many lines or longer is shown as one placeholder line; ctrl-o expands it in place. */
+const PASTE_COLLAPSE_LINES = 6;
+/** Quiet time after the last chunk of a paste before the buffered chunks are inserted. */
+const PASTE_SETTLE_MS = 60;
+/** Terminal tab stop, in columns. Every terminal this app targets advances a `\t` to the next
+ * multiple of 8; expanding to the same stops reproduces exactly what the terminal would have
+ * drawn, so what's stored and what's shown have identical width. */
+const TAB_STOP = 8;
+
+/** Matches a whole ANSI escape sequence (CSI, OSC terminated by BEL or ST, and the short two-byte
+ * ESC forms), so the sequence is removed entire rather than leaving its payload (`[31m`) behind as
+ * literal text. Same shape as the `ansi-regex` package's pattern; inlined rather than adding a
+ * dependency on a transitive package. */
+// eslint-disable-next-line no-control-regex
+const ANSI_SEQUENCE =
+  /[\u001B\u009B][[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+/** Any character left that the terminal would treat as a control rather than draw: a tab, any
+ * other C0 control except `\n`, DEL, or a C1 control. */
+// eslint-disable-next-line no-control-regex
+const NEEDS_SANITIZING = /[\t\u0000-\u0009\u000B-\u001F\u007F-\u009F]/;
+
+/**
+ * Makes `text` safe to put in the input box's value, where "safe" means every character it holds
+ * occupies exactly the number of terminal columns that `string-width` reports for it.
+ *
+ * This is a correctness requirement, not cosmetics. Ink decides whether a line needs wrapping by
+ * measuring it with `widest-line`/`string-width` (`node_modules/ink/build/dom.js`'s
+ * `measureTextNode`), both of which score a `\t` as ZERO columns. A tab-indented line therefore
+ * measures as fitting, Ink never wraps it, the raw tab reaches the terminal, and the terminal
+ * expands it to the next tab stop - so the line really occupies two rows while Ink counted one.
+ * Ink erases the previous frame with `eraseLines(previousLineCount)`, which moves up by that
+ * undercounted number, so the top rows of the old box are never erased and stay on screen. Every
+ * redraw (a cursor move, a keystroke) stacks another leftover.
+ *
+ * Measured directly against real Ink writing to a fake TTY (`.tmp-repro/erase-audit.tsx`,
+ * 2026-10-05): the same 5-line paste indented with spaces gave `erases=10, ink lines=9,
+ * real rows=9` - clean; indented with tabs it gave `erases=10, ink lines=9, real rows=11`, i.e.
+ * two stale rows left behind per repaint. That is the stacked-input-box artifact David reported,
+ * and it is independent of the box's height, which is why capping the box at 12 rows (tried
+ * 2026-10-04, reverted) never fixed it.
+ *
+ * ANSI escapes get the same treatment for the same reason plus a worse one: pasting text copied
+ * out of a coloured terminal carries SGR runs that bleed into neighbouring rows, and a stray CSI
+ * physically moves the real cursor mid-frame. They are removed whole. `\r` normalising lives here
+ * too - it was previously inline in the keystroke handler (see #3's original large-paste bug).
+ */
+export function sanitizeInputText(text: string): string {
+  const newlines = text.replace(ANSI_SEQUENCE, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!NEEDS_SANITIZING.test(newlines)) return newlines;
+  return newlines
+    .split('\n')
+    .map((line) => {
+      let out = '';
+      let col = 0;
+      for (const ch of line) {
+        if (ch === '\t') {
+          const pad = TAB_STOP - (col % TAB_STOP);
+          out += ' '.repeat(pad);
+          col += pad;
+          continue;
+        }
+        const code = ch.codePointAt(0) ?? 0;
+        // Remaining C0/DEL/C1 controls draw nothing but can move the cursor - drop them outright.
+        if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) continue;
+        out += ch;
+        // Printable ASCII is always one column; anything else needs the real measurement. The fast
+        // path matters: this runs over every character of a paste that can be tens of KB.
+        col += code >= 0x20 && code <= 0x7e ? 1 : stringWidth(ch);
+      }
+      return out;
+    })
+    .join('\n');
+}
+
+/** Collapsed pastes: placeholder text -> the full pasted text it stands for. Module scope, not a ref: an InputBox
+ * remount (a turn ending, a restored prompt) must not lose the text its placeholders stand for. */
+const pasteStore = new Map<string, string>();
+let pasteCounter = 0;
+
+function expandPastes(text: string, pastes: ReadonlyMap<string, string>): string {
+  let out = text;
+  for (const [placeholder, full] of pastes) out = out.split(placeholder).join(full);
+  return out;
+}
+
 import { theme } from './theme.js';
 
 export interface InputBoxProps {
@@ -23,6 +110,8 @@ export interface InputBoxProps {
    * in a command name for the user to finish typing an argument onto, rather than auto-submitting
    * it the way a plain palette selection does. */
   prefill?: { token: number; text: string };
+  /** Ctrl+O on a collapsed paste: the caller prints its full text above the box. */
+  onShowPaste?: (text: string) => void;
   onSubmit: (value: string) => void;
   /** Fires on a bare Escape press (never on Alt/Ctrl/Shift+Escape combos - Ink only reports
    * plain Escape as `key.escape` regardless of modifiers, so this fires for all of them alike).
@@ -86,6 +175,7 @@ export function InputBox({
   onChange,
   resetToken,
   prefill,
+  onShowPaste,
   onSubmit,
   onEscape,
   initialHistory,
@@ -93,6 +183,26 @@ export function InputBox({
 }: InputBoxProps) {
   const [value, setValue] = useState('');
   const [cursor, setCursor] = useState(0);
+  // A terminal delivers one paste as several input chunks. They are buffered and inserted together, so one paste
+  // becomes one placeholder instead of one per chunk. Any other key flushes the buffer first, so Enter can't outrun it.
+  const pendingPasteRef = useRef('');
+  const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const cursorRef = useRef(0);
+  cursorRef.current = cursor;
+  const flushPaste = (): void => {
+    if (pasteTimerRef.current) {
+      clearTimeout(pasteTimerRef.current);
+      pasteTimerRef.current = undefined;
+    }
+    const text = pendingPasteRef.current;
+    if (!text) return;
+    pendingPasteRef.current = '';
+    const at = cursorRef.current;
+    const insert = collapseText(text);
+    historyIndexRef.current = -1;
+    setValue((v) => v.slice(0, at) + insert + v.slice(at));
+    setCursor(at + insert.length);
+  };
 
   // The cursor is a solid highlighted cell and never blinks. A blink repainted the whole live frame twice a
   // second (David could not see it blink in practice), while a solid cursor costs nothing and is always
@@ -112,8 +222,9 @@ export function InputBox({
 
   useEffect(() => {
     if (!prefill) return;
-    setValue(prefill.text);
-    setCursor(prefill.text.length);
+    const shown = collapseText(prefill.text);
+    setValue(shown);
+    setCursor(shown.length);
     killedRef.current = '';
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.token]);
@@ -131,6 +242,24 @@ export function InputBox({
   const historyRef = useRef<string[]>(initialHistory ?? []);
   const historyIndexRef = useRef<number>(-1); // -1 = not currently browsing history
   const draftRef = useRef<string>(''); // what was being typed before browsing started
+  // Long text arriving from outside the box (a paste, a recalled history entry, a restored prompt) is shown as a
+  // placeholder too, so the box never jumps to a height that makes Ink commit its frames into scrollback.
+  //
+  // This is also the single funnel every piece of outside text passes through on its way into
+  // `value` - a paste, a typed character, a `prefill`, an up/down-arrow history recall - so it is
+  // where `sanitizeInputText` belongs. Sanitizing here rather than at each call site means the
+  // text kept in `pasteStore` (and therefore what Enter submits) is the sanitized text too, so a
+  // placeholder and the value it stands for can never disagree. It also covers history restored
+  // from a session file written before this existed, which can still hold raw tabs.
+  const collapseText = (rawText: string): string => {
+    const text = sanitizeInputText(rawText);
+    const lineCount = text.split('\n').length;
+    if (lineCount < PASTE_COLLAPSE_LINES) return text;
+    for (const [existing, full] of pasteStore) if (full === text) return existing;
+    const placeholder =`[${lineCount} lines pasted #${++pasteCounter} - ctrl-O to view]`;
+    pasteStore.set(placeholder, text);
+    return placeholder;
+  };
   // What Ctrl-U most recently killed (the bash/readline "kill ring", one slot deep) - the next
   // up-arrow press yanks it back in at the current cursor position instead of browsing history,
   // so an accidental Ctrl-U is one keystroke to undo rather than gone for good.
@@ -138,6 +267,7 @@ export function InputBox({
 
   useInput(
     (input, key) => {
+      if (pendingPasteRef.current && !(input && input.length > 1)) flushPaste();
       // Editing always works, even while `disabled` (busy) - that's what lets you type
       // ahead and queue up the next message instead of being locked out until the
       // current turn finishes. `onSubmit` always fires on Enter too; it's up to the
@@ -174,7 +304,8 @@ export function InputBox({
           setCursor((c) => c + 1);
           return;
         }
-        const submitted = value;
+        const submitted = expandPastes(value, pasteStore);
+        pasteStore.clear();
         if (submitted) {
           historyRef.current.push(submitted);
           onHistoryChange?.(historyRef.current);
@@ -215,7 +346,7 @@ export function InputBox({
         } else if (historyIndexRef.current > 0) {
           historyIndexRef.current -= 1;
         }
-        const recalled = hist[historyIndexRef.current];
+        const recalled = collapseText(hist[historyIndexRef.current]);
         setValue(recalled);
         setCursor(recalled.length);
         return;
@@ -240,8 +371,9 @@ export function InputBox({
         // session's persisted inputHistory the same way a real submission would, instead of
         // being discarded.
         if (historyIndexRef.current === -1) {
-          if (value) {
-            historyRef.current.push(value);
+          const entry = expandPastes(value, pasteStore);
+          if (entry && historyRef.current.at(-1) !== entry) {
+            historyRef.current.push(entry);
             onHistoryChange?.(historyRef.current);
           }
           setValue('');
@@ -251,7 +383,7 @@ export function InputBox({
         const hist = historyRef.current;
         if (historyIndexRef.current < hist.length - 1) {
           historyIndexRef.current += 1;
-          const recalled = hist[historyIndexRef.current];
+          const recalled = collapseText(hist[historyIndexRef.current]);
           setValue(recalled);
           setCursor(recalled.length);
         } else {
@@ -301,6 +433,13 @@ export function InputBox({
         setCursor(value.length);
         return;
       }
+      if (key.ctrl && input === 'o') {
+        if (!onShowPaste) return;
+        const found = [...pasteStore].filter(([placeholder]) => value.includes(placeholder));
+        found.sort((a, b) => value.indexOf(a[0]) - value.indexOf(b[0]));
+        for (const [, full] of found) onShowPaste(full);
+        return;
+      }
       if (key.ctrl && input === 'u') {
         // Bash convention: kill from line-start to the cursor only, leaving anything after
         // the cursor untouched - and stash what was killed so the next up-arrow can yank it
@@ -328,24 +467,29 @@ export function InputBox({
       }
       if (key.ctrl || key.meta) return;
       if (input) {
-        // Normalize every line-break variant to a single real '\n' before it reaches `value` -
-        // confirmed via a raw stdin capture that a real terminal paste of multi-line text
-        // arrives as bare `\r` characters (not `\r\n`/`\n`), delivered as one single `input`
-        // string in one keystroke event, not character-by-character. A literal `\r` written
-        // straight to the terminal doesn't start a new line - it snaps the cursor back to
-        // column 0 of the *current* row - so leaving it as-is corrupts the display exactly the
-        // way #3's original large-paste bug did. Originally (before #5a) this collapsed every
-        // run of line breaks to a single space instead, since the box couldn't render more than
-        // one line at all yet - now that it genuinely can, David reported that as a bug in its
-        // own right ("paste multi line does not maintain the cr lf"): pasting a multi-line
-        // snippet should produce a multi-line entry, not one long space-joined line. `\r\n`
-        // collapses to one `\n` (not two) so a Windows-style paste doesn't double every line;
-        // every other `\r` or `\n` becomes its own `\n`, deliberately NOT collapsing runs, so a
-        // blank line in the pasted content is preserved as a blank line rather than swallowed.
-        const sanitized = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        // Line-break normalizing, tab expansion and control/ANSI stripping all happen in
+        // `sanitizeInputText`, which `collapseText` applies on the way into `value` - see both
+        // functions for why each is a correctness requirement rather than tidying. The one note
+        // worth keeping here: a real terminal paste of multi-line text arrives as bare `\r`
+        // characters (not `\r\n`/`\n`), confirmed via a raw stdin capture, delivered as one
+        // `input` string per chunk rather than character-by-character. A literal `\r` written
+        // straight to the terminal doesn't start a new line - it snaps the cursor back to column
+        // 0 of the *current* row - which is what corrupted the display in #3's original
+        // large-paste bug.
+        //
+        // Chunks are buffered RAW and sanitized once at flush, deliberately: tab expansion is
+        // column-relative, and a chunk boundary can fall mid-line, so sanitizing each chunk on
+        // its own would measure a tab's column from the chunk's start instead of the line's.
+        if (input.length > 1) {
+          pendingPasteRef.current += input;
+          if (pasteTimerRef.current) clearTimeout(pasteTimerRef.current);
+          pasteTimerRef.current = setTimeout(flushPaste, PASTE_SETTLE_MS);
+          return;
+        }
+        const insert = collapseText(input);
         historyIndexRef.current = -1;
-        setValue((v) => v.slice(0, cursor) + sanitized + v.slice(cursor));
-        setCursor((c) => c + sanitized.length);
+        setValue((v) => v.slice(0, cursor) + insert + v.slice(cursor));
+        setCursor((c) => c + insert.length);
       }
     },
     { isActive: active },
@@ -376,9 +520,9 @@ export function InputBox({
   // cursor sits at its very end, this one extra character can push a highlighted space onto its
   // own extra row for as long as the cursor stays there - accepted as a rare, cosmetic-only edge
   // case rather than reintroducing either bug above.
+  const before = value.slice(0, cursor);
   const rawAt = value.slice(cursor, cursor + 1);
   const isRealChar = rawAt !== '' && rawAt !== '\n';
-  const before = value.slice(0, cursor);
   const at = isRealChar ? rawAt : ' ';
   const after = isRealChar ? value.slice(cursor + 1) : value.slice(cursor);
   // Inverse-video SGR codes applied directly to the string, then everything joined into ONE

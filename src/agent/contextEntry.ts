@@ -120,6 +120,11 @@ export function userInputEntry(content: string, images?: string[]): ContextEntry
   return newEntry({ type: 'user', sub_type: 'input', content, images });
 }
 
+/** A UI-only note kept in history so it is saved with the session. Hidden from the model and not counted toward its context. */
+export function systemNoticeEntry(content: string): ContextEntry {
+  return newEntry({ type: 'system', sub_type: 'info', content, agent_visible: false });
+}
+
 export function aiResponseEntry(content: string): ContextEntry {
   return newEntry({ type: 'ai', sub_type: 'response', content });
 }

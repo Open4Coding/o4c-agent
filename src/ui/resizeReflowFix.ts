@@ -87,12 +87,35 @@ const HOME_ERASE_DOWN = `${CSI}1;1H${CSI}J`;
  * many `\n`-lines it has (`lines`). `chunk` is the raw string as written - Ink's own leading
  * erase sequence plus the frame plus a trailing '\n'; string-width discards escape codes, so the
  * erase prefix on the first line measures as nothing.
+ *
+ * Tabs are measured at their real cost, not string-width's. `string-width` scores a `\t` as zero
+ * columns, so a frame line carrying one measured as narrower than it draws and this function
+ * agreed with Ink's own (wrong) row count - meaning `reconcile()` saw `rows === expected`,
+ * concluded the erase would land correctly, and passed the chunk straight through while the
+ * terminal left stale rows on screen. `InputBox.sanitizeInputText` now keeps tabs out of the
+ * input box, which is where they came from; this is the backstop for every other path into a
+ * frame (model output, tool results, a future component), so the one safety net in the stack
+ * isn't blind to the same thing Ink is.
  */
+const TAB_STOP = 8;
+
+function displayWidth(line: string): number {
+  if (!line.includes('\t')) return stringWidth(line);
+  const segments = line.split('\t');
+  let col = 0;
+  for (const [i, segment] of segments.entries()) {
+    col += stringWidth(segment);
+    // Every segment but the last is followed by a tab, which advances to the next stop.
+    if (i < segments.length - 1) col += TAB_STOP - (col % TAB_STOP);
+  }
+  return col;
+}
+
 export function measureFrame(chunk: string, columns: number): { lines: number; rows: number } {
   const lines = chunk.split('\n');
   lines.pop(); // the trailing '\n' every frame ends with yields one empty tail element
   let rows = 0;
-  for (const line of lines) rows += Math.max(1, Math.ceil(stringWidth(line) / columns));
+  for (const line of lines) rows += Math.max(1, Math.ceil(displayWidth(line) / columns));
   return { lines: lines.length, rows };
 }
 

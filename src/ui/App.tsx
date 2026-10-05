@@ -1702,6 +1702,11 @@ export function App({
         onChange={handleInputChange}
         resetToken={inputResetToken}
         prefill={prefill}
+        onShowPaste={(text) => {
+          pushBlock([{ kind: 'system', text }]);
+          loop.addNotice(text);
+          void runLogger.log({ type: 'system', sub_type: 'paste-view', text });
+        }}
         onSubmit={handleSubmit}
         onEscape={handleEscape}
         initialHistory={initialSession?.inputHistory}

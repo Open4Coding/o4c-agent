@@ -11,6 +11,7 @@ import {
   aiCompactionEntry,
   aiPruneEntry,
   aiResponseEntry,
+  systemNoticeEntry,
   aiThinkEntry,
   aiToolCallEntry,
   aiToolCallResponseEntry,
@@ -174,6 +175,11 @@ export class AgentLoop {
     if (entry.agent_visible !== false) {
       this.visibleTokenEstimate -= estimateTokens(entry);
     }
+  }
+
+  /** Stores a UI-only note in history: saved with the session, never sent to the model or counted toward its context. */
+  addNotice(content: string): void {
+    this.appendEntry(systemNoticeEntry(content), () => {});
   }
 
   /** Clears conversation history and cumulative usage, starting a fresh session on the next `run()`. */

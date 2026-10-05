@@ -160,3 +160,4 @@ test('word-wrap breaks a long line at spaces instead of mid-word (the bug this r
   assert.ok(start === 0 || before === ' ', `row start ${start} is mid-word: "${value.slice(Math.max(0, start - 4), start + 4)}"`);
   assert.ok(end === value.length || after === ' ', `row end ${end} is mid-word: "${value.slice(Math.max(0, end - 4), end + 4)}"`);
 });
+
