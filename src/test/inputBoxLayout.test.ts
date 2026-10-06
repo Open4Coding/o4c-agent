@@ -7,6 +7,9 @@ import {
   moveVisualRow,
   rowStart,
   rowEnd,
+  movePageVisualRows,
+  moveParagraph,
+  toLineCol,
 } from '../ui/inputBoxLayout.js';
 
 test('toLineCol/toCursor round-trip through every position of a multi-line value, including the boundary right at each newline', () => {
@@ -161,3 +164,64 @@ test('word-wrap breaks a long line at spaces instead of mid-word (the bug this r
   assert.ok(end === value.length || after === ' ', `row end ${end} is mid-word: "${value.slice(Math.max(0, end - 4), end + 4)}"`);
 });
 
+// --- PageUp/PageDown and paragraph jumps -----------------------------------
+
+const PARAS = [
+  'alpha one',   // 0
+  'alpha two',   // 1
+  '',            // 2
+  'beta one',    // 3
+  'beta two',    // 4
+  'beta three',  // 5
+  '',            // 6
+  '',            // 7
+  'gamma one',   // 8
+].join('\n');
+
+/** Absolute cursor index of the first character of logical line `n`. */
+function startOfLine(text: string, n: number): number {
+  return text.split('\n').slice(0, n).reduce((sum, l) => sum + l.length + 1, 0);
+}
+
+test('paragraph jump moves forward across the blank-line gaps', () => {
+  assert.equal(moveParagraph(PARAS, 0, 'down'), startOfLine(PARAS, 3), 'from alpha to beta');
+  assert.equal(moveParagraph(PARAS, startOfLine(PARAS, 3), 'down'), startOfLine(PARAS, 8), 'beta to gamma, over two blanks');
+  assert.equal(moveParagraph(PARAS, startOfLine(PARAS, 8), 'down'), PARAS.length, 'past the last paragraph lands at the end');
+});
+
+test('paragraph jump moves backward, first to this paragraph then to the one before', () => {
+  // Mid-paragraph: the first press goes to this paragraph's own start.
+  assert.equal(moveParagraph(PARAS, startOfLine(PARAS, 5), 'up'), startOfLine(PARAS, 3), 'beta three -> beta one');
+  // Already at the start: the next press goes to the previous paragraph.
+  assert.equal(moveParagraph(PARAS, startOfLine(PARAS, 3), 'up'), 0, 'beta one -> alpha one');
+  assert.equal(moveParagraph(PARAS, 0, 'up'), 0, 'at the top it stays put');
+});
+
+test('paragraph jump from inside a blank gap goes to the paragraph above it', () => {
+  assert.equal(moveParagraph(PARAS, startOfLine(PARAS, 7), 'up'), startOfLine(PARAS, 3), 'the gap belongs to beta');
+});
+
+test('page movement covers a whole window of visual rows at once', () => {
+  const text = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n');
+  const down = movePageVisualRows(text, 0, 40, '> ', 10, 'down');
+  // Asserting the line, not the raw index: column preservation carries line 0's prompt offset of
+  // two columns across, which is how plain arrow movement has always behaved.
+  assert.equal(toLineCol(text, down).line, 10, 'ten rows down lands ten lines down when nothing wraps');
+  const back = movePageVisualRows(text, down, 40, '> ', 10, 'up');
+  assert.equal(back, 0, 'and ten rows back up returns to the start');
+});
+
+test('page movement counts wrapped rows, not logical lines', () => {
+  // Each line wraps into three rows at this width, so ten rows is a bit over three lines.
+  const text = Array.from({ length: 10 }, (_, i) => `${i} ` + 'word '.repeat(12)).join('\n');
+  const moved = movePageVisualRows(text, 0, 20, '> ', 10, 'down');
+  const { line } = toLineCol(text, moved);
+  assert.ok(line > 0 && line < 10, `expected to land inside the text, got line ${line}`);
+  assert.ok(line < 10, 'a page of wrapped rows must not skip the whole buffer');
+});
+
+test('page movement past the end lands on the very start or end', () => {
+  const text = 'one\ntwo\nthree';
+  assert.equal(movePageVisualRows(text, 0, 40, '> ', 50, 'down'), text.length);
+  assert.equal(movePageVisualRows(text, text.length, 40, '> ', 50, 'up'), 0);
+});

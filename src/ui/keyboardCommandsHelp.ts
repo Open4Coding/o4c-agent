@@ -50,7 +50,9 @@ const ROWS: KeyboardCommandRow[] = [
   { keys: 'Home / End', action: 'Jump to start/end of current line', availability: 'All terminals' },
   { keys: 'Ctrl+A / Ctrl+E', action: 'Jump to start/end of whole input', availability: 'All terminals' },
   { keys: 'Backspace', action: 'Delete char before cursor', availability: 'All terminals' },
-  { keys: 'Ctrl+U / Ctrl+O', action: 'Kill to cursor (↑ yanks back) / print collapsed pastes above', availability: 'All terminals' },
+  { keys: 'Ctrl+U / Ctrl+O', action: 'Kill to cursor (↑ yanks back) / expand collapsed pastes', availability: 'All terminals' },
+  { keys: 'PgUp / PgDn', action: 'Move a windowful through a long input', availability: 'All terminals' },
+  { keys: 'Ctrl+P / Ctrl+N', action: 'Jump to previous/next paragraph (also Ctrl+↑/↓ where supported)', availability: 'All terminals' },
   { keys: 'Tab', action: 'Cycle input mode', availability: 'All terminals' },
   { keys: '/', action: 'Open command palette', availability: 'All terminals' },
 ];

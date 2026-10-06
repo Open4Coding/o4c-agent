@@ -305,3 +305,68 @@ export function inputWindow(
     hiddenBelow: all.length - (start + budget),
   };
 }
+
+/**
+ * PageUp/PageDown: move the cursor a whole window of visual rows at a time, so a long paste can be
+ * crossed in a few presses instead of a few hundred. `rows` is the box's current budget, so one
+ * press moves by exactly what the box shows.
+ *
+ * Built on `moveVisualRow` rather than on row arithmetic of its own: that function already handles
+ * wrapped rows, real newlines, column preservation and clamping to a shorter row, and it is already
+ * tested. Running out of text mid-page lands on the very start or end rather than stopping short -
+ * the pager convention, and it means PageUp always eventually reaches the top.
+ */
+export function movePageVisualRows(
+  value: string,
+  cursor: number,
+  width: number,
+  prompt: string,
+  rows: number,
+  direction: 'up' | 'down',
+): number {
+  let pos = cursor;
+  for (let i = 0; i < Math.max(1, rows); i++) {
+    const next = moveVisualRow(value, pos, width, prompt, direction);
+    if (next === undefined) return direction === 'up' ? 0 : value.length;
+    pos = next;
+  }
+  return pos;
+}
+
+/**
+ * Jump to the start of the next or previous paragraph - a run of non-blank logical lines, the way
+ * an editor's paragraph motion works.
+ *
+ * Paragraphs rather than pasted blocks, deliberately. "The next entry" is the obvious thing to want
+ * in a 200-line paste, and blocks are the obvious reading of it, but a block boundary does not
+ * survive Ctrl+O: expansion replaces every placeholder with its text, leaving one plain buffer with
+ * nothing to mark where one paste ended and the next began. Tracking those boundaries would mean
+ * carrying a second model of the text alongside the value and keeping it correct through every
+ * edit. A blank line is already in the text, needs no bookkeeping, and is where the sections of a
+ * long prompt actually divide.
+ */
+export function moveParagraph(value: string, cursor: number, direction: 'up' | 'down'): number {
+  const lines = value.split('\n');
+  const { line } = toLineCol(value, cursor);
+  const isBlank = (i: number): boolean => lines[i].trim() === '';
+
+  if (direction === 'down') {
+    let i = line;
+    while (i < lines.length && !isBlank(i)) i += 1; // out of the current paragraph
+    while (i < lines.length && isBlank(i)) i += 1; // across the gap
+    if (i >= lines.length) return value.length; // nothing further: land at the very end
+    return toCursor(value, { line: i, col: 0 });
+  }
+
+  let i = line;
+  while (i > 0 && isBlank(i)) i -= 1; // sitting in a gap: back into the paragraph above it
+  while (i > 0 && !isBlank(i - 1)) i -= 1; // up to this paragraph's first line
+  if (i >= line) {
+    // Already on the first line of this paragraph, so the press means the one before it.
+    let j = i - 1;
+    while (j > 0 && isBlank(j)) j -= 1;
+    while (j > 0 && !isBlank(j - 1)) j -= 1;
+    i = Math.max(0, j);
+  }
+  return i <= 0 ? 0 : toCursor(value, { line: i, col: 0 });
+}

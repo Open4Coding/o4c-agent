@@ -18,13 +18,17 @@ const CTRL_A = String.fromCharCode(1);
 const CTRL_E = String.fromCharCode(5);
 const CTRL_U = String.fromCharCode(21);
 const CTRL_O = String.fromCharCode(15);
+const CTRL_P = String.fromCharCode(16);
+const CTRL_N = String.fromCharCode(14);
+const PAGE_UP = ESC + '[5~';
+const PAGE_DOWN = ESC + '[6~';
 const CTRL_J = String.fromCharCode(10);
 const ALT_ENTER = ESC + ENTER;
-// The cursor cell's own SGR pair (InputBox.tsx's CURSOR_BG_ON/CURSOR_BG_OFF) - amber truecolor
-// background (`theme.accent` = #FFBF00 = rgb(255,191,0)) on, default-background off. Named here
-// rather than inlined at each call site so a future color/approach change only needs updating once.
-const CURSOR_ON = `${ESC}[48;2;255;191;0m`;
-const CURSOR_OFF = `${ESC}[49m`;
+// The cursor cell's own SGR pair (InputBox.tsx's CURSOR_ON/CURSOR_OFF) - reverse video on, then
+// off, which swaps the line's own colors for that one cell so the character under the cursor stays
+// readable. Named here rather than inlined at each call site so a future change updates once.
+const CURSOR_ON = `${ESC}[7m`;
+const CURSOR_OFF = `${ESC}[27m`;
 // Kitty keyboard protocol CSI-u form for codepoint 13 (return) with a modifier: parsing is
 // purely pattern-based in Ink (see node_modules/ink/build/parse-keypress.js), independent of
 // whether the app actually negotiated the protocol with a real terminal - so these bytes are
@@ -1015,4 +1019,72 @@ test('sanitizeInputText expands tabs to real tab stops and drops stray control c
   assert.equal(sanitizeInputText('a\u0007b\u0008c'), 'abc', 'BEL and BS are dropped');
   assert.equal(sanitizeInputText('a\r\nb\rc'), 'a\nb\nc', 'CRLF collapses to one newline, a bare CR becomes one');
   assert.equal(sanitizeInputText('plain text'), 'plain text', 'text needing nothing is returned unchanged');
+});
+
+test('PageUp and PageDown move by a window of rows, not by one row', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }),
+  );
+  await tick();
+  // Five lines, under PASTE_COLLAPSE_LINES, so the box holds the text itself.
+  stdin.write(Array.from({ length: 5 }, (_, i) => `line ${i} ` + 'word '.repeat(25)).join('\n'));
+  await settle();
+  const atEnd = lastFrame() ?? '';
+  await press(stdin, PAGE_UP);
+  await settle();
+  assert.notEqual(lastFrame(), atEnd, 'PageUp must move the view');
+  await press(stdin, PAGE_DOWN);
+  await settle();
+  await press(stdin, ENTER);
+  assert.ok(submitted[0]?.startsWith('line 0'), 'paging must not alter the text');
+});
+
+test('ctrl-P and ctrl-N jump between paragraphs without touching history', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
+  await tick();
+  await type(stdin, 'aaa');
+  await press(stdin, CTRL_J);
+  await press(stdin, CTRL_J);
+  await type(stdin, 'bbb');
+  // Cursor is at the end of the second paragraph; ctrl-P goes to the first.
+  await press(stdin, CTRL_P);
+  await type(stdin, 'X');
+  await press(stdin, ENTER);
+  assert.equal(submitted[0], 'Xaaa\n\nbbb', 'ctrl-P must land at the start of the paragraph above');
+});
+
+test('ctrl-N from the first paragraph lands on the next one', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
+  await tick();
+  await type(stdin, 'aaa');
+  await press(stdin, CTRL_J);
+  await press(stdin, CTRL_J);
+  await type(stdin, 'bbb');
+  await press(stdin, CTRL_A); // to the very start
+  await press(stdin, CTRL_N); // forward one paragraph
+  await type(stdin, 'Y');
+  await press(stdin, ENTER);
+  assert.equal(submitted[0], 'aaa\n\nYbbb', 'ctrl-N must land at the start of the paragraph below');
+});
+
+test('the character under the cursor stays visible, not hidden by the highlight', async () => {
+  // Regression: the cursor cell used to set an explicit amber BACKGROUND and leave the foreground
+  // alone, but the whole line is already amber - so the character under the cursor was amber on
+  // amber and invisible anywhere except the end of the text, where it sits on a space. Reverse
+  // video (SGR 7/27) swaps the line's own colors for that one cell instead, so the character shows
+  // in the terminal's background color.
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
+  await tick();
+  await type(stdin, 'abc');
+  await press(stdin, LEFT);
+  await press(stdin, LEFT); // cursor now sits on 'b'
+  const frame = lastFrame() ?? '';
+  assert.ok(
+    frame.includes(`${CURSOR_ON}b${CURSOR_OFF}`),
+    'the character under the cursor must be inside the highlight, not replaced by it',
+  );
+  assert.ok(!frame.includes('[48;2;'), 'no explicit background may be used for the cursor cell');
 });

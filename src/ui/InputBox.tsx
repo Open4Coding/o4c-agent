@@ -1,7 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout, useWindowSize } from 'ink';
 import stringWidth from 'string-width';
-import { inputWindow, moveVisualRow, rowStart, rowEnd } from './inputBoxLayout.js';
+import {
+  inputWindow,
+  movePageVisualRows,
+  moveParagraph,
+  moveVisualRow,
+  rowStart,
+  rowEnd,
+} from './inputBoxLayout.js';
 import { expandedInputBoxCapRows, inputBoxCapRows } from './frameBudget.js';
 
 /** A paste this many lines or longer is shown as one placeholder line; ctrl-o expands it in place. */
@@ -143,19 +150,26 @@ function contentWidth(columns: number | undefined): number {
   return Math.max(1, (columns ?? 80) - 4);
 }
 
-// SGR 48;2 (truecolor background) on, then SGR 49 (default background) off - deliberately not a
-// full reset (`\x1B[0m`): background-only codes compose safely inside the single already-colored
-// string this cursor cell gets spliced into (see cursorCell's own comment), leaving whatever
-// foreground Ink already applied around the whole line untouched. `theme.accent` is amber
-// (`#FFBF00`) - the cursor color requested directly, not the user's configurable highlightColor,
-// since the caret is core chrome rather than a themeable accent.
-const [CURSOR_R, CURSOR_G, CURSOR_B] = [
-  Number.parseInt(theme.accent.slice(1, 3), 16),
-  Number.parseInt(theme.accent.slice(3, 5), 16),
-  Number.parseInt(theme.accent.slice(5, 7), 16),
-];
-const CURSOR_BG_ON = `\x1B[48;2;${CURSOR_R};${CURSOR_G};${CURSOR_B}m`;
-const CURSOR_BG_OFF = '\x1B[49m';
+// Reverse video on, then off. SGR 7 swaps whatever foreground and background are active, so the
+// cursor cell renders as a solid block in the line's own color with the character under it drawn
+// in the terminal's background color - visible, rather than lost.
+//
+// That is the point of the change. The previous version set an explicit amber BACKGROUND and left
+// the foreground alone, but the whole line is already amber: the character under the cursor was
+// amber on amber, invisible everywhere except at the very end of the text, where the cursor sits
+// on a space and there is nothing to hide (David, 2026-10-05: "can we do a highlight of the cursor
+// position in something that is a different color so you can see the letter below?"). The explicit
+// background arrived with the cursor blink in 98271c8 and outlived it - the blink itself was
+// removed in 3a895d9 - so this is a leftover, not a deliberate choice.
+//
+// SGR 7/27 is also the only pair that composes safely here. The cell is spliced into one
+// already-colored string, so an explicit foreground would need the surrounding color re-emitted
+// after it, and `\x1B[39m` resets to the terminal's default rather than to the line's amber (or to
+// its gray while disabled). Reverse video needs no restore at all: 27 turns it off and leaves both
+// colors exactly as they were, so the cell is correct in both states. These are the same codes
+// Ink's own `inverse` prop emits.
+const CURSOR_ON = '\x1B[7m';
+const CURSOR_OFF = '\x1B[27m';
 
 /**
  * A bordered, auto-growing, genuinely multi-line-capable input box. `value` may contain real
@@ -332,6 +346,37 @@ export function InputBox({
         setCursor(0);
         setExpanded(false);
         onSubmit(submitted);
+        return;
+      }
+      // Bulk movement through a long value, so a 200-line paste doesn't have to be crossed one
+      // row at a time. These are checked BEFORE the plain arrow handlers below, which own history
+      // recall - a Ctrl+arrow that fell through to those would browse history instead of moving.
+      //
+      // Binding choice: PageUp/PageDown and Ctrl+letter are the cross-platform safe baseline (see
+      // osKeyboardNotes). Ctrl+arrow is accepted too, but only as an alias - it arrives as
+      // `ESC[1;5A`, which Windows Terminal sends and Ink parses, while Terminal.app and several
+      // Linux terminals never send it and tmux swallows it. Anything that only worked through the
+      // alias would silently not exist on those terminals, so Ctrl+P/Ctrl+N carry the feature.
+      if (key.pageUp || key.pageDown) {
+        const rows = expanded ? expandedInputBoxCapRows(stdout.rows) : inputBoxCapRows(stdout.rows);
+        setCursor(
+          movePageVisualRows(
+            value,
+            cursor,
+            contentWidth(stdout.columns),
+            prompt,
+            rows,
+            key.pageUp ? 'up' : 'down',
+          ),
+        );
+        return;
+      }
+      if ((key.ctrl && input === 'p') || (key.ctrl && key.upArrow)) {
+        setCursor(moveParagraph(value, cursor, 'up'));
+        return;
+      }
+      if ((key.ctrl && input === 'n') || (key.ctrl && key.downArrow)) {
+        setCursor(moveParagraph(value, cursor, 'down'));
         return;
       }
       if (key.upArrow) {
@@ -574,7 +619,7 @@ export function InputBox({
   // `inverse` prop emits, so this is visually identical to the original nested-<Text> version.
   // Not gated on `disabled` either: this box stays genuinely live (queueing keystrokes) while a turn
   // runs, so the cursor stays visible too.
-  const cursorCell = `${CURSOR_BG_ON}${at}${CURSOR_BG_OFF}`;
+  const cursorCell = `${CURSOR_ON}${at}${CURSOR_OFF}`;
 
   // The box draws at most `inputBoxCapRows` rows of text, windowed around the cursor, however long
   // the value is. A frame as tall as the viewport cannot be erased in place - writing it scrolls
