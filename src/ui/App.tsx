@@ -23,6 +23,13 @@ import { parseOsArg } from './osKeyboardNotes.js';
 import { detectCurrentOs } from './platform.js';
 import type { Line } from './types.js';
 import { initialTextWindow, makeBlock, shouldFlushDelta, textWindowReducer, type TextBlock } from './textWindow.js';
+import {
+  expandedInputBoxCapRows,
+  inputBoxCapRows,
+  liveRegionCapChars as sharedLiveRegionCapChars,
+  liveRegionCapRows as sharedLiveRegionCapRows,
+  liveRegionCapRowsFor,
+} from './frameBudget.js';
 import { theme } from './theme.js';
 import {
   formatTokenCount,
@@ -149,16 +156,15 @@ const DELTA_FLUSH_MS = 1500;
  * frame stays under the viewport after a resize too.
  */
 function liveRegionCapChars(): number {
-  const rows = process.stdout.rows ?? 30;
-  const cols = process.stdout.columns ?? 80;
-  return Math.max(800, (rows - 10) * cols);
+  return sharedLiveRegionCapChars(process.stdout.rows, process.stdout.columns);
 }
 
-/** Row bound matching `liveRegionCapChars`: the character budget alone doesn't bound rows (many
- * short lines span far more rows than chars/cols), and a frame at or above the viewport height
- * routes Ink through its win32 full-clear path. Same ten-row margin for the rest of the frame. */
+/** Row bound matching `liveRegionCapChars`. Both now come from `frameBudget`, which divides the
+ * viewport between the live region and the input box from one set of numbers - the box became
+ * bounded too, and two caps that each assumed the other stayed small would sum past the viewport
+ * and bring back the stacking they each exist to prevent. */
 function liveRegionCapRows(): number {
-  return Math.max(3, (process.stdout.rows ?? 30) - 10);
+  return sharedLiveRegionCapRows(process.stdout.rows);
 }
 
 function liveRegionCols(): number {
@@ -1651,6 +1657,21 @@ export function App({
     setPrefill({ token: nextPrefillToken++, text: `${command.name} ` });
   }, []);
 
+  // Ctrl+O grew (or shrank) the input box: hand the live region whatever rows the box is not
+  // using, so the two together stay under the viewport. Recomputed from the live terminal size
+  // rather than a captured one, for the same reason the box's own cap is - the window resizes.
+  const handleExpandChange = useCallback((expanded: boolean) => {
+    const rows = process.stdout.rows;
+    const boxCap = expanded ? expandedInputBoxCapRows(rows) : inputBoxCapRows(rows);
+    const liveCapRows = liveRegionCapRowsFor(rows, boxCap);
+    dispatchTextWindow({
+      type: 'setLiveCaps',
+      liveCapChars: Math.max(800, liveCapRows * (process.stdout.columns ?? 80)),
+      liveCapRows,
+      liveCols: liveRegionCols(),
+    });
+  }, []);
+
   const paletteMatches = isComposingCommand(inputValue) ? matchCommands(inputValue) : [];
   const paletteOpen =
     !paletteDismissed &&
@@ -1702,11 +1723,7 @@ export function App({
         onChange={handleInputChange}
         resetToken={inputResetToken}
         prefill={prefill}
-        onShowPaste={(text) => {
-          pushBlock([{ kind: 'system', text }]);
-          loop.addNotice(text);
-          void runLogger.log({ type: 'system', sub_type: 'paste-view', text });
-        }}
+        onExpandChange={handleExpandChange}
         onSubmit={handleSubmit}
         onEscape={handleEscape}
         initialHistory={initialSession?.inputHistory}

@@ -200,3 +200,108 @@ export function rowEnd(value: string, cursor: number, width: number, prompt: str
   const targetUnitPos = positionFromRows(rows, row, rows[row].length);
   return toCursor(value, { line, col: unitPosToCol(line, targetUnitPos, prompt) });
 }
+
+/** One visual row of the box: the wrapped text, plus which logical line it came from. */
+export interface LaidOutRow {
+  text: string;
+  line: number;
+  /** Absolute cursor index (into `value`) of this row's first character. */
+  start: number;
+}
+
+/**
+ * Every visual row the whole value occupies at `width`, in order - logical lines split on '\n',
+ * each wrapped by the same `wrap-ansi` call Ink makes. This is the row count a bounded box has to
+ * work in: a value's `\n`-line count says nothing about its height once lines wrap, and a terminal
+ * that narrows can turn eight lines into twenty without a character changing.
+ */
+export function visualRows(value: string, width: number, prompt: string): LaidOutRow[] {
+  const lines = value.split('\n');
+  const out: LaidOutRow[] = [];
+  let lineStart = 0; // absolute cursor index of this logical line's first character
+  for (const [i, lineText] of lines.entries()) {
+    const rows = wrapLine(unitTextFor(i, lineText, prompt), width);
+    let consumed = 0; // characters of the wrap unit used by earlier rows of this line
+    for (const text of rows) {
+      out.push({ text, line: i, start: lineStart + unitPosToCol(i, consumed, prompt) });
+      consumed += text.length;
+    }
+    lineStart += lineText.length + 1; // +1 for the '\n' separator
+  }
+  return out;
+}
+
+/** Which entry of `visualRows` the cursor sits on, and its column within that row. */
+export function cursorInVisualRows(
+  value: string,
+  cursor: number,
+  width: number,
+  prompt: string,
+): { row: number; col: number } {
+  const lines = value.split('\n');
+  const { line, col } = toLineCol(value, cursor);
+  let rowsBefore = 0;
+  for (let i = 0; i < line; i++) rowsBefore += wrapLine(unitTextFor(i, lines[i], prompt), width).length;
+  const rows = wrapLine(unitTextFor(line, lines[line], prompt), width);
+  const here = positionInRows(rows, unitPosFor(line, col, prompt));
+  return { row: rowsBefore + here.row, col: here.col };
+}
+
+export interface InputWindowView {
+  /** The rows to render. Each is already wrapped to `width`, so rendering them joined by '\n'
+   * produces exactly `rows.length` terminal rows - no re-wrapping, no surprise height. */
+  rows: string[];
+  /** Where the cursor sits within `rows`. */
+  cursorRow: number;
+  cursorCol: number;
+  /** How many rows are cut off above and below, for the "hidden" notices. */
+  hiddenAbove: number;
+  hiddenBelow: number;
+}
+
+/**
+ * The slice of the value's visual rows that a box of at most `maxRows` rows should draw, always
+ * including the cursor's own row.
+ *
+ * Why a window at all: a live frame can never be as tall as the viewport without leaving
+ * artifacts. Writing it scrolls its own top rows into the terminal's scrollback, and Ink's erase
+ * (`eraseLines`, a relative cursor-up) physically cannot reach them afterwards - ANSI clamps the
+ * cursor at row 1. `resizeReflowFix` documents the same limit, and the local Ink patch clips
+ * frames at `viewportRows - 1` for it. Bounding the box here means that clip never has to fire.
+ *
+ * The window has no scroll state of its own: it is recomputed from the cursor on every render, and
+ * keeps the cursor in the middle of the window except near the start and end of the text. Stateless
+ * is deliberate - a remembered scroll offset would have to be invalidated on every resize, every
+ * edit and every value replacement (history recall, prefill, submit), and a stale offset renders a
+ * window that doesn't contain the cursor. The visible cost is that the view recentres as you move
+ * rather than scrolling by one row at a time.
+ */
+export function inputWindow(
+  value: string,
+  cursor: number,
+  width: number,
+  prompt: string,
+  maxRows: number,
+): InputWindowView {
+  const all = visualRows(value, width, prompt);
+  const here = cursorInVisualRows(value, cursor, width, prompt);
+  const budget = Math.max(1, maxRows);
+  if (all.length <= budget) {
+    return {
+      rows: all.map((r) => r.text),
+      cursorRow: here.row,
+      cursorCol: here.col,
+      hiddenAbove: 0,
+      hiddenBelow: 0,
+    };
+  }
+  const centred = here.row - Math.floor(budget / 2);
+  const start = Math.max(0, Math.min(centred, all.length - budget));
+  return {
+    rows: all.slice(start, start + budget).map((r) => r.text),
+    cursorRow: here.row - start,
+    cursorCol: here.col,
+    hiddenAbove: start,
+    hiddenBelow: all.length - (start + budget),
+  };
+}

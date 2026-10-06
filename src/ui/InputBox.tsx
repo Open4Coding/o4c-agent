@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput, useStdout } from 'ink';
+import { Box, Text, useInput, useStdout, useWindowSize } from 'ink';
 import stringWidth from 'string-width';
-import { moveVisualRow, rowStart, rowEnd } from './inputBoxLayout.js';
+import { inputWindow, moveVisualRow, rowStart, rowEnd } from './inputBoxLayout.js';
+import { expandedInputBoxCapRows, inputBoxCapRows } from './frameBudget.js';
 
 /** A paste this many lines or longer is shown as one placeholder line; ctrl-o expands it in place. */
 const PASTE_COLLAPSE_LINES = 6;
@@ -110,8 +111,11 @@ export interface InputBoxProps {
    * in a command name for the user to finish typing an argument onto, rather than auto-submitting
    * it the way a plain palette selection does. */
   prefill?: { token: number; text: string };
-  /** Ctrl+O on a collapsed paste: the caller prints its full text above the box. */
-  onShowPaste?: (text: string) => void;
+  /** Fires when Ctrl+O expands the box (true) and when it returns to its normal height (false).
+   * The caller uses it to shrink the streamed live region by the rows the box just took - see
+   * `frameBudget.liveRegionCapRowsFor`. Without it an expanded box and a running turn can each
+   * stay within their own cap and still push the frame past the viewport together. */
+  onExpandChange?: (expanded: boolean) => void;
   onSubmit: (value: string) => void;
   /** Fires on a bare Escape press (never on Alt/Ctrl/Shift+Escape combos - Ink only reports
    * plain Escape as `key.escape` regardless of modifiers, so this fires for all of them alike).
@@ -175,7 +179,7 @@ export function InputBox({
   onChange,
   resetToken,
   prefill,
-  onShowPaste,
+  onExpandChange,
   onSubmit,
   onEscape,
   initialHistory,
@@ -183,6 +187,10 @@ export function InputBox({
 }: InputBoxProps) {
   const [value, setValue] = useState('');
   const [cursor, setCursor] = useState(0);
+  // Ctrl+O grew the box to show an expanded paste. Reset wherever the value is replaced wholesale
+  // (submit, clear, history recall, prefill): the expanded height belongs to the text that was
+  // expanded, and leaving it set would hold a tall box open over unrelated, short content.
+  const [expanded, setExpanded] = useState(false);
   // A terminal delivers one paste as several input chunks. They are buffered and inserted together, so one paste
   // becomes one placeholder instead of one per chunk. Any other key flushes the buffer first, so Enter can't outrun it.
   const pendingPasteRef = useRef('');
@@ -214,8 +222,14 @@ export function InputBox({
   }, [value]);
 
   useEffect(() => {
+    onExpandChange?.(expanded);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded]);
+
+  useEffect(() => {
     setValue('');
     setCursor(0);
+    setExpanded(false);
     killedRef.current = '';
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetToken]);
@@ -225,6 +239,7 @@ export function InputBox({
     const shown = collapseText(prefill.text);
     setValue(shown);
     setCursor(shown.length);
+    setExpanded(false);
     killedRef.current = '';
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.token]);
@@ -315,6 +330,7 @@ export function InputBox({
         killedRef.current = '';
         setValue('');
         setCursor(0);
+        setExpanded(false);
         onSubmit(submitted);
         return;
       }
@@ -349,6 +365,7 @@ export function InputBox({
         const recalled = collapseText(hist[historyIndexRef.current]);
         setValue(recalled);
         setCursor(recalled.length);
+        setExpanded(false);
         return;
       }
       if (key.downArrow) {
@@ -378,6 +395,7 @@ export function InputBox({
           }
           setValue('');
           setCursor(0);
+          setExpanded(false);
           return;
         }
         const hist = historyRef.current;
@@ -386,6 +404,7 @@ export function InputBox({
           const recalled = collapseText(hist[historyIndexRef.current]);
           setValue(recalled);
           setCursor(recalled.length);
+          setExpanded(false);
         } else {
           historyIndexRef.current = -1;
           setValue(draftRef.current);
@@ -434,10 +453,22 @@ export function InputBox({
         return;
       }
       if (key.ctrl && input === 'o') {
-        if (!onShowPaste) return;
-        const found = [...pasteStore].filter(([placeholder]) => value.includes(placeholder));
-        found.sort((a, b) => value.indexOf(a[0]) - value.indexOf(b[0]));
-        for (const [, full] of found) onShowPaste(full);
+        // Expand every collapsed paste in the box, in the order they appear, replacing each
+        // placeholder with the text it stands for - and grow the box to its expanded height so
+        // there is somewhere to put it. The text becomes ordinary editable content; the box is a
+        // window onto it, scrolled by moving the cursor.
+        //
+        // In-place expansion was removed on 2026-10-05 because it stacked copies of the box in
+        // scrollback on every cursor move. That was never the expansion's fault: `string-width`
+        // scores a tab as zero columns, so Ink under-counted a tab-indented line's width and its
+        // erase moved up too few rows (see `sanitizeInputText`). With tabs no longer reaching the
+        // frame, and the box bounded so the frame stays under the viewport, it is safe again -
+        // `inputBoxStacking.test.tsx` holds it to one box on screen.
+        const expandedValue = expandPastes(value, pasteStore);
+        if (expandedValue === value) return;
+        setExpanded(true);
+        setValue(expandedValue);
+        setCursor(expandedValue.length);
         return;
       }
       if (key.ctrl && input === 'u') {
@@ -525,6 +556,12 @@ export function InputBox({
   const isRealChar = rawAt !== '' && rawAt !== '\n';
   const at = isRealChar ? rawAt : ' ';
   const after = isRealChar ? value.slice(cursor + 1) : value.slice(cursor);
+  // The exact text that gets laid out, with that added space already in it when the cursor sits on
+  // a newline or past the end. The window is measured against this rather than `value`, so the row
+  // the cursor lands on is the row it is actually drawn on - measuring one string and rendering a
+  // different one is how a cursor ends up highlighted in the wrong place.
+  const valueWithCursor = isRealChar ? value : `${before} ${after}`;
+  const cursorInValue = cursor;
   // Inverse-video SGR codes applied directly to the string, then everything joined into ONE
   // string before it ever reaches <Text> - not left as separate {prompt}{before}{cursorCell}
   // {after} children (the previous shape, with the cursor cell as a nested <Text inverse>
@@ -538,13 +575,52 @@ export function InputBox({
   // Not gated on `disabled` either: this box stays genuinely live (queueing keystrokes) while a turn
   // runs, so the cursor stays visible too.
   const cursorCell = `${CURSOR_BG_ON}${at}${CURSOR_BG_OFF}`;
-  const line = `${prompt}${before}${cursorCell}${after}`;
+
+  // The box draws at most `inputBoxCapRows` rows of text, windowed around the cursor, however long
+  // the value is. A frame as tall as the viewport cannot be erased in place - writing it scrolls
+  // its own top rows into scrollback, where the next `eraseLines` cannot reach them - so an
+  // unbounded box is what let a long value stack a copy of itself on every repaint. `inputWindow`
+  // explains the windowing rules; `frameBudget` explains why this cap and the live region's share
+  // one set of numbers.
+  //
+  // `useWindowSize` rather than reading `stdout.rows`/`columns` at render: the terminal is
+  // resizable in both dimensions, and both matter here. A shorter window shrinks the budget; a
+  // narrower one re-wraps the same text into more rows, so the window has to be recomputed from
+  // the live size on every resize. This hook re-renders the component when either changes, instead
+  // of relying on App happening to re-render the tree from its own resize effect.
+  const { columns, rows } = useWindowSize();
+  const width = contentWidth(columns);
+  const capRows = expanded ? expandedInputBoxCapRows(rows) : inputBoxCapRows(rows);
+  const view = inputWindow(valueWithCursor, cursorInValue, width, prompt, capRows);
+  // The windowed rows are already wrapped to `width`, so `wrap="wrap"` has nothing left to do and
+  // the rendered height is exactly what was budgeted - no surprise extra row.
+  const body = view.rows
+    .map((row, i) =>
+      i === view.cursorRow
+        ? row.slice(0, view.cursorCol) + cursorCell + row.slice(view.cursorCol + 1)
+        : row,
+    )
+    .join('\n');
+  const notices = [
+    view.hiddenAbove > 0 ? `… ${view.hiddenAbove} more above` : undefined,
+    view.hiddenBelow > 0 ? `… ${view.hiddenBelow} more below` : undefined,
+  ];
 
   return (
-    <Box borderStyle="round" borderColor={disabled ? 'gray' : theme.border} paddingX={1}>
+    <Box borderStyle="round" borderColor={disabled ? 'gray' : theme.border} paddingX={1} flexDirection="column">
+      {notices[0] !== undefined && (
+        <Text wrap="truncate-end" color={theme.border}>
+          {notices[0]}
+        </Text>
+      )}
       <Text wrap="wrap" color={disabled ? 'gray' : theme.accent}>
-        {line}
+        {body}
       </Text>
+      {notices[1] !== undefined && (
+        <Text wrap="truncate-end" color={theme.border}>
+          {notices[1]}
+        </Text>
+      )}
     </Box>
   );
 }

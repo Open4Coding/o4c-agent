@@ -17,6 +17,7 @@ const RIGHT = ESC + '[C';
 const CTRL_A = String.fromCharCode(1);
 const CTRL_E = String.fromCharCode(5);
 const CTRL_U = String.fromCharCode(21);
+const CTRL_O = String.fromCharCode(15);
 const CTRL_J = String.fromCharCode(10);
 const ALT_ENTER = ESC + ENTER;
 // The cursor cell's own SGR pair (InputBox.tsx's CURSOR_BG_ON/CURSOR_BG_OFF) - amber truecolor
@@ -62,11 +63,10 @@ async function press(stdin: { write: (data: string) => void }, key: string): Pro
   await tick();
 }
 
-test('ctrl-O prints each collapsed paste in full above the box, in order, and leaves the box alone', async () => {
-  const shown: string[] = [];
+test('ctrl-O expands every collapsed paste in place, in order, and submit sends the full text', async () => {
   const submitted: string[] = [];
   const { stdin, lastFrame } = render(
-    React.createElement(InputBox, { onSubmit: (v) => submitted.push(v), onShowPaste: (text: string) => shown.push(text) }),
+    React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }),
   );
   const first = Array.from({ length: 7 }, (_, i) => `first ${i}`).join('\n');
   const second = Array.from({ length: 7 }, (_, i) => `second ${i}`).join('\n');
@@ -74,11 +74,17 @@ test('ctrl-O prints each collapsed paste in full above the box, in order, and le
   await settle();
   stdin.write(second);
   await settle();
-  await press(stdin, '');
-  assert.deepEqual(shown, [first, second], 'each collapsed paste must be printed in full, in order');
-  assert.ok(lastFrame()?.includes('ctrl-O to view'), 'the box keeps its placeholders');
-  await press(stdin, '\r');
-  assert.equal(submitted[0], first + second, 'submit still sends the full text');
+  assert.ok(lastFrame()?.includes('ctrl-O to view'), 'both pastes start out collapsed');
+  await press(stdin, CTRL_O);
+  await settle();
+  const frame = lastFrame() ?? '';
+  assert.ok(!frame.includes('ctrl-O to view'), 'no placeholder may survive the expansion');
+  // The box is a window onto the text, so only the rows around the cursor are visible. The cursor
+  // lands at the end, so the tail of the second paste is what shows.
+  assert.ok(frame.includes('second 6'), 'the end of the expanded text must be visible');
+  assert.ok(frame.includes('more above'), 'the rows scrolled out above must be announced');
+  await press(stdin, ENTER);
+  assert.equal(submitted[0], first + second, 'submit sends the full expanded text');
 });
 
 test('typing then pressing Enter submits the typed value and clears the box', async () => {
