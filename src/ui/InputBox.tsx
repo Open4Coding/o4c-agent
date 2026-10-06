@@ -137,6 +137,12 @@ export interface InputBoxProps {
    * `useState`'s own lazy initializer) - later changes to this prop do not reset live history,
    * the same one-way-on-mount contract `resetToken`/`prefill` use for their own triggers. */
   initialHistory?: string[];
+  /** Bumping `token` appends `text` to the submit history (↑/↓ recall) without touching the box's
+   * own text. Needed because a command chosen from the palette or a family dropdown is submitted
+   * by the caller directly - it never passes through this box's Enter path, so it would otherwise
+   * be missing from the history of things you just ran, which is exactly where you would look for
+   * it. Ignores a repeat of the newest entry, so picking the same command twice doesn't stack. */
+  historyAppend?: { token: number; text: string };
   /** Fires with the full submit-history array every time it changes (i.e. on every submit that
    * isn't blank) - lets the caller (`App.tsx`) mirror it for persisting alongside the
    * conversation, without lifting the array itself into React state here (it only needs to be
@@ -197,6 +203,7 @@ export function InputBox({
   onSubmit,
   onEscape,
   initialHistory,
+  historyAppend,
   onHistoryChange,
 }: InputBoxProps) {
   const [value, setValue] = useState('');
@@ -234,6 +241,15 @@ export function InputBox({
     onChange?.(value);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
+
+  useEffect(() => {
+    const text = historyAppend?.text;
+    if (!text) return;
+    if (historyRef.current.at(-1) === text) return;
+    historyRef.current.push(text);
+    onHistoryChange?.(historyRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyAppend?.token]);
 
   useEffect(() => {
     onExpandChange?.(expanded);

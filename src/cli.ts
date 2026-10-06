@@ -28,7 +28,7 @@ import { formatError } from './ui/formatError.js';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultLogsDir } from './session/runLog.js';
-import { platformPromptLine } from './ui/platform.js';
+import { detectCurrentOs, platformPromptLine } from './ui/platform.js';
 
 /**
  * Installed at module load, before anything else runs, so it's live for the entire process
@@ -166,6 +166,11 @@ async function runRepl(
   const fullContextLogger = new RunLogger(logsDirFor(projectRoot), 'FULLCONTEXT');
   // Must be installed before render() so it sees Ink's very first frame - see the module's own
   // doc comment for the bug this works around.
+  // Resolved once here, at startup, and passed to App - process.platform cannot change for the
+  // life of the process, so the value is the same either way, but having one place that decides
+  // it means /keyboard and any later OS-conditional behaviour answer from the same fact
+  // rather than each calling detectCurrentOs() on its own.
+  const startupOs = detectCurrentOs();
   installResizeReflowFix(process.stdout);
   let pendingRestart: { resumeId: string | undefined; mode: Mode | undefined } | undefined;
   const restart = (resumeId?: string, mode?: Mode) => {
@@ -187,6 +192,7 @@ async function runRepl(
       onServerRecovered: serverHooks?.onRecovered,
       // Reload the session in a fresh process after a turn that thought or used tools, so the screen
       // is repainted from the full saved history (see App.tsx). O4C_NO_RELOAD=1 turns it off.
+      os: startupOs,
       reloadAfterTurn: process.env.O4C_NO_RELOAD !== '1',
       projectRoot,
       model: opts.model,

@@ -41,7 +41,10 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/resume',
     '/context',
     '/ctx',
-    '/keyboardcommands',
+    '/keyboard',
+    '/keyboard-windows',
+    '/keyboard-mac',
+    '/keyboard-linux',
     '/mode',
     '/help',
     '/exit',
@@ -115,7 +118,7 @@ test('the three /set-*sessionview commands are registered, hidden, reachable thr
     const cmd = COMMANDS.find((c) => c.name === name);
     assert.ok(cmd, name + ' is registered');
     assert.equal(cmd!.hidden, true, name + ' is hidden from the bare "/" list');
-    assert.equal(cmd!.noArgs, true, name + ' takes no typed argument, so choosing it runs it');
+    assert.equal(cmd!.select, 'run', name + ' takes no typed argument, so choosing it runs it');
     assert.ok(setCommands().some((c) => c.name === name), name + ' appears in the /set picker');
     assert.equal(commandForHelpTarget(name.slice(1))?.name, name, name + ' resolves for /help-<name>');
   }

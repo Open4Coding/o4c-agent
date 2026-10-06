@@ -8,10 +8,20 @@ export interface CommandInfo {
    * picker (`/set` for every `/set-*`, `/config` for every `/config-*`). See docs/plans/
    * 0001.FrontEndIDEChanges.plan.md item #1. */
   hidden?: boolean;
-  /** The command takes no typed argument - it opens its own picklist (or acts at once). Choosing it
-   * from the `/set` or `/set-` pickers runs it directly; every other `/set-*` command takes an argument
-   * the picker cannot collect, so choosing one only prefills the input box. */
-  noArgs?: boolean;
+  /**
+   * What Enter does to this row in a dropdown. One field rather than the old `noArgs` boolean plus
+   * an implicit default, because there are three behaviours and a single list mixes all of them:
+   *
+   * - `run`     - execute it now. The command takes no typed argument, or opens its own picklist.
+   * - `prefill` - put `/name ` in the input box for the user to finish. The command needs an
+   *               argument the dropdown cannot collect. This is the default.
+   * - `none`    - do nothing, and leave the dropdown open. For a bare family command like `/set`,
+   *               which has no standalone action of its own: it heads its family's list so the
+   *               family is discoverable, and the real choices are the rows below it.
+   *
+   * The dropdown reads this and acts, with no special cases of its own.
+   */
+  select?: 'run' | 'prefill' | 'none';
 }
 
 // Single source of truth for the front end's own commands, used by both the "/" command palette
@@ -30,8 +40,29 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Show local token-usage for this session - no LLM call.',
   },
   {
-    name: '/keyboardcommands',
-    description: 'List input-box keybindings and OS-specific notes. Usage: /keyboardcommands [windows|mac|linux]',
+    name: '/keyboard',
+    // Runs on Enter rather than prefilling: its `[windows|mac|linux]` argument is optional, and
+    // picking it from a list of systems plainly means "this one".
+    select: 'run',
+    description: 'Show input-box keybindings and notes. Defaults to this system. Usage: /keyboard [windows|mac|linux]',
+  },
+  {
+    name: '/keyboard-windows',
+    description: 'Keybindings and notes for Windows.',
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/keyboard-mac',
+    description: 'Keybindings and notes for macOS.',
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/keyboard-linux',
+    description: 'Keybindings and notes for Linux.',
+    hidden: true,
+    select: 'run',
   },
   {
     name: '/mode',
@@ -43,7 +74,7 @@ export const COMMANDS: CommandInfo[] = [
       'List every command with a one-line description. Use /help-<command> for more detail on one, e.g. /help-mode.',
   },
   { name: '/exit', aliases: ['/quit'], description: 'End the session.' },
-  { name: '/set', description: 'Browse and run a /set-* setting command.' },
+  { name: '/set', select: 'none', description: 'Browse and run a /set-* setting command.' },
   {
     name: '/set-sessionname',
     description: 'Rename the current session (shown in /resume). Usage: /set-sessionname <name>',
@@ -74,22 +105,23 @@ export const COMMANDS: CommandInfo[] = [
     description:
       'Pick compact or full session view for this project, or copy the global choice.',
     hidden: true,
-    noArgs: true,
+    select: 'run',
   },
   {
     name: '/set-local-sessionview',
     description: 'Same as /set-sessionview - explicit alias for the same project-shared tier.',
     hidden: true,
-    noArgs: true,
+    select: 'run',
   },
   {
     name: '/set-global-sessionview',
     description: "Pick compact or full session view as this machine's global default.",
     hidden: true,
-    noArgs: true,
+    select: 'run',
   },
   {
     name: '/config',
+    select: 'none',
     description: 'Browse and run a /config-* plugin setting command.',
   },
   // First real /config-* entries (the plugin-config foundation from #6 is otherwise still
@@ -119,6 +151,36 @@ export const COMMANDS: CommandInfo[] = [
  * includes hidden ones, since that picker is exactly how a hidden `/set-*` command gets found. */
 export function setCommands(): CommandInfo[] {
   return COMMANDS.filter((c) => c.name.startsWith('/set-'));
+}
+
+/**
+ * The bare command names that head a family of `<name>-*` commands. Typing one of these opens that
+ * family's dropdown; everything else is an ordinary command the generic palette answers for.
+ */
+export const COMMAND_FAMILIES = ['/keyboard', '/set', '/config'] as const;
+
+/**
+ * A family's rows: the bare command first, then its `-` variants, in registry order.
+ *
+ * The bare command is deliberately one of the rows rather than "what you get by not opening the
+ * list" - it makes the family's own default visible and selectable in the same place as the
+ * alternatives. Where it has no action of its own (`/set`, `/config`) it is marked `select: 'none'`
+ * and simply heads the list.
+ */
+export function commandFamily(bare: string): CommandInfo[] {
+  return COMMANDS.filter((c) => c.name === bare || c.name.startsWith(`${bare}-`));
+}
+
+/** The family `input` is composing, if any - the longest bare name it starts with, so `/config`
+ * wins over a hypothetical `/con`. Returns undefined for ordinary commands. */
+export function familyFor(input: string): string | undefined {
+  const typed = input.toLowerCase();
+  return [...COMMAND_FAMILIES].sort((a, b) => b.length - a.length).find((bare) => typed.startsWith(bare));
+}
+
+/** Backwards-compatible alias for `commandFamily('/keyboard')`. */
+export function keyboardCommands(): CommandInfo[] {
+  return commandFamily('/keyboard');
 }
 
 /** Every registered `/config-*` command, in the order they'd appear in `/config`'s own picker -

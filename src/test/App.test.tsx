@@ -6,6 +6,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { App } from '../ui/App.js';
+import type { OsKey } from '../ui/platform.js';
 import { AgentLoop } from '../agent/loop.js';
 import { MockProvider } from '../providers/mock.js';
 import { defaultTools } from '../tools/index.js';
@@ -351,6 +352,7 @@ async function setup(opts: {
   probeServer?: () => Promise<ServerProbe>;
   onServerRecovered?: (probe: ServerProbe) => void;
   serverPollMs?: number;
+  os?: OsKey;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
@@ -386,6 +388,7 @@ async function setup(opts: {
       probeServer: opts.probeServer,
       onServerRecovered: opts.onServerRecovered,
       serverPollMs: opts.serverPollMs,
+      os: opts.os,
     }),
   );
   liveInstances.push(instance);
@@ -961,11 +964,11 @@ test('/context reflects real usage after a turn has run', async () => {
   });
 });
 
-test('/keyboardcommands shows the keybinding table without ever touching conversation history', async () => {
+test('/keyboard shows the keybinding table without ever touching conversation history', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, loop } = await setup({ dir });
 
-    await submit(stdin, '/keyboardcommands');
+    await submit(stdin, '/keyboard');
     await waitFor(() => anyFrameIncludes(frames, 'Ctrl+J'));
 
     assert.ok(anyFrameIncludes(frames, 'Ctrl+J'));
@@ -977,11 +980,11 @@ test('/keyboardcommands shows the keybinding table without ever touching convers
   });
 });
 
-test('/keyboardcommands <os> shows that OS\'s notes, still without touching conversation history', async () => {
+test('/keyboard <os> shows that OS\'s notes, still without touching conversation history', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, loop } = await setup({ dir });
 
-    await submit(stdin, '/keyboardcommands windows');
+    await submit(stdin, '/keyboard windows');
     await waitFor(() => anyFrameIncludes(frames, 'Windows keyboard notes'));
 
     assert.ok(anyFrameIncludes(frames, 'Windows keyboard notes'));
@@ -991,14 +994,204 @@ test('/keyboardcommands <os> shows that OS\'s notes, still without touching conv
   });
 });
 
-test('/keyboardcommands <bogus> shows a usage error instead of guessing an OS', async () => {
+test('/keyboard- opens a picker of the per-OS commands, below the input box', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir });
+
+    await type(stdin, '/keyboard-');
+    await waitFor(() => anyFrameIncludes(frames, '/keyboard commands'));
+
+    assert.ok(anyFrameIncludes(frames, '/keyboard-windows'));
+    assert.ok(anyFrameIncludes(frames, '/keyboard-mac'));
+    assert.ok(anyFrameIncludes(frames, '/keyboard-linux'));
+  });
+});
+
+test('/keyboard-mac shows the macOS notes whatever this machine is', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop } = await setup({ dir, os: 'windows' });
+
+    await submit(stdin, '/keyboard-mac');
+    await waitFor(() => anyFrameIncludes(frames, 'macOS keyboard notes'));
+
+    assert.ok(anyFrameIncludes(frames, 'macOS keyboard notes'), 'the asked-for OS wins over the detected one');
+    // Display-only, like every other /keyboard form.
+    assert.equal(loop.getMessages().length, 0);
+    assert.equal(loop.getUsage().requestCount, 0);
+  });
+});
+
+test('bare /keyboard answers for the OS detected at startup, not a re-derived one', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir, os: 'linux' });
+
+    await submit(stdin, '/keyboard');
+    await waitFor(() => anyFrameIncludes(frames, 'Linux keyboard notes'));
+
+    assert.ok(anyFrameIncludes(frames, 'Linux keyboard notes'), 'the startup OS decides the table');
+  });
+});
+
+test('the per-OS keyboard commands stay out of the main "/" palette', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    // The bare "/" palette lists every non-hidden command. Hidden family members are reachable
+    // from their own dropdown and by typing their exact name, never by flooding this list - the
+    // same rule every /set-* and /config-* follows.
+    await type(stdin, '/');
+    await waitFor(() => (lastFrame() ?? '').includes('/keyboard'));
+
+    const frame = lastFrame() ?? '';
+    assert.equal(frame.includes('/keyboard-windows'), false);
+    assert.equal(frame.includes('/set-sessionname'), false);
+  });
+});
+
+test('/keyboard shows the table for this system', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, loop } = await setup({ dir, os: 'windows' });
+
+    await submit(stdin, '/keyboard');
+    await waitFor(() => anyFrameIncludes(frames, 'Windows keyboard notes'));
+
+    assert.ok(anyFrameIncludes(frames, 'Windows keyboard notes'));
+    assert.equal(loop.getMessages().length, 0, 'display-only, like every other form');
+  });
+});
+
+test('/keyboard takes the same OS argument the old name did', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir, os: 'windows' });
+
+    await submit(stdin, '/keyboard linux');
+    await waitFor(() => anyFrameIncludes(frames, 'Linux keyboard notes'));
+
+    assert.ok(anyFrameIncludes(frames, 'Linux keyboard notes'));
+  });
+});
+
+test('a partial name that can only be one family opens that family dropdown', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    // "/keyb" matches nothing but /keyboard, so there is no point showing a one-row palette and
+    // swapping to the family list a few keystrokes later.
+    await type(stdin, '/keyb');
+    await waitFor(() => (lastFrame() ?? '').includes('/keyboard commands'));
+
+    const frame = lastFrame() ?? '';
+    assert.ok(frame.includes('/keyboard-windows'));
+    assert.ok(frame.includes('/keyboard-linux'));
+  });
+});
+
+test('a partial name that could still be several commands keeps the ordinary palette', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    // "/c" could become /clear, /config or /context - no family can be assumed yet.
+    await type(stdin, '/c');
+    await waitFor(() => (lastFrame() ?? '').includes('/clear'));
+
+    const frame = lastFrame() ?? '';
+    assert.equal(frame.includes('/config commands'), false, 'no family dropdown while ambiguous');
+    assert.ok(frame.includes('/context'), 'the palette still lists the alternatives');
+  });
+});
+
+test('family rows below the first are alphabetical, with the bare command pinned on top', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    await type(stdin, '/set');
+    await waitFor(() => (lastFrame() ?? '').includes('/set commands'));
+    await tick(60);
+
+    const frame = lastFrame() ?? '';
+    const order = ['/set', '/set-global-sessionsToSave', '/set-global-sessionview', '/set-local-sessionsToSave'];
+    let at = -1;
+    for (const name of order) {
+      const next = frame.indexOf(`${name} `);
+      assert.ok(next > at, `${name} must come after the row before it (registry order is not alphabetical)`);
+      at = next;
+    }
+  });
+});
+
+test('a command run from the dropdown is recalled by the up arrow', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir });
+
+    // Chosen from the list rather than typed, so it never passes through InputBox's Enter path.
+    await type(stdin, '/keyb');
+    await waitFor(() => (lastFrame() ?? '').includes('/keyboard commands'));
+    await tick(60);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'keyboard notes'));
+
+    // The box is empty again; ↑ must bring the command back.
+    stdin.write(UP);
+    await waitFor(() => (lastFrame() ?? '').includes('> /keyboard'));
+    assert.ok((lastFrame() ?? '').includes('/keyboard'), 'the command just run must be in the history');
+  });
+});
+
+test('/keyboard on its own opens the family dropdown, with itself as the first row', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir });
+
+    await type(stdin, '/keyboard');
+    await waitFor(() => anyFrameIncludes(frames, '/keyboard commands'));
+
+    // The bare name is enough - the '-' is not required to see the family, and the bare command
+    // heads the list so Enter on open runs it without touching the arrow keys.
+    const frame = lastFrame() ?? '';
+    assert.ok(frame.includes('/keyboard-windows'));
+    assert.ok(frame.includes('/keyboard-mac'));
+    assert.ok(frame.includes('/keyboard-linux'));
+  });
+});
+
+test('/keyboard- opens one dropdown holding /keyboard and every per-OS variant', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir });
+
+    await type(stdin, '/keyboard-');
+    await waitFor(() => anyFrameIncludes(frames, '/keyboard commands'));
+
+    const frame = lastFrame() ?? '';
+    for (const row of ['/keyboard-windows', '/keyboard-mac', '/keyboard-linux']) {
+      assert.ok(frame.includes(row), `${row} must be offered`);
+    }
+    // The bare command earns a row in its own family's list - this system is one of the systems.
+    assert.ok(frame.includes('/keyboard '), '/keyboard itself must be one of the rows');
+  });
+});
+
+test('a narrower prefix drops the bare row and the non-matching variants', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    await type(stdin, '/keyboard-m');
+    await tick();
+
+    // Asserted against the CURRENT frame, not every frame ever rendered: typing passes through
+    // "/keyboard-" on the way here, so the wider list legitimately appeared a keystroke ago.
+    const frame = lastFrame() ?? '';
+    assert.ok(frame.includes('/keyboard-mac'));
+    assert.equal(frame.includes('/keyboard-linux'), false, 'a narrowed prefix drops the rest');
+  });
+});
+
+test('/keyboard <bogus> shows a usage error instead of guessing an OS', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, loop } = await setup({ dir });
 
-    await submit(stdin, '/keyboardcommands nonsense');
-    await waitFor(() => anyFrameIncludes(frames, 'Usage: /keyboardcommands [windows|mac|linux]'));
+    await submit(stdin, '/keyboard nonsense');
+    await waitFor(() => anyFrameIncludes(frames, 'Usage: /keyboard [windows|mac|linux]'));
 
-    assert.ok(anyFrameIncludes(frames, 'Usage: /keyboardcommands [windows|mac|linux]'));
+    assert.ok(anyFrameIncludes(frames, 'Usage: /keyboard [windows|mac|linux]'));
     assert.equal(loop.getMessages().length, 0);
     assert.equal(loop.getUsage().requestCount, 0);
   });
@@ -1013,7 +1206,7 @@ test('/help lists every command with its description, and logs itself under [inf
 
     assert.ok(anyFrameIncludes(frames, 'Available commands:'));
     assert.ok(anyFrameIncludes(frames, '/mode'));
-    assert.ok(anyFrameIncludes(frames, '/keyboardcommands'));
+    assert.ok(anyFrameIncludes(frames, '/keyboard'));
     assert.ok(anyFrameIncludes(frames, 'Use /help-<command> for more detail'));
     assert.equal(loop.getMessages().length, 0);
     assert.equal(loop.getUsage().requestCount, 0);
@@ -1567,21 +1760,34 @@ test('/set-sessionname renames the current session, persisted to both the manife
   });
 });
 
-test('/set opens a picker of /set-* commands; selecting one prefills the input box instead of running it', async () => {
+test('/set opens its family dropdown; choosing a setting prefills the input box instead of running it', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, lastFrame, store } = await setup({ dir });
 
-    await submit(stdin, '/set');
-    await waitFor(() => anyFrameIncludes(frames, 'Choose a setting'));
-    assert.ok(anyFrameIncludes(frames, 'Choose a setting'));
-    assert.ok(anyFrameIncludes(frames, '/set-sessionname'));
+    // Typing the bare name is enough now - no '-' and no Enter needed to see the family.
+    await type(stdin, '/set');
+    await waitFor(() => (lastFrame() ?? '').includes('/set commands'));
+    await tick(60); // the palette unmounts and the family dropdown takes over input
+    assert.ok((lastFrame() ?? '').includes('/set-sessionname'));
 
-    stdin.write(ENTER); // only entry - selects /set-sessionname
-    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname'));
+    // Row 0 is the bare /set, which is `select: 'none'` - Enter on it deliberately does nothing
+    // and leaves the list open, so the real choices are reached by arrowing down.
+    stdin.write(ENTER);
+    await tick(50);
+    assert.ok((lastFrame() ?? '').includes('/set commands'), 'the inert first row keeps the list open');
 
-    // The picker is gone and the command was NOT run yet - just handed to the input box for the
-    // user to finish typing the argument onto.
-    assert.equal((lastFrame() ?? '').includes('Choose a setting'), false);
+    // Rows below the first are alphabetical, so /set-sessionname is the sixth: /set,
+    // -global-sessionsToSave, -global-sessionview, -local-sessionsToSave, -local-sessionview,
+    // -sessionname.
+    for (let i = 0; i < 5; i++) {
+      stdin.write(DOWN);
+      await tick(50);
+    }
+    stdin.write(ENTER);
+    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname '));
+
+    // Prefilled, not run: the command needs an argument the dropdown cannot collect.
+    assert.equal((lastFrame() ?? '').includes('/set commands'), false);
     assert.equal(anyFrameIncludes(frames, 'Session renamed'), false);
     assert.deepEqual(await store.readManifest(), []);
 
@@ -1594,77 +1800,64 @@ test('/set opens a picker of /set-* commands; selecting one prefills the input b
   });
 });
 
-test('/set: Escape cancels with no change', async () => {
-  await withTempDir(async (dir) => {
-    const { stdin, frames } = await setup({ dir });
-
-    await submit(stdin, '/set');
-    await tick(50);
-    stdin.write(ESCAPE);
-    await waitFor(() => anyFrameIncludes(frames, 'Set cancelled'));
-
-    assert.ok(anyFrameIncludes(frames, 'Set cancelled'));
-  });
-});
-
-test('typing "/set-" (without submitting) live-reveals the /set-* family, which the main palette otherwise hides entirely', async () => {
+test('/set: Escape dismisses the dropdown with no change', async () => {
   await withTempDir(async (dir) => {
     const { stdin, lastFrame } = await setup({ dir });
 
-    // "/set" alone matches only the (non-hidden) /set command itself - the hidden family member
-    // isn't shown yet.
     await type(stdin, '/set');
-    await waitFor(() => (lastFrame() ?? '').includes('/set'));
-    assert.equal((lastFrame() ?? '').includes('/set-sessionname'), false);
+    await waitFor(() => (lastFrame() ?? '').includes('/set commands'));
 
-    // The trailing "-" is what flips it over to the family picker - matchCommands would show
-    // nothing at all for this prefix (the hidden command is excluded even once its own prefix is
-    // fully typed), so without this live picker the palette would just go blank here.
-    await type(stdin, '-');
-    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname'));
-    assert.ok((lastFrame() ?? '').includes('Matching /set-* commands'));
+    stdin.write(ESCAPE);
+    await tick(50);
 
-    // Selecting it prefills the input box rather than submitting - same contract as /set's own
-    // Enter-triggered picker.
-    stdin.write(ENTER);
-    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname '));
-    assert.equal((lastFrame() ?? '').includes('Matching /set-* commands'), false);
+    assert.equal((lastFrame() ?? '').includes('/set commands'), false, 'Escape closes the list');
   });
 });
 
-test('/config opens a picker of /config-* commands; selecting one prefills the input box instead of running it', async () => {
+test('typing "/set-" narrows the same dropdown to the family members the palette hides', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+
+    await type(stdin, '/set-');
+    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname'));
+    assert.ok((lastFrame() ?? '').includes('/set commands'));
+
+    // matchCommands would show nothing at all for this prefix - a hidden command is excluded even
+    // once its own prefix is fully typed - so without this dropdown the palette would go blank.
+    stdin.write(DOWN);
+    await tick(50);
+    stdin.write(ENTER);
+    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname '));
+    assert.equal((lastFrame() ?? '').includes('/set commands'), false);
+  });
+});
+
+test('/config opens its family dropdown; choosing one prefills the input box instead of running it', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, lastFrame } = await setup({ dir });
 
-    await submit(stdin, '/config');
-    await waitFor(() => anyFrameIncludes(frames, 'Choose a setting'));
-    assert.ok(anyFrameIncludes(frames, 'Choose a setting'));
-    assert.ok(anyFrameIncludes(frames, '/config-highlightcolor'));
+    await type(stdin, '/config');
+    await waitFor(() => (lastFrame() ?? '').includes('/config commands'));
+    await tick(60); // the palette unmounts and the family dropdown takes over input
+    assert.ok((lastFrame() ?? '').includes('/config-highlightcolor'));
 
-    stdin.write(ENTER); // first entry - selects /config-highlightcolor
-    await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor'));
+    stdin.write(DOWN); // past the inert bare /config row
+    await tick(50);
+    stdin.write(ENTER);
+    await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor '));
 
-    // The picker is gone and the command was NOT run yet - just handed to the input box for the
-    // user to finish typing the argument onto, same contract as /set's own picker.
-    assert.equal((lastFrame() ?? '').includes('Choose a setting'), false);
+    assert.equal((lastFrame() ?? '').includes('/config commands'), false);
     assert.equal(anyFrameIncludes(frames, 'Highlight color set'), false);
   });
 });
 
-test('typing "/config-" (without submitting) live-reveals the /config-* family, which the main palette otherwise hides entirely', async () => {
+test('typing "/config-" narrows the same dropdown to the family members the palette hides', async () => {
   await withTempDir(async (dir) => {
     const { stdin, lastFrame } = await setup({ dir });
 
-    // "/config" alone matches only the (non-hidden) /config command itself - hidden family
-    // members aren't shown yet.
-    await type(stdin, '/config');
-    await waitFor(() => (lastFrame() ?? '').includes('/config'));
-    assert.equal((lastFrame() ?? '').includes('/config-highlightcolor'), false);
-
-    // The trailing "-" flips it over to the family picker, same live-reveal /set-* already has.
-    await type(stdin, '-');
+    await type(stdin, '/config-');
     await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor'));
-    assert.ok((lastFrame() ?? '').includes('Matching /config-* commands'));
+    assert.ok((lastFrame() ?? '').includes('/config commands'));
   });
 });
 
@@ -1994,18 +2187,23 @@ test('the configured view decides how a resumed session is repainted: full shows
   });
 });
 
-test('choosing /set-sessionview from the /set picker opens its picklist straight away instead of prefilling the input', async () => {
+test('choosing /set-sessionview from the dropdown opens its picklist straight away instead of prefilling', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir: join(dir, 'fake-global') });
-    await submit(stdin, '/set');
-    await waitFor(() => anyFrameIncludes(frames, 'Choose a setting'));
-    await tick(150); // the picker's key handler registers just after its first frame paints
-    for (let i = 0; i < 4; i++) {
-      // /set-sessionname, /set-sessionsToSave, -local-, -global- ... then /set-sessionview
+    const { stdin, frames, lastFrame } = await setup({ dir, projectRoot: dir, configGlobalDir: join(dir, 'fake-global') });
+
+    await type(stdin, '/set');
+    await waitFor(() => (lastFrame() ?? '').includes('/set commands'));
+    await tick(150); // the palette unmounts and the dropdown's key handler takes over input
+
+    // Row 0 is the inert /set itself and the rest are alphabetical, so /set-sessionview is last.
+    for (let i = 0; i < 7; i++) {
       stdin.write(DOWN);
       await tick(100);
     }
     stdin.write(ENTER);
+
+    // `select: 'run'` - it opens its own picklist rather than prefilling, since it needs no typed
+    // argument.
     await waitFor(() => anyFrameIncludes(frames, 'Choose the session view'));
     stdin.write(ESCAPE);
     await waitFor(() => anyFrameIncludes(frames, 'Session view unchanged.'));

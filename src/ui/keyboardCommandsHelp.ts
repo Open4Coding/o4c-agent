@@ -1,5 +1,5 @@
 /**
- * Data and rendering for the `/keyboardcommands` command - a local, display-only reference for
+ * Data and rendering for the `/keyboard` command - a local, display-only reference for
  * the input box's keybindings and how their terminal/OS support varies. Never touches
  * `AgentLoop`/`loop.run()` at all (same as `/context`), so nothing here is ever sent to the
  * model or added to conversation history - it's pushed straight into App.tsx's own on-screen
@@ -106,7 +106,7 @@ function renderOsNotes(osKey: OsKey): string {
     'Notes:',
     bulletList(notes.notes),
     '',
-    '(Other systems: /keyboardcommands windows|mac|linux)',
+    '(Other systems: /keyboard windows|mac|linux, or /keyboard- to pick from a list)',
   ].join('\n');
 }
 

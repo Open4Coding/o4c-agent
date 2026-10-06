@@ -6,7 +6,7 @@
  * always-live "Mode: X" line already shown above the input box.
  *
  * Hand-rolled 5x5 block glyphs rather than a figlet-style dependency, matching this project's
- * established zero-extra-dependency footprint (see /keyboardcommands' own hand-rolled table for
+ * established zero-extra-dependency footprint (see /keyboard's own hand-rolled table for
  * the same reasoning). 19 columns wide including gaps - safe even on a narrow terminal.
  */
 const WORD_MARK = [

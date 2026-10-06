@@ -84,7 +84,7 @@ test('appends OS-specific keyboard notes, distinct per OS and never bleeding int
   assert.ok(linux.includes('virtual terminal'));
 
   // Every variant still shows the "how to see other OSes" hint.
-  assert.ok(windows.includes('/keyboardcommands windows|mac|linux'));
+  assert.ok(windows.includes('/keyboard windows|mac|linux'));
 });
 
 test('defaults osKey to the current OS when not given explicitly', () => {

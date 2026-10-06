@@ -20,7 +20,7 @@ import { formatMessage } from './formatMessage.js';
 import { MAX_VISIBLE_TOOL_EVENTS_PER_TURN, formatEntries, parseSessionView, type SessionView } from './formatEntries.js';
 import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
 import { parseOsArg } from './osKeyboardNotes.js';
-import { detectCurrentOs } from './platform.js';
+import { detectCurrentOs, type OsKey } from './platform.js';
 import type { Line } from './types.js';
 import { initialTextWindow, makeBlock, shouldFlushDelta, textWindowReducer, type TextBlock } from './textWindow.js';
 import {
@@ -58,6 +58,8 @@ import {
   commandForHelpTarget,
   setCommands,
   configCommands,
+  commandFamily,
+  familyFor,
   type CommandInfo,
 } from './slashCommand.js';
 
@@ -86,6 +88,10 @@ export interface AppProps {
    * process that reloads this same session by id: the new process repaints the whole history from
    * the saved entries (think blocks, narration, tool calls, answer) and starts with empty buffers.
    * Off by default so tests that count restarts are unaffected; cli.ts turns it on. */
+  /** The OS this session detected at startup, resolved once in `cli.ts` and passed down rather
+   * than re-derived at each call site, so `/keyboard` and anything else OS-conditional
+   * answer from one fact. Defaults to detecting it here, for tests and callers that omit it. */
+  os?: OsKey;
   reloadAfterTurn?: boolean;
   /** How much of a saved session the repaint shows (`compact` or `full`) - read from config.json at
    * every launch/restart (`/set-sessionview`). Undefined means compact. */
@@ -172,6 +178,7 @@ function liveRegionCols(): number {
 }
 
 let nextPrefillToken = 0;
+let nextHistoryToken = 0;
 // Unrelated to the text window's own block ids (textWindow.ts owns those internally now) - just a
 // second, independent React-key source for ConfirmDialog instances.
 let nextDialogId = 0;
@@ -307,6 +314,7 @@ export function App({
   initialSession,
   restart,
   initialMode,
+  os = detectCurrentOs(),
   reloadAfterTurn,
   sessionView,
   projectRoot,
@@ -539,24 +547,14 @@ export function App({
     resolve: (c: SessionViewChoice | undefined) => void;
   } | null>(null);
 
-  // Same pending-Promise-resolver pattern as resumePicker, for /set's picker. Resolves to the
-  // chosen command, not a result of running it - /set itself decides what "chosen" means
-  // (prefilling the input box, below).
-  const [setPicker, setSetPicker] = useState<{
-    resolve: (command: CommandInfo | undefined) => void;
-  } | null>(null);
-
-  // /config's own picker (#6) - the plugin-config counterpart to setPicker above, identical
-  // shape (see CommandFamilyPicker.tsx, shared between both).
-  const [configPicker, setConfigPicker] = useState<{
-    resolve: (command: CommandInfo | undefined) => void;
-  } | null>(null);
-
   // Bumping the token replaces InputBox's text with `text` (cursor at the end) without
   // submitting - how /set hands a chosen command like `/set-sessionname` back to the user to
   // finish typing its argument onto, rather than auto-submitting the way a plain palette
   // selection does (existing commands all take no arguments, so that never needed this).
   const [prefill, setPrefill] = useState<{ token: number; text: string } | undefined>(undefined);
+  // Same token-bump shape as `prefill`: appends to InputBox's ↑/↓ history without touching its
+  // text, for commands run straight from the palette or a family dropdown.
+  const [historyAppend, setHistoryAppend] = useState<{ token: number; text: string } | undefined>(undefined);
 
   // Same pending-Promise-resolver pattern as resumePicker, generic to any yes/no confirmation
   // (run_shell execution, write_file overwrite). A caller can chain two of these in sequence by
@@ -742,7 +740,18 @@ export function App({
           { kind: 'user', text: `> ${input}` },
           { kind: 'system', text },
         ]);
-      } else if (commandName(input) === '/keyboardcommands') {
+      } else if (commandName(input).startsWith('/keyboard-')) {
+        // The "/keyboard-<os>" family: same table, asked about a system other than this
+        // one. Named commands rather than only the `[windows|mac|linux]` argument so they are
+        // discoverable from the picker instead of having to be known in advance.
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const wanted = parseOsArg(commandName(input).slice('/keyboard-'.length));
+        if (!wanted) {
+          pushBlock([{ kind: 'error', text: 'Usage: /keyboard-windows, /keyboard-mac or /keyboard-linux' }]);
+        } else {
+          pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, wanted) }]);
+        }
+      } else if (commandName(input) === '/keyboard') {
         // Local, display-only, exactly like /context above - never calls loop.run(), so this
         // table is never sent to the model or added to conversation history (see the module's
         // own doc comment for why that matters for a later, currently out-of-scope feature -
@@ -750,11 +759,11 @@ export function App({
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
         const osArg = input.slice(commandName(input).length).trim();
         if (!osArg) {
-          pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, detectCurrentOs()) }]);
+          pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, os) }]);
         } else {
           const parsed = parseOsArg(osArg);
           if (!parsed) {
-            pushBlock([{ kind: 'error', text: 'Usage: /keyboardcommands [windows|mac|linux]' }]);
+            pushBlock([{ kind: 'error', text: 'Usage: /keyboard [windows|mac|linux]' }]);
           } else {
             pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, parsed) }]);
           }
@@ -770,44 +779,18 @@ export function App({
         } else {
           pushBlock([{ kind: 'system', text: 'Mode unchanged.' }]);
         }
-      } else if (input === '/set') {
+      } else if (input === '/set' || input === '/config') {
+        // Submitted rather than chosen from the dropdown. The dropdown owns Enter while it is open,
+        // so reaching here means it was dismissed with Esc first - these commands have no action of
+        // their own (`select: 'none'`), they head their family's list. Say where the list is rather
+        // than opening a second, separate picker for the same rows, which is what used to happen.
         pushBlock([{ kind: 'user', text: `> ${input}` }]);
-        const commands = setCommands();
-        if (commands.length === 0) {
-          pushBlock([{ kind: 'system', text: 'Nothing to set yet.' }]);
-        } else {
-          const chosen = await new Promise<CommandInfo | undefined>((resolve) => {
-            setSetPicker({ resolve });
-          });
-          if (chosen?.noArgs) {
-            // A command that opens its own picklist needs no argument, so run it (queued to run the
-            // moment this /set turn finishes) rather than leaving the user to press Enter again.
-            queuedInputsRef.current.push(chosen.name);
-          } else if (chosen) {
-            // Prefills rather than auto-submitting (unlike a plain palette selection) - every other
-            // /set-* command takes an argument the picker itself has no way to collect.
-            setPrefill({ token: nextPrefillToken++, text: `${chosen.name} ` });
-          } else {
-            pushBlock([{ kind: 'system', text: 'Set cancelled.' }]);
-          }
-        }
-      } else if (input === '/config') {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
-        const commands = configCommands();
-        if (commands.length === 0) {
-          pushBlock([{ kind: 'system', text: 'Nothing to configure yet.' }]);
-        } else {
-          const chosen = await new Promise<CommandInfo | undefined>((resolve) => {
-            setConfigPicker({ resolve });
-          });
-          if (chosen) {
-            // Prefills rather than auto-submitting, same reason as /set's picker above - every
-            // /config-* command takes an argument the picker itself has no way to collect.
-            setPrefill({ token: nextPrefillToken++, text: `${chosen.name} ` });
-          } else {
-            pushBlock([{ kind: 'system', text: 'Config cancelled.' }]);
-          }
-        }
+        pushBlock([
+          {
+            kind: 'system',
+            text: `Type ${input} and choose from the list below the input box (↑/↓ then Enter).`,
+          },
+        ]);
       } else if (
         commandName(input) === '/config-highlightcolor' ||
         commandName(input) === '/config-local-highlightcolor' ||
@@ -1334,31 +1317,9 @@ export function App({
     setViewPicker(null);
   }, [viewPicker]);
 
-  const handleSetPickerSelect = useCallback(
-    (command: CommandInfo) => {
-      setPicker?.resolve(command);
-      setSetPicker(null);
-    },
-    [setPicker],
-  );
 
-  const handleSetPickerCancel = useCallback(() => {
-    setPicker?.resolve(undefined);
-    setSetPicker(null);
-  }, [setPicker]);
 
-  const handleConfigPickerSelect = useCallback(
-    (command: CommandInfo) => {
-      configPicker?.resolve(command);
-      setConfigPicker(null);
-    },
-    [configPicker],
-  );
 
-  const handleConfigPickerCancel = useCallback(() => {
-    configPicker?.resolve(undefined);
-    setConfigPicker(null);
-  }, [configPicker]);
 
   const handlePickerSelect = useCallback(
     (id: string) => {
@@ -1581,28 +1542,67 @@ export function App({
     [isProcessing, processTurn, exit, restart, openResumePicker],
   );
 
-  const handlePaletteSelect = useCallback(
-    (command: CommandInfo) => {
+  // A command run straight from the palette or a family dropdown bypasses InputBox's own Enter
+  // path, so it has to be handed to the history explicitly or ↑ would not recall it.
+  const runCommand = useCallback(
+    (name: string) => {
       setInputValue('');
       setPaletteDismissed(false);
       setInputResetToken((t) => t + 1);
-      handleSubmit(command.name);
+      setHistoryAppend({ token: nextHistoryToken++, text: name });
+      handleSubmit(name);
     },
     [handleSubmit],
   );
 
-  // Live version of what /set's own Enter-triggered picker does - typing "/set-" (not yet
-  // submitted) reveals the same family list immediately, since matchCommands (by design) never
-  // shows a hidden /set-* command even once its own prefix is fully typed, so without this the
-  // palette would otherwise just show nothing for that input. Selecting an entry prefills the
-  // input box, the same way /set's picker does, rather than submitting it - these commands all
-  // take an argument. #6 (/config, per the checklist) needs the identical treatment for
-  // "/config-" once it exists.
-  const composingSetFamily = isComposingCommand(inputValue) && inputValue.toLowerCase().startsWith('/set-');
-  const setFamilyMatches = composingSetFamily
-    ? setCommands().filter((c) => c.name.toLowerCase().startsWith(inputValue.toLowerCase()))
+  const handlePaletteSelect = useCallback((command: CommandInfo) => runCommand(command.name), [runCommand]);
+
+  // ONE dropdown for every command family (`/keyboard`, `/set`, `/config`, and whatever is added
+  // to COMMAND_FAMILIES next), replacing three near-identical copies of this block.
+  //
+  // It opens as soon as the bare name is typed - `/set` is enough, the `-` is not required - and
+  // its first row is the bare command itself, so a family's own default is visible and selectable
+  // in the same place as its alternatives rather than being whatever you get by not opening the
+  // list. SelectList starts on row 0 and owns Enter while it is open, so typing `/keyboard` and
+  // pressing Enter runs `/keyboard` with no arrow keys involved.
+  //
+  // What Enter does to a row comes from that command's own `select` field, so this has no special
+  // cases: `run` executes it, `prefill` puts `/name ` in the box to finish typing, and `none`
+  // deliberately does nothing and leaves the list open (the bare `/set` and `/config`, which have
+  // no standalone action - the real choices are the rows below them).
+  const familyTyped = isComposingCommand(inputValue) ? inputValue.toLowerCase() : '';
+  // Either the family's own name has been typed (`/keyboard`, `/keyboard-mac`), or what has been
+  // typed so far can only be heading for one family anyway - `/keyb` matches nothing but
+  // `/keyboard`, so showing a one-row palette and then swapping to the family list a few
+  // keystrokes later is just a flicker. `/c` still gets the palette, since it could become
+  // /clear, /config or /context.
+  const soleMatch = familyTyped ? matchCommands(familyTyped) : [];
+  const familyBare =
+    (familyTyped ? familyFor(familyTyped) : undefined) ??
+    (soleMatch.length === 1 && familyFor(soleMatch[0].name) === soleMatch[0].name
+      ? soleMatch[0].name
+      : undefined);
+  // A trailing '-' is dropped before testing the bare row, so `/set-` still offers `/set` itself.
+  // A narrower prefix like `/set-sess` no longer ends in '-', so the bare row falls away and only
+  // the matching variants remain.
+  const familyBasePrefix = familyTyped.endsWith('-') ? familyTyped.slice(0, -1) : familyTyped;
+  const familyMatches = familyBare
+    ? commandFamily(familyBare)
+        .filter((c) =>
+          c.name === familyBare
+            ? c.name.startsWith(familyBasePrefix)
+            : c.name.toLowerCase().startsWith(familyTyped),
+        )
+        // The bare command keeps the top row - it is the family's default, and Enter on open is
+        // meant to land on it. Everything below it is alphabetical, since registry order is an
+        // implementation detail nobody reading the list can predict.
+        .sort((a, b) => {
+          if (a.name === familyBare) return -1;
+          if (b.name === familyBare) return 1;
+          return a.name.localeCompare(b.name);
+        })
     : [];
-  const setFamilyOpen =
+  const familyOpen =
     !paletteDismissed &&
     !confirmDialog &&
     !resumePicker &&
@@ -1610,18 +1610,14 @@ export function App({
     !viewPicker &&
     !stopConfirm &&
     !serverWait &&
-    !setPicker &&
-    !configPicker &&
-    setFamilyMatches.length > 0;
+    familyMatches.length > 0;
 
-  const handleSetFamilySelect = useCallback(
+  const handleFamilySelect = useCallback(
     (command: CommandInfo) => {
-      if (command.noArgs) {
-        // No argument to type: run it now, exactly like a plain palette selection.
-        setInputValue('');
-        setPaletteDismissed(false);
-        setInputResetToken((t) => t + 1);
-        handleSubmit(command.name);
+      const select = command.select ?? 'prefill';
+      if (select === 'none') return; // heads its family's list; the choices are the rows below it
+      if (select === 'run') {
+        runCommand(command.name);
         return;
       }
       setInputValue(`${command.name} `);
@@ -1629,34 +1625,6 @@ export function App({
     },
     [handleSubmit],
   );
-
-  // Live version of what /config's own Enter-triggered picker does - identical shape to
-  // composingSetFamily/setFamilyOpen above, just for "/config-" (#6). setFamilyOpen and
-  // configFamilyOpen can never both be true at once - inputValue can't start with both "/set-"
-  // and "/config-" simultaneously - so neither needs to reference the other to stay mutually
-  // exclusive; each only needs to exclude the *other's own* explicit picker state.
-  const composingConfigFamily =
-    isComposingCommand(inputValue) && inputValue.toLowerCase().startsWith('/config-');
-  const configFamilyMatches = composingConfigFamily
-    ? configCommands().filter((c) => c.name.toLowerCase().startsWith(inputValue.toLowerCase()))
-    : [];
-  const configFamilyOpen =
-    !paletteDismissed &&
-    !confirmDialog &&
-    !resumePicker &&
-    !modePicker &&
-    !viewPicker &&
-    !stopConfirm &&
-    !serverWait &&
-    !setPicker &&
-    !configPicker &&
-    configFamilyMatches.length > 0;
-
-  const handleConfigFamilySelect = useCallback((command: CommandInfo) => {
-    setInputValue(`${command.name} `);
-    setPrefill({ token: nextPrefillToken++, text: `${command.name} ` });
-  }, []);
-
   // Ctrl+O grew (or shrank) the input box: hand the live region whatever rows the box is not
   // using, so the two together stay under the viewport. Recomputed from the live terminal size
   // rather than a captured one, for the same reason the box's own cap is - the window resizes.
@@ -1681,10 +1649,7 @@ export function App({
     !viewPicker &&
     !stopConfirm &&
     !serverWait &&
-    !setPicker &&
-    !configPicker &&
-    !setFamilyOpen &&
-    !configFamilyOpen &&
+    !familyOpen &&
     paletteMatches.length > 0;
 
   return (
@@ -1718,8 +1683,8 @@ export function App({
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !viewPicker && !setPicker && !configPicker}
-        suppressNav={paletteOpen || setFamilyOpen || configFamilyOpen}
+        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !viewPicker}
+        suppressNav={paletteOpen || familyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
         prefill={prefill}
@@ -1727,6 +1692,7 @@ export function App({
         onSubmit={handleSubmit}
         onEscape={handleEscape}
         initialHistory={initialSession?.inputHistory}
+        historyAppend={historyAppend}
         onHistoryChange={handleInputHistoryChange}
       />
       {/* Front-end plan item #8: context max/current/%used now lives on the same line as Mode,
@@ -1781,35 +1747,11 @@ export function App({
           onCancel={handleViewPickerCancel}
           highlightColor={highlightColor}
         />
-      ) : setPicker ? (
+      ) : familyOpen ? (
         <CommandFamilyPicker
-          title="Choose a setting (↑/↓ to choose, Enter to select, Esc to cancel):"
-          commands={setCommands()}
-          onSelect={handleSetPickerSelect}
-          onCancel={handleSetPickerCancel}
-          highlightColor={highlightColor}
-        />
-      ) : setFamilyOpen ? (
-        <CommandFamilyPicker
-          title="Matching /set-* commands (↑/↓ to choose, Enter to select, Esc to dismiss):"
-          commands={setFamilyMatches}
-          onSelect={handleSetFamilySelect}
-          onCancel={handlePaletteCancel}
-          highlightColor={highlightColor}
-        />
-      ) : configPicker ? (
-        <CommandFamilyPicker
-          title="Choose a setting (↑/↓ to choose, Enter to select, Esc to cancel):"
-          commands={configCommands()}
-          onSelect={handleConfigPickerSelect}
-          onCancel={handleConfigPickerCancel}
-          highlightColor={highlightColor}
-        />
-      ) : configFamilyOpen ? (
-        <CommandFamilyPicker
-          title="Matching /config-* commands (↑/↓ to choose, Enter to select, Esc to dismiss):"
-          commands={configFamilyMatches}
-          onSelect={handleConfigFamilySelect}
+          title={`${familyBare} commands (↑/↓ to choose, Enter to select, Esc to dismiss):`}
+          commands={familyMatches}
+          onSelect={handleFamilySelect}
           onCancel={handlePaletteCancel}
           highlightColor={highlightColor}
         />
