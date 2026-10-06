@@ -45,7 +45,7 @@ const NEEDS_SANITIZING = /[\t\u0000-\u0009\u000B-\u001F\u007F-\u009F]/;
  * undercounted number, so the top rows of the old box are never erased and stay on screen. Every
  * redraw (a cursor move, a keystroke) stacks another leftover.
  *
- * Measured directly against real Ink writing to a fake TTY (`.tmp-repro/erase-audit.tsx`,
+ * Measured directly against real Ink writing to a modelled terminal (`inputBoxStacking.test.tsx`,
  * 2026-10-05): the same 5-line paste indented with spaces gave `erases=10, ink lines=9,
  * real rows=9` - clean; indented with tabs it gave `erases=10, ink lines=9, real rows=11`, i.e.
  * two stale rows left behind per repaint. That is the stacked-input-box artifact David reported,
@@ -85,10 +85,29 @@ export function sanitizeInputText(text: string): string {
     .join('\n');
 }
 
+/** The input box's whole mutable state: the text, and where the caret sits in it. Kept together
+ * so a mid-tick edit can never apply a fresh value to a stale caret - see `edit` below. */
+interface InputBuffer {
+  value: string;
+  cursor: number;
+}
+
 /** Collapsed pastes: placeholder text -> the full pasted text it stands for. Module scope, not a ref: an InputBox
  * remount (a turn ending, a restored prompt) must not lose the text its placeholders stand for. */
 const pasteStore = new Map<string, string>();
 let pasteCounter = 0;
+
+/**
+ * Empties the collapsed-paste store. Test-only: the store is module scope on purpose (an InputBox
+ * remount must not lose the text its placeholders stand for), which means every test in a file
+ * shares it - one test's submit clears it, and the next test's recalled placeholder then has
+ * nothing behind it. That coupling made these tests pass alone and fail in sequence, with the
+ * failure moving to whichever test happened to run next.
+ */
+export function resetPasteStoreForTests(): void {
+  pasteStore.clear();
+  pasteCounter = 0;
+}
 
 function expandPastes(text: string, pastes: ReadonlyMap<string, string>): string {
   let out = text;
@@ -206,8 +225,27 @@ export function InputBox({
   historyAppend,
   onHistoryChange,
 }: InputBoxProps) {
-  const [value, setValue] = useState('');
-  const [cursor, setCursor] = useState(0);
+  // The text and the caret are ONE piece of state, mutated only through `edit` below.
+  //
+  // They used to be two `useState`s, and every insert read `cursor` from its own render closure.
+  // A terminal delivers a burst of keystrokes - fast typing, or a paste that Ink's parser splits at
+  // an ESC or CR - as several `useInput` calls in the SAME tick, before React re-renders. Each of
+  // those calls then saw the same stale caret, so they all inserted at the same offset and the text
+  // came out in the wrong order: typing `abc` in one tick rendered `cba`, and a paste split into
+  // chunks interleaved. Pinned by the two same-tick ordering tests in `InputBox.test.tsx`.
+  //
+  // `bufferRef` holds the authoritative value between renders, so an edit mid-tick composes on the
+  // one before it instead of on whatever the last paint happened to show. The state exists purely
+  // to trigger the re-render.
+  const [buffer, setBuffer] = useState<InputBuffer>({ value: '', cursor: 0 });
+  const bufferRef = useRef<InputBuffer>(buffer);
+  /** The single way the text or caret changes. `fn` receives the latest buffer, not a rendered one. */
+  const edit = (fn: (b: InputBuffer) => InputBuffer): void => {
+    const next = fn(bufferRef.current);
+    bufferRef.current = next;
+    setBuffer(next);
+  };
+  const { value, cursor } = buffer;
   // Ctrl+O grew the box to show an expanded paste. Reset wherever the value is replaced wholesale
   // (submit, clear, history recall, prefill): the expanded height belongs to the text that was
   // expanded, and leaving it set would hold a tall box open over unrelated, short content.
@@ -216,8 +254,6 @@ export function InputBox({
   // becomes one placeholder instead of one per chunk. Any other key flushes the buffer first, so Enter can't outrun it.
   const pendingPasteRef = useRef('');
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const cursorRef = useRef(0);
-  cursorRef.current = cursor;
   const flushPaste = (): void => {
     if (pasteTimerRef.current) {
       clearTimeout(pasteTimerRef.current);
@@ -226,11 +262,12 @@ export function InputBox({
     const text = pendingPasteRef.current;
     if (!text) return;
     pendingPasteRef.current = '';
-    const at = cursorRef.current;
     const insert = collapseText(text);
     historyIndexRef.current = -1;
-    setValue((v) => v.slice(0, at) + insert + v.slice(at));
-    setCursor(at + insert.length);
+    edit(({ value: v, cursor: c }) => ({
+      value: v.slice(0, c) + insert + v.slice(c),
+      cursor: c + insert.length,
+    }));
   };
 
   // The cursor is a solid highlighted cell and never blinks. A blink repainted the whole live frame twice a
@@ -257,8 +294,7 @@ export function InputBox({
   }, [expanded]);
 
   useEffect(() => {
-    setValue('');
-    setCursor(0);
+    edit(() => ({ value: '', cursor: 0 }));
     setExpanded(false);
     killedRef.current = '';
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -267,8 +303,7 @@ export function InputBox({
   useEffect(() => {
     if (!prefill) return;
     const shown = collapseText(prefill.text);
-    setValue(shown);
-    setCursor(shown.length);
+    edit(() => ({ value: shown, cursor: shown.length }));
     setExpanded(false);
     killedRef.current = '';
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -345,8 +380,7 @@ export function InputBox({
         // #4a for the terminal-support research behind this split.
         if (key.meta || key.ctrl || key.shift) {
           historyIndexRef.current = -1;
-          setValue((v) => v.slice(0, cursor) + '\n' + v.slice(cursor));
-          setCursor((c) => c + 1);
+          edit(({ value: v, cursor: c }) => ({ value: v.slice(0, c) + '\n' + v.slice(c), cursor: c + 1 }));
           return;
         }
         const submitted = expandPastes(value, pasteStore);
@@ -358,8 +392,7 @@ export function InputBox({
         historyIndexRef.current = -1;
         draftRef.current = '';
         killedRef.current = '';
-        setValue('');
-        setCursor(0);
+        edit(() => ({ value: '', cursor: 0 }));
         setExpanded(false);
         onSubmit(submitted);
         return;
@@ -375,24 +408,25 @@ export function InputBox({
       // alias would silently not exist on those terminals, so Ctrl+P/Ctrl+N carry the feature.
       if (key.pageUp || key.pageDown) {
         const rows = expanded ? expandedInputBoxCapRows(stdout.rows) : inputBoxCapRows(stdout.rows);
-        setCursor(
-          movePageVisualRows(
-            value,
-            cursor,
+        edit((b) => ({
+          ...b,
+          cursor: movePageVisualRows(
+            b.value,
+            b.cursor,
             contentWidth(stdout.columns),
             prompt,
             rows,
             key.pageUp ? 'up' : 'down',
           ),
-        );
+        }));
         return;
       }
       if ((key.ctrl && input === 'p') || (key.ctrl && key.upArrow)) {
-        setCursor(moveParagraph(value, cursor, 'up'));
+        edit((b) => ({ ...b, cursor: moveParagraph(b.value, b.cursor, 'up') }));
         return;
       }
       if ((key.ctrl && input === 'n') || (key.ctrl && key.downArrow)) {
-        setCursor(moveParagraph(value, cursor, 'down'));
+        edit((b) => ({ ...b, cursor: moveParagraph(b.value, b.cursor, 'down') }));
         return;
       }
       if (key.upArrow) {
@@ -404,15 +438,17 @@ export function InputBox({
         {
           const target = moveVisualRow(value, cursor, contentWidth(stdout.columns), prompt, 'up');
           if (target !== undefined) {
-            setCursor(target);
+            edit((b) => ({ ...b, cursor: target }));
             return;
           }
         }
         if (historyIndexRef.current === -1 && killedRef.current) {
           const killed = killedRef.current;
           killedRef.current = '';
-          setValue((v) => v.slice(0, cursor) + killed + v.slice(cursor));
-          setCursor((c) => c + killed.length);
+          edit(({ value: v, cursor: c }) => ({
+            value: v.slice(0, c) + killed + v.slice(c),
+            cursor: c + killed.length,
+          }));
           return;
         }
         const hist = historyRef.current;
@@ -424,8 +460,7 @@ export function InputBox({
           historyIndexRef.current -= 1;
         }
         const recalled = collapseText(hist[historyIndexRef.current]);
-        setValue(recalled);
-        setCursor(recalled.length);
+        edit(() => ({ value: recalled, cursor: recalled.length }));
         setExpanded(false);
         return;
       }
@@ -436,7 +471,7 @@ export function InputBox({
         {
           const target = moveVisualRow(value, cursor, contentWidth(stdout.columns), prompt, 'down');
           if (target !== undefined) {
-            setCursor(target);
+            edit((b) => ({ ...b, cursor: target }));
             return;
           }
         }
@@ -454,8 +489,7 @@ export function InputBox({
             historyRef.current.push(entry);
             onHistoryChange?.(historyRef.current);
           }
-          setValue('');
-          setCursor(0);
+          edit(() => ({ value: '', cursor: 0 }));
           setExpanded(false);
           return;
         }
@@ -463,28 +497,25 @@ export function InputBox({
         if (historyIndexRef.current < hist.length - 1) {
           historyIndexRef.current += 1;
           const recalled = collapseText(hist[historyIndexRef.current]);
-          setValue(recalled);
-          setCursor(recalled.length);
+          edit(() => ({ value: recalled, cursor: recalled.length }));
           setExpanded(false);
         } else {
           historyIndexRef.current = -1;
-          setValue(draftRef.current);
-          setCursor(draftRef.current.length);
+          edit(() => ({ value: draftRef.current, cursor: draftRef.current.length }));
         }
         return;
       }
       if (key.leftArrow) {
-        setCursor((c) => Math.max(0, c - 1));
+        edit((b) => ({ ...b, cursor: Math.max(0, b.cursor - 1) }));
         return;
       }
       if (key.rightArrow) {
-        setCursor((c) => Math.min(value.length, c + 1));
+        edit((b) => ({ ...b, cursor: Math.min(b.value.length, b.cursor + 1) }));
         return;
       }
       if (key.backspace || key.delete) {
         if (cursor === 0) return;
-        setValue((v) => v.slice(0, cursor - 1) + v.slice(cursor));
-        setCursor((c) => c - 1);
+        edit(({ value: v, cursor: c }) => ({ value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
         return;
       }
       // Home/End move within the current *visual row* (like a real text editor), not to the
@@ -494,11 +525,11 @@ export function InputBox({
       // pre-existing tests below exercise; the distinction only shows up once the line has
       // wrapped into multiple rows (see the dedicated wrapped-row test).
       if (key.home) {
-        setCursor(rowStart(value, cursor, contentWidth(stdout.columns), prompt));
+        edit((b) => ({ ...b, cursor: rowStart(b.value, b.cursor, contentWidth(stdout.columns), prompt) }));
         return;
       }
       if (key.end) {
-        setCursor(rowEnd(value, cursor, contentWidth(stdout.columns), prompt));
+        edit((b) => ({ ...b, cursor: rowEnd(b.value, b.cursor, contentWidth(stdout.columns), prompt) }));
         return;
       }
       // Ctrl-A/Ctrl-E: kept as the absolute whole-buffer start/end (the readline/bash
@@ -506,11 +537,11 @@ export function InputBox({
       // explicitly, but a natural, useful complement (same relationship as an editor's
       // Home vs. Ctrl+Home).
       if (key.ctrl && input === 'a') {
-        setCursor(0);
+        edit((b) => ({ ...b, cursor: 0 }));
         return;
       }
       if (key.ctrl && input === 'e') {
-        setCursor(value.length);
+        edit((b) => ({ ...b, cursor: b.value.length }));
         return;
       }
       if (key.ctrl && input === 'o') {
@@ -528,8 +559,7 @@ export function InputBox({
         const expandedValue = expandPastes(value, pasteStore);
         if (expandedValue === value) return;
         setExpanded(true);
-        setValue(expandedValue);
-        setCursor(expandedValue.length);
+        edit(() => ({ value: expandedValue, cursor: expandedValue.length }));
         return;
       }
       if (key.ctrl && input === 'u') {
@@ -539,8 +569,7 @@ export function InputBox({
         if (cursor > 0) {
           killedRef.current = value.slice(0, cursor);
           historyIndexRef.current = -1;
-          setValue((v) => v.slice(cursor));
-          setCursor(0);
+          edit(({ value: v, cursor: c }) => ({ value: v.slice(c), cursor: 0 }));
         }
         return;
       }
@@ -553,8 +582,7 @@ export function InputBox({
         // "ctrl+j" (confirmed in parse-keypress.js: the `\n` branch never sets key.ctrl), so it
         // reaches here as plain input text instead of via the key.ctrl branches above.
         historyIndexRef.current = -1;
-        setValue((v) => v.slice(0, cursor) + '\n' + v.slice(cursor));
-        setCursor((c) => c + 1);
+        edit(({ value: v, cursor: c }) => ({ value: v.slice(0, c) + '\n' + v.slice(c), cursor: c + 1 }));
         return;
       }
       if (key.ctrl || key.meta) return;
@@ -580,8 +608,10 @@ export function InputBox({
         }
         const insert = collapseText(input);
         historyIndexRef.current = -1;
-        setValue((v) => v.slice(0, cursor) + insert + v.slice(cursor));
-        setCursor((c) => c + insert.length);
+        edit(({ value: v, cursor: c }) => ({
+          value: v.slice(0, c) + insert + v.slice(c),
+          cursor: c + insert.length,
+        }));
       }
     },
     { isActive: active },

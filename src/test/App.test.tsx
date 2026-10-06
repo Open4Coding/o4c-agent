@@ -298,9 +298,25 @@ async function waitFor(
   timeoutMs = 10000,
 ): Promise<void> {
   const start = Date.now();
-  while (!(await check())) {
+  let lastError: unknown;
+  for (;;) {
+    try {
+      if (await check()) return;
+      lastError = undefined;
+    } catch (error) {
+      // A throwing predicate means "not ready yet", not "failed". The run-log tests read a file
+      // whose path `RunLogger.getFilePath()` returns as soon as it is decided, while the file
+      // itself is created by a fire-and-forget write - so `readFile` legitimately throws ENOENT
+      // until that write lands, which under full-suite load is sometimes several polls later.
+      // Letting the throw escape made those tests fail intermittently with an error that pointed
+      // at the filesystem rather than at anything the test was actually asserting. The error is
+      // kept so a genuine one still surfaces if the wait times out rather than vanishing.
+      lastError = error;
+    }
     if (Date.now() - start > timeoutMs) {
-      throw new Error('waitFor: condition was not met within the timeout');
+      throw new Error(
+        `waitFor: condition was not met within the timeout${lastError ? ` (last error: ${String(lastError)})` : ''}`,
+      );
     }
     await tick(100);
   }

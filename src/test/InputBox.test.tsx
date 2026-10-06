@@ -1,9 +1,13 @@
-import { test } from 'node:test';
+import { beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import stringWidth from 'string-width';
-import { InputBox, sanitizeInputText } from '../ui/InputBox.js';
+import { InputBox, resetPasteStoreForTests, sanitizeInputText } from '../ui/InputBox.js';
+
+// The collapsed-paste store is module scope (see resetPasteStoreForTests' own comment), so without
+// this one test's submit empties it out from under the next one.
+beforeEach(resetPasteStoreForTests);
 
 // Standard terminal escape/control sequences Ink's useInput parses into named keys. Built via
 // String.fromCharCode rather than string-literal escapes so the exact bytes sent are unambiguous.
@@ -11,6 +15,7 @@ const ESC = String.fromCharCode(27);
 const ENTER = String.fromCharCode(13);
 const BACKSPACE = String.fromCharCode(127);
 const UP = ESC + '[A';
+const UP_ARROW = UP;
 const DOWN = ESC + '[B';
 const LEFT = ESC + '[D';
 const RIGHT = ESC + '[C';
@@ -46,9 +51,30 @@ const KITTY_SHIFT_ENTER = ESC + '[13;2u'; // modifier 2 = shift(1) + 1
 // measurably longer to settle a keypress into a committed state update than the previous stack
 // did. Confirmed empirically: 10ms was flaky, 20ms was reliable in isolation; 30ms gives margin
 // for real test-runner contention.
-/** Paste chunks settle into one insert after PASTE_SETTLE_MS in InputBox, so tests that paste wait past it. */
+/**
+ * Waits past InputBox's paste flush. PASTE_SETTLE_MS is 60ms, and React still has to commit after
+ * it, so the old 120ms left almost no margin - under full-suite load several paste tests failed
+ * intermittently while passing every time in isolation. Prefer `frameWith` where the test knows
+ * what it is waiting for; this covers the sites that just need the flush to have happened.
+ */
 function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 120));
+  return new Promise((resolve) => setTimeout(resolve, 300));
+}
+
+/**
+ * Waits until `needle` appears in the rendered frame, instead of assuming a fixed delay was long
+ * enough. A paste is buffered and flushed PASTE_SETTLE_MS after its last chunk, and React then has
+ * to commit; under full-suite load that routinely outlasts one `settle()`, which made several of
+ * these tests fail intermittently while passing every time in isolation. Returns the frame so the
+ * caller asserts against the same one it waited on.
+ */
+async function frameWith(lastFrame: () => string | undefined, needle: string): Promise<string> {
+  let frame = '';
+  for (let i = 0; i < 60 && !frame.includes(needle); i++) {
+    await tick();
+    frame = lastFrame() ?? '';
+  }
+  return frame;
 }
 
 function tick(): Promise<void> {
@@ -868,9 +894,9 @@ test('the cursor never blinks: an idle input box does not repaint, enabled or di
 test('a long pasted value keeps the rendered box within the terminal height and still shows the newest text', async () => {
   const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
   const pasted = Array.from({ length: 300 }, (_, i) => `pasted line ${i}`).join('\n');
+  await tick(); // useInput subscribes in an effect, after the first render
   stdin.write(pasted);
-  await settle();
-  const frame = lastFrame() ?? '';
+  const frame = await frameWith(lastFrame, 'lines pasted #');
   assert.ok(frame.split('\n').length < 30, `frame is ${frame.split('\n').length} rows, must stay under 30`);
   assert.ok(frame.includes('300 lines pasted'), 'the paste must show as its placeholder');
 });
@@ -878,10 +904,17 @@ test('a long pasted value keeps the rendered box within the terminal height and 
 test('a pasted block of six or more lines shows as one placeholder, and submit sends the full text', async () => {
   const submitted: string[] = [];
   const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  await tick(); // useInput subscribes in an effect, after the first render
   const pasted = Array.from({ length: 8 }, (_, i) => `pasted line ${i}`).join('\n');
   stdin.write(pasted);
-  await settle();
-  assert.ok(lastFrame()?.includes('8 lines pasted #') && lastFrame()?.includes('ctrl-O to view'), 'placeholder must show');
+  // Polled rather than waited on a fixed time: the paste buffer flushes PASTE_SETTLE_MS after
+  // the last chunk and React then has to commit, which under full-suite load outlasts one settle().
+  let frame = '';
+  for (let i = 0; i < 40 && !frame.includes('lines pasted #'); i++) {
+    await tick();
+    frame = lastFrame() ?? '';
+  }
+  assert.ok(frame.includes('8 lines pasted #') && frame.includes('ctrl-O to view'), 'placeholder must show');
   assert.equal(lastFrame()?.includes('pasted line 3'), false, 'the collapsed text must not show');
   await press(stdin, '\r');
   assert.equal(submitted[0], pasted, 'submit must send the full pasted text');
@@ -891,12 +924,14 @@ test('recalling a long history entry with the up arrow shows a placeholder, not 
   const submitted: string[] = [];
   const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   const pasted = Array.from({ length: 9 }, (_, i) => `history line ${i}`).join('\n');
+  await tick(); // useInput subscribes in an effect, after the first render
   stdin.write(pasted);
-  await settle();
-  await press(stdin, '\r');
-  await press(stdin, '\x1b[A');
-  assert.ok(lastFrame()?.includes('9 lines pasted'), 'recalled text must show as a placeholder');
-  assert.equal(lastFrame()?.includes('history line 4'), false, 'full recalled text must not be drawn');
+  await frameWith(lastFrame, 'lines pasted #');
+  await press(stdin, ENTER);
+  await press(stdin, UP_ARROW);
+  const recalledFrame = await frameWith(lastFrame, '9 lines pasted');
+  assert.ok(recalledFrame.includes('9 lines pasted'), 'recalled text must show as a placeholder');
+  assert.equal(recalledFrame.includes('history line 4'), false, 'full recalled text must not be drawn');
   await press(stdin, '\r');
   assert.equal(submitted[1], pasted, 'submitting the recalled entry must send the full text');
 });
@@ -945,10 +980,10 @@ test('one paste that arrives as several chunks becomes a single placeholder and 
   const submitted: string[] = [];
   const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   const lines = Array.from({ length: 8 }, (_, i) => `chunk line ${i}`);
+  await tick(); // useInput subscribes in an effect, after the first render
   stdin.write(lines.slice(0, 4).join('\n'));
   stdin.write('\n' + lines.slice(4).join('\n'));
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  const frame = lastFrame() ?? '';
+  const frame = await frameWith(lastFrame, 'lines pasted #');
   assert.equal((frame.match(/lines pasted #/g) ?? []).length, 1, 'chunks of one paste must form one placeholder');
   assert.ok(frame.includes('8 lines pasted'), 'the placeholder must count all eight lines');
   await press(stdin, '\r');
@@ -960,7 +995,7 @@ test('a tab-indented paste never reaches the frame as a raw tab, and no frame li
   // tab-indented line as fitting, never wraps it, and the raw tab reaches the terminal - which
   // expands it to the next tab stop. The line then occupies more rows than Ink counted, its
   // eraseLines() undercounts, and the top of the previous box is left on screen. Measured against
-  // real Ink on a fake TTY (.tmp-repro/erase-audit.tsx, 2026-10-05): tab-indented input left two
+  // real Ink on a modelled terminal (inputBoxStacking.test.tsx, 2026-10-05): tab-indented input left two
   // stale rows per repaint; the same text space-indented left none.
   const { lastFrame, stdin } = render(React.createElement(InputBox, { onSubmit: () => {} }));
   await tick();
@@ -998,17 +1033,13 @@ test('pasted ANSI escapes are stripped whole, not left behind as literal text', 
   assert.ok(whole(frame), 'all of the pasted text must reach the box before Enter is pressed');
   assert.ok(!frame.includes('[31m') && !frame.includes('[0m'), 'the escape payload must not survive as text');
   await press(stdin, ENTER);
-  // Deliberately not asserting the ORDER of the three fragments. An ESC byte makes Ink's keypress
-  // parser split one write into several same-tick useInput calls, and each insert path still reads
-  // the `cursor` from its render closure rather than the ref - so same-tick inserts land in reverse
-  // ('abc' typed in one tick renders 'cba'; this input submits 'REDafterbefore'). That is a real,
-  // separate bug with its own reproduction (.tmp-repro/order-probe.tsx) and its own fix; what this
-  // test pins is that no escape byte survives into the submitted text.
+  // Order is asserted now. An ESC byte makes Ink's keypress parser split one write into several
+  // same-tick useInput calls, and this used to come out as 'REDafterbefore' because every insert
+  // read the caret from its own render closure. Fixed by holding the text and caret in one buffer
+  // (see InputBuffer/edit in InputBox.tsx); if this ever reverts, this assertion catches it.
   const sent = submitted[0] ?? '';
   assert.ok(!sent.includes(ESC), 'no escape byte may survive into the submitted text');
-  for (const part of ['before', 'RED', 'after']) {
-    assert.ok(sent.includes(part), `the visible text "${part}" must survive`);
-  }
+  assert.equal(sent, 'beforeREDafter', 'same-tick inserts must land in the order they arrived');
 });
 
 test('sanitizeInputText expands tabs to real tab stops and drops stray control characters', () => {
@@ -1087,4 +1118,34 @@ test('the character under the cursor stays visible, not hidden by the highlight'
     'the character under the cursor must be inside the highlight, not replaced by it',
   );
   assert.ok(!frame.includes('[48;2;'), 'no explicit background may be used for the cursor cell');
+});
+
+test('a burst of keystrokes in one tick lands in the order it arrived', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
+  await tick();
+
+  // A terminal delivers fast typing - and a paste that Ink's parser splits - as several useInput
+  // calls in the SAME tick, before React re-renders. Every insert used to read the caret from its
+  // own render closure, so they all inserted at the same offset and the text came out reversed.
+  stdin.write('a');
+  stdin.write('b');
+  stdin.write('c');
+  await settle();
+  await press(stdin, ENTER);
+
+  assert.deepEqual(submitted, ['abc'], 'typing abc in one tick must not render cba');
+});
+
+test('a chunk and a keystroke in one tick keep their order', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
+  await tick();
+
+  stdin.write('hello');
+  stdin.write('X');
+  await settle();
+  await press(stdin, ENTER);
+
+  assert.deepEqual(submitted, ['helloX'], 'the later keystroke must land after the chunk');
 });

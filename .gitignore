@@ -3,3 +3,9 @@ dist/
 *.log
 .env
 .o4c/
+
+# Scratch: one-off reproduction scripts and test output. Anything worth keeping becomes a real
+# test under src/test/ instead - every probe that earned its keep already has (virtualTerminal.ts,
+# inputBoxStacking.test.tsx, the same-tick ordering tests).
+.tmp-repro/
+tmp.tmp/
