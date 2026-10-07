@@ -60,6 +60,19 @@ export function maxToolOutputChars(contextWindow: number | undefined): number {
   return maxToolOutputTokens(contextWindow) * CHARS_PER_TOKEN;
 }
 
+/**
+ * How far past the budget an ALREADY-APPENDED tool result has to be before `maybeMicroCompact()`
+ * hides it regardless of age (`AgentLoop.pruneOversizedToolResults()`).
+ *
+ * Nothing going through `boundToolOutput()` can ever reach this, by construction - it exists for
+ * entries that predate the cap: a session saved before this code shipped and reloaded by `/resume`
+ * (the 2026-10-06 runs left an 11.4 MB one on disk), or any future path that appends a result
+ * without going through the loop's single call site. A multiple rather than the budget itself, so a
+ * result that merely sits near the limit is never silently thrown away - this is a recovery
+ * mechanism for the genuinely pathological case, not a second truncation tier.
+ */
+export const OVERSIZED_TOOL_RESULT_MULTIPLE = 2;
+
 /** Head/tail split of whatever content budget survives the marker: the head matters for a listing
  * (the first entries are as representative as any), the tail for a failure (an error message,
  * exit code or summary line lands at the end). */

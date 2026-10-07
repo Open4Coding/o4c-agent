@@ -33,7 +33,13 @@ import {
   type CompactionSettings,
 } from './compaction.js';
 import { createThinkTagStripper } from './streamFilter.js';
-import { maxToolOutputChars, spillToolOutput, truncateToolOutput } from '../tools/toolOutput.js';
+import {
+  OVERSIZED_TOOL_RESULT_MULTIPLE,
+  maxToolOutputChars,
+  maxToolOutputTokens,
+  spillToolOutput,
+  truncateToolOutput,
+} from '../tools/toolOutput.js';
 
 export interface AgentEvent {
   type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning';
@@ -362,8 +368,18 @@ export class AgentLoop {
     const effectiveVisible = this.hybridPromptTokenEstimate(modeInstruction);
     if (!shouldCompact(effectiveVisible, contextWindow, microCompactReserve)) return;
 
+    // Pass 1, independent of age: a single entry that is already pathologically large. Runs BEFORE
+    // the cutoff check below, because that check returns early for exactly the shape this exists to
+    // rescue - and because `keepRecentTokens` actively protects the newest entry, which is where an
+    // oversized tool result lands. See `pruneOversizedToolResults()`.
+    const oversized = this.pruneOversizedToolResults(contextWindow);
+
     const cutoff = microCompactCutoffIndex(this.entries, settings.keepRecentTokens);
-    if (cutoff === 0) return; // whole log is still under the keep-recent budget - nothing old enough yet
+    if (cutoff === 0) {
+      // Nothing old enough for the age-based pass, but pass 1 may still have freed something.
+      this.emitPruneMarker(oversized.pairs, oversized.tokens, oversized.pairs, onEvent, onEntry);
+      return;
+    }
 
     // Matched by id rather than assumed adjacent (unlike loop.ts's own append order, which is
     // always back-to-back) - correct regardless of what ends up between them, e.g. an earlier
@@ -379,8 +395,8 @@ export class AgentLoop {
       }
     });
 
-    let prunedPairCount = 0;
-    let tokensFreed = 0;
+    let prunedPairCount = oversized.pairs;
+    let tokensFreed = oversized.tokens;
     for (let i = 0; i < cutoff; i++) {
       const call = this.entries[i];
       if (call.type !== 'ai' || call.sub_type !== 'toolcall' || call.agent_visible === false || !call.tool_call_id) {
@@ -401,20 +417,98 @@ export class AgentLoop {
       this.releaseEntryContent(response);
       prunedPairCount += 1;
     }
+    this.emitPruneMarker(prunedPairCount, tokensFreed, oversized.pairs, onEvent, onEntry);
+  }
+
+  /**
+   * Hides any still-visible `toolcallresponse` whose own estimate is more than
+   * `OVERSIZED_TOOL_RESULT_MULTIPLE` times what one result is allowed (see `tools/toolOutput.ts`),
+   * no matter how recent it is - the one case the age-based pass structurally cannot reach, because
+   * `keepRecentTokens` is a floor that protects the newest entries and an oversized result is
+   * usually the newest entry there is. The real logs show the consequence: MicroCompact freeing 29
+   * tokens while a 3.4M-token entry sat untouched in the protected tail.
+   *
+   * With `boundToolOutput()` in place nothing can produce such an entry any more, so this is purely
+   * a recovery path for history that predates it - a session saved before the cap shipped and
+   * reloaded by `/resume` is otherwise permanently unusable, since the pre-turn hard stop fires
+   * before the turn can do anything about it.
+   *
+   * The paired `toolcall` is hidden along with the response, never the response alone: an assistant
+   * message whose tool call has no answer is a malformed request (the context-window suite's own
+   * `call-has-result` invariant), so a half-hidden pair would trade one failure for another. Same
+   * append-and-flip discipline as the rest of §2.3 - visibility flips and the heavy payload is
+   * released, nothing is rewritten or deleted.
+   */
+  private pruneOversizedToolResults(contextWindow: number): { pairs: number; tokens: number } {
+    const threshold = maxToolOutputTokens(contextWindow) * OVERSIZED_TOOL_RESULT_MULTIPLE;
+    let pairs = 0;
+    let tokens = 0;
+
+    const callsById = new Map<string, ContextEntry>();
+    for (const entry of this.entries) {
+      if (entry.type === 'ai' && entry.sub_type === 'toolcall' && entry.tool_call_id) {
+        callsById.set(entry.tool_call_id, entry);
+      }
+    }
+
+    for (const response of this.entries) {
+      if (response.type !== 'ai' || response.sub_type !== 'toolcallresponse') continue;
+      if (response.agent_visible === false) continue;
+      if (estimateTokens(response) <= threshold) continue;
+
+      tokens += estimateTokens(response);
+      this.deindexEntry(response);
+      response.agent_visible = false;
+      this.indexEntry(response);
+      this.releaseEntryContent(response);
+
+      const call = response.tool_call_id ? callsById.get(response.tool_call_id) : undefined;
+      if (call && call.agent_visible !== false) {
+        tokens += estimateTokens(call);
+        this.deindexEntry(call);
+        call.agent_visible = false;
+        this.indexEntry(call);
+        this.releaseEntryContent(call);
+      }
+      pairs += 1;
+    }
+    return { pairs, tokens };
+  }
+
+  /**
+   * One marker per pass, however many pairs it hid - a `prune` entry per pair would just be noise
+   * for a routine, free operation. Appended at the end, not spliced: unlike a full compaction's
+   * single contiguous block, the pairs this hid are scattered among still-visible entries (user
+   * turns, responses, an earlier summary), so there is no one position that reads as "where they
+   * used to be," and the end is where this pass happened chronologically anyway.
+   *
+   * `oversizedPairs` only affects the wording. Calling an oversized result that arrived this very
+   * round an "older tool call" would be actively misleading about what was dropped.
+   */
+  private emitPruneMarker(
+    prunedPairCount: number,
+    tokensFreed: number,
+    oversizedPairs: number,
+    onEvent: (event: AgentEvent) => void,
+    onEntry: (entry: ContextEntry) => void,
+  ): void {
     if (prunedPairCount === 0) return;
 
-    // Appended at the end, not spliced - unlike a full compaction's single contiguous block, the
-    // pairs this hid are scattered among still-visible entries (user turns, responses, an earlier
-    // summary), so there's no one position that reads as "where they used to be." The end is also
-    // exactly where this pass happened chronologically - nothing after it exists yet.
-    const pruneEntry = aiPruneEntry(prunedPairCount, tokensFreed, `older tool call${prunedPairCount === 1 ? '' : 's'}`);
+    const plural = prunedPairCount === 1 ? '' : 's';
+    let what: string;
+    if (oversizedPairs === 0) {
+      what = `older tool call${plural}`;
+    } else if (oversizedPairs === prunedPairCount) {
+      what = `oversized tool result${plural}`;
+    } else {
+      what = `tool calls, ${oversizedPairs} of them oversized`;
+    }
+
+    const pruneEntry = aiPruneEntry(prunedPairCount, tokensFreed, what);
     this.entries.push(pruneEntry);
     this.indexEntry(pruneEntry);
     onEntry(pruneEntry);
-    onEvent({
-      type: 'prune',
-      text: `Pruned ${prunedPairCount} older tool call${prunedPairCount === 1 ? '' : 's'} (~${tokensFreed} tokens freed).`,
-    });
+    onEvent({ type: 'prune', text: `Pruned ${prunedPairCount} ${what} (~${tokensFreed} tokens freed).` });
   }
 
   /**

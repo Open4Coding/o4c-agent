@@ -656,3 +656,70 @@ test('tier-3 summarization fires inside a single tool-heavy turn with no user bo
     'expected a real summarization compaction to fire inside the single turn',
   );
 });
+
+// The recovery path for history that predates the tool-output cap. The 2026-10-06 runs left an
+// 11.4 MB session on disk: one toolcallresponse of ~2.8M tokens against a 229,376-token window. The
+// age-based pass structurally cannot touch it - keepRecentTokens protects the newest entries, and
+// that entry IS the newest - so MicroCompact freed 29 tokens while the real offender sat untouched
+// and the pre-turn hard stop refused every subsequent turn. See pruneOversizedToolResults().
+test('an oversized tool result is pruned however recent it is, so a wedged session can run again', async () => {
+  const provider = new FakeProvider([{ content: 'recovered', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const call = aiToolCallEntry({ id: 't1', name: 'run_shell', input: { command: 'dir /s /b' } });
+  const huge = aiToolCallResponseEntry('t1', 'x'.repeat(2_000_000)); // ~500K tokens, 229K window
+  loop.loadEntries([userInputEntry('walk the tree'), call, huge]);
+  const before = loop.getVisibleTokenEstimate();
+  assert.ok(before > 229_376, `fixture must start over the window, was ${before}`);
+
+  const events: string[] = [];
+  const result = await loop.run('carry on', {
+    contextWindow: 229_376,
+    onEvent: (e) => { if (e.type === 'prune' || e.type === 'warning') events.push(`${e.type}: ${e.text}`); },
+  });
+
+  assert.equal(result, 'recovered', 'the turn runs instead of hard-stopping');
+  assert.ok(loop.getVisibleTokenEstimate() < 229_376, `still over the window: ${loop.getVisibleTokenEstimate()}`);
+  assert.ok(events.some((e) => e.startsWith('prune:') && e.includes('oversized tool result')), events.join(' | '));
+  assert.ok(!events.some((e) => e.startsWith('warning:')), `expected no hard stop, got: ${events.join(' | ')}`);
+});
+
+test('pruning an oversized result hides its tool call too, so the request stays well-formed', async () => {
+  const provider = new FakeProvider([{ content: 'ok', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  loop.loadEntries([
+    userInputEntry('go'),
+    aiToolCallEntry({ id: 't1', name: 'run_shell', input: { command: 'dir /s /b' } }),
+    aiToolCallResponseEntry('t1', 'y'.repeat(2_000_000)),
+  ]);
+
+  await loop.run('next', { contextWindow: 229_376 });
+
+  const entries = loop.getEntries();
+  const call = entries.find((e) => e.sub_type === 'toolcall');
+  const response = entries.find((e) => e.sub_type === 'toolcallresponse');
+  assert.equal(call?.agent_visible, false, 'the call must be hidden with its response');
+  assert.equal(response?.agent_visible, false);
+
+  // A visible tool call with no visible answer would be a malformed request - the thing the
+  // context-window suite's own call-has-result invariant checks for.
+  const sent = provider.receivedRequests[0].messages;
+  const openCalls = sent.filter((m) => m.toolCalls && m.toolCalls.length > 0).length;
+  assert.equal(openCalls, 0, 'no dangling tool call reached the wire');
+});
+
+test('a tool result merely near the budget is left alone - this is not a second truncation tier', async () => {
+  const provider = new FakeProvider([{ content: 'ok', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  // 60,000 chars = 15,000 tokens: over the 10,000-token budget, under the 2x prune threshold.
+  const nearLimit = aiToolCallResponseEntry('t1', 'z'.repeat(60_000));
+  loop.loadEntries([userInputEntry('go'), aiToolCallEntry({ id: 't1', name: 'read_file', input: {} }), nearLimit]);
+
+  await loop.run('next', { contextWindow: 229_376 });
+
+  const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.notEqual(response?.agent_visible, false, 'a merely large result must survive');
+  assert.equal(response?.content.length, 60_000, 'and keep its content');
+});
