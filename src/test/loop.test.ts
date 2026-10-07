@@ -725,3 +725,116 @@ test('addNotice keeps a UI note in history without sending it to the model or co
   assert.equal(loop.getMessages().length, 0, 'the note must never reach the model');
   assert.equal(loop.getVisibleTokenEstimate(), 0, 'the note must not count toward the context estimate');
 });
+
+// The real failure of 2026-10-06, as a loop-level regression test: `run_shell` returned 11,370,857
+// chars from one `dir /s /b D:\AngelCode`, roughly 15x a 229,376-token window, in a single
+// toolcallresponse. Every compaction/hard-stop guard sits downstream of that append and could only
+// refuse to continue, so the session was dead on the second tool call. See tools/toolOutput.ts.
+test('a tool result bigger than the window is bounded before it reaches history, the wire or the event stream', async () => {
+  const { mkdtemp, readFile, readdir } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-bound-'));
+
+  const huge = 'D:/AngelCode/research/file.py\n'.repeat(350_000); // ~10.5 MB
+  const tool = makeFakeTool('run_shell', huge);
+  const provider = new FakeProvider([
+    {
+      content: 'listing it',
+      toolCalls: [{ id: 't1', name: 'run_shell', input: { command: 'dir /s /b' } }],
+      stopReason: 'tool_use',
+    },
+    { content: 'that was a lot of files', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  const events: Array<{ type: string; toolOutput?: string }> = [];
+  const result = await loop.run('walk the tree', {
+    contextWindow: 229_376,
+    toolOutputDir: dir,
+    onEvent: (event) => events.push({ type: event.type, toolOutput: event.toolOutput }),
+  });
+
+  // The turn CONTINUES - the point of the fix. Before it, the hard stop fired and returned early.
+  assert.equal(result, 'that was a lot of files');
+  assert.equal(provider.callCount, 2);
+
+  const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.ok(response, 'the tool result was appended');
+  assert.ok(response.content.length <= 40_000, `entry was ${response.content.length} chars`);
+  assert.match(response.content, /\[o4c truncated this output: 10,500,000 chars/);
+
+  const toolResultEvent = events.find((e) => e.type === 'tool_result');
+  assert.ok(toolResultEvent?.toolOutput);
+  assert.ok(toolResultEvent.toolOutput.length <= 40_000, 'the run log and UI are bounded too');
+
+  // The second request - what would actually have been sent to the server - is bounded.
+  const secondRequest = provider.receivedRequests[1];
+  const wireChars = JSON.stringify(secondRequest.messages).length;
+  assert.ok(wireChars <= 60_000, `wire payload was ${wireChars} chars`);
+  assert.ok(loop.getVisibleTokenEstimate() < 229_376, 'the whole visible context still fits the window');
+
+  // Nothing is lost: the untruncated output is on disk, and the marker points at it.
+  const spilled = await readdir(dir);
+  assert.equal(spilled.length, 1);
+  const full = await readFile(join(dir, spilled[0]), 'utf-8');
+  assert.equal(full.length, huge.length);
+  assert.ok(response.content.includes(spilled[0]), 'the marker names the spill file');
+});
+
+test('an over-budget tool result is still bounded when there is nowhere to spill it', async () => {
+  const tool = makeFakeTool('run_shell', 'y'.repeat(500_000));
+  const provider = new FakeProvider([
+    {
+      content: 'running',
+      toolCalls: [{ id: 't1', name: 'run_shell', input: {} }],
+      stopReason: 'tool_use',
+    },
+    { content: 'done', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  const result = await loop.run('go', { contextWindow: 229_376 });
+
+  assert.equal(result, 'done');
+  const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.ok(response.content.length <= 40_000);
+  assert.ok(!response.content.includes('Full output:'), 'no path is claimed when nothing was written');
+});
+
+test('a tool result is bounded even when no context window is known at all', async () => {
+  const tool = makeFakeTool('run_shell', 'z'.repeat(2_000_000));
+  const provider = new FakeProvider([
+    {
+      content: 'running',
+      toolCalls: [{ id: 't1', name: 'run_shell', input: {} }],
+      stopReason: 'tool_use',
+    },
+    { content: 'done', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  await loop.run('go');
+
+  const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.ok(response.content.length <= 40_000, `entry was ${response.content.length} chars`);
+});
+
+test('a tool result within budget is appended byte-identical', async () => {
+  const output = 'a modest result\nwith two lines\n';
+  const tool = makeFakeTool('read_file', output);
+  const provider = new FakeProvider([
+    {
+      content: 'reading',
+      toolCalls: [{ id: 't1', name: 'read_file', input: { path: 'x.txt' } }],
+      stopReason: 'tool_use',
+    },
+    { content: 'done', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  await loop.run('go', { contextWindow: 229_376 });
+
+  const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.equal(response.content, output);
+});

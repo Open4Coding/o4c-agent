@@ -11,7 +11,7 @@ import { ServerUnavailableError } from '../providers/types.js';
 import type { ServerProbe, ServerStatus } from '../providers/local.js';
 import { CommandFamilyPicker } from './CommandFamilyPicker.js';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
-import { plansDirFor } from '../session/projectContext.js';
+import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
 import { formatConfirmMessage } from './confirmPreview.js';
@@ -341,6 +341,9 @@ export function App({
     serverStatus === 'up' ? null : { status: serverStatus, checks: 0 },
   );
   const plansDir = plansDirFor(projectRoot);
+  // Where an over-budget tool result's full text is spilled before the model is handed a bounded
+  // slice of it - see AgentLoop.boundToolOutput(). Same projectRoot-derived shape as plansDir.
+  const toolOutputDir = toolOutputDirFor(projectRoot);
   // Undefined projectRoot already means "untrusted/no project" (ensureTrusted's own contract,
   // projectContext.ts) - matches exactly what ConfigStore.hasScope('local') needs to correctly
   // refuse a local-scope write, so no separate trusted flag needs threading down from cli.ts.
@@ -1029,6 +1032,7 @@ export function App({
             modeInstruction: modeSystemPrompt(mode, plansDir),
             signal: controller.signal,
             contextWindow,
+            toolOutputDir,
             maxIterations,
             // The full request/response wire transcript - "the sends", distinct from onEvent's
             // already-derived AgentEvent stream below (which only ever carries the *response*
@@ -1288,7 +1292,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow],
+    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir],
   );
 
   const handleModePickerSelect = useCallback(

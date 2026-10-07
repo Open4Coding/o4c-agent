@@ -33,6 +33,7 @@ import {
   type CompactionSettings,
 } from './compaction.js';
 import { createThinkTagStripper } from './streamFilter.js';
+import { maxToolOutputChars, spillToolOutput, truncateToolOutput } from '../tools/toolOutput.js';
 
 export interface AgentEvent {
   type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning';
@@ -105,6 +106,12 @@ export interface RunOptions {
   /** Overrides `DEFAULT_COMPACTION_SETTINGS` - almost never needed, exposed mainly for tests to
    * exercise compaction without building enormous fixture logs. */
   compactionSettings?: CompactionSettings;
+  /** Where an over-budget tool result's full text gets written before the version the model sees is
+   * truncated (`toolOutputDirFor()` in `session/projectContext.ts`). Omitted, truncation still
+   * happens - it has to, that's the actual bound - but the marker simply has no path to point at,
+   * so the dropped middle is genuinely gone. Every real caller passes it; tests that don't care
+   * about the spill file leave it unset. */
+  toolOutputDir?: string;
 }
 
 /** Thrown when the loop exhausts its iteration budget without the model reaching a final answer. */
@@ -302,6 +309,29 @@ export class AgentLoop {
       return this.lastRealPromptTokens + Math.ceil(delta > 0 ? Math.max(1, this.tokenRatio) * delta : delta);
     }
     return Math.ceil(this.tokenRatio * (this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction)));
+  }
+
+  /**
+   * The one bound on how much a single tool result may add to context - see `tools/toolOutput.ts`
+   * for the budget and the two real runs that made it necessary (one `dir /s /b` result of
+   * 11,370,857 chars, ~15x a 229,376-token window, in one entry).
+   *
+   * Deliberately here, at the single call site every tool result passes through, rather than inside
+   * each tool: this covers `run_shell`, `read_file`, every future tool, and the hand-built
+   * "no tool registered"/"Blocked by the current mode" strings, without any of them having to
+   * remember. The individual tools still bound themselves where they cheaply can (`run_shell`'s
+   * `maxBuffer`, `glob`/`grep`'s `MAX_RESULTS`) - that keeps the huge string from ever being built,
+   * which this cannot; this is what guarantees the entry is bounded regardless.
+   *
+   * Applied BEFORE both `onEvent` and `appendEntry`, so the run log, the full-context log, the
+   * session file and the UI are all bounded too - in the real failures every one of them took the
+   * full 11 MB.
+   */
+  private async boundToolOutput(output: string, toolName: string, options: RunOptions): Promise<string> {
+    const maxChars = maxToolOutputChars(options.contextWindow);
+    if (output.length <= maxChars) return output;
+    const spillPath = await spillToolOutput(options.toolOutputDir, toolName, output);
+    return truncateToolOutput(output, maxChars, spillPath).text;
   }
 
   /**
@@ -873,6 +903,7 @@ export class AgentLoop {
         } else {
           output = await tool.execute(call.input);
         }
+        output = await this.boundToolOutput(output, call.name, options);
         onEvent({ type: 'tool_result', toolName: call.name, toolOutput: output });
         this.appendEntry(aiToolCallResponseEntry(call.id, output, tool?.mutating), onEntry);
       }

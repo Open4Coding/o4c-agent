@@ -22,6 +22,15 @@ export function logsDirFor(projectRoot: string | undefined): string {
 }
 
 /**
+ * Where a tool result too big to put in context gets spilled in full - same project-or-global shape
+ * as `logsDirFor` above, since it serves the same purpose: the complete record lives on disk while
+ * the model sees a bounded slice of it (see `tools/toolOutput.ts`).
+ */
+export function toolOutputDirFor(projectRoot: string | undefined): string {
+  return projectRoot ? join(projectRoot, '.o4c', 'tool-output') : join(defaultGlobalDir(), 'tool-output');
+}
+
+/**
  * Where Plan-Write mode (`modePolicy.ts`) is allowed to write plan documents - project-only, no
  * global fallback, since a plan document is inherently tied to the project it plans. Undefined in
  * an untrusted/no-project run means Plan-Write has nowhere it's allowed to write, so it behaves

@@ -283,4 +283,30 @@ export const SCENARIOS: ScenarioSpec[] = [
     extraTools: 15,
     build: (window) => toolHeavyTurns(window, 30),
   },
+  {
+    // The 2026-10-06 failure, as a scenario: `run_shell` returned one `dir /s /b` result of
+    // 11,370,857 chars - about 15x a 229,376-token window - in a single toolcallresponse, and the
+    // session was dead on the second tool call. Nothing downstream of the append can recover from a
+    // single entry larger than the whole window (pruning freed 29 tokens against it in the real
+    // run), so the result itself has to be bounded: see `tools/toolOutput.ts`. Checked at every
+    // window, because the budget is window-derived. 3x the window is already far past any budget;
+    // the full 11 MB fixture lives in `toolOutput.test.ts`, which doesn't pay for it seven times.
+    name: 'giant-tool-result',
+    build: (window) => [
+      {
+        prompt: 'list the whole tree',
+        rounds: [
+          { calls: [{ argTokens: 20, resultTokens: window * 3 }] },
+          { calls: [{ argTokens: 20, resultTokens: window * 3 }] },
+          { responseTokens: 20 },
+        ],
+      },
+    ],
+    check: (r) => {
+      assert.equal(r.hardStops, 0, 'a bounded tool result must not wedge the session');
+      assert.equal(r.turns[0]?.outcome, 'text', 'the turn still reaches a final answer');
+      const biggest = Math.max(...r.finalEntries.map((e) => e.content.length));
+      assert.ok(biggest <= 40_000, `largest entry was ${biggest} chars`);
+    },
+  },
 ];
