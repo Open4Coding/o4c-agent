@@ -168,8 +168,34 @@ export class AgentLoop {
    * independently. `undefined` until the first real response of the process's lifetime. */
   private lastRealPromptTokens: number | undefined;
   private visibleEstimateAtLastRealCount = 0;
-  /** Real prompt tokens per plain chars/4 estimate, measured from the last real response. Measured live
-   * against the local server: prose ~0.76, code-heavy ~1.9. */
+  /**
+   * Real prompt tokens per plain chars/4 estimate, re-measured from every real response below.
+   *
+   * Calibrated against PHOEBE's own `/tokenize` on 2026-10-07, replacing an earlier unsourced note
+   * here ("prose ~0.76, code-heavy ~1.9"). Two measurements, both on real run content rather than
+   * synthetic text.
+   *
+   * Per content type, 30,000 chars each (chars per real token, so HIGHER means chars/4 over-counts):
+   *   windows path listings 5.25   model output 4.38   reasoning 4.10   prose 3.99
+   *   dense TypeScript 3.89        tool-call JSON args 3.10
+   * Aggregate over 180,000 chars: 4.02 - chars/4 is a genuinely good average, but the spread is
+   * 1.7x end to end, so any single ratio is a compromise between a directory listing and a JSON
+   * tool call.
+   *
+   * Whole reconstructed requests, 56 samples within reachable sizes, two runs with opposite content
+   * mixes: prose/reasoning-heavy ran 1.064-1.211 (mean 1.090), listing-heavy 0.976-1.090 (mean
+   * 1.038). So chars/4 under-counts prose-dominated context by 6-21%, worst on small requests, and
+   * slightly over-counts listing-dominated context.
+   *
+   * `INITIAL_TOKEN_RATIO` (1.5) is deliberately above that measured 1.211 worst case: it is the
+   * only protection for the first request of a process, before any `usage.inputTokens` exists to
+   * calibrate from, and that unadapted case is where the 2026-10-02 overflow happened. Lowering it
+   * was considered against this data and rejected - it would trade real first-request margin for a
+   * little less over-estimation on exactly one request. Everything after that request is governed by
+   * the live recalibration below, which is also why `hardStopReserveTokens` does not need to cover
+   * systematic drift: the suite's own `tool-heavy-drift-1.5` scenario runs a 50% under-count and
+   * still peaks at 78-85% of the window with no overrun.
+   */
   private tokenRatio = INITIAL_TOKEN_RATIO;
 
   constructor(
