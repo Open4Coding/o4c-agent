@@ -5,11 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   MAX_TOOL_OUTPUT_TOKENS,
+  MAX_USER_INPUT_TOKENS,
   MIN_TOOL_OUTPUT_TOKENS,
+  MIN_USER_INPUT_TOKENS,
   maxToolOutputChars,
   maxToolOutputTokens,
+  maxUserInputChars,
+  maxUserInputTokens,
   spillToolOutput,
   truncateToolOutput,
+  truncateUserInput,
 } from '../tools/toolOutput.js';
 import { estimateTextTokens } from '../agent/contextEntry.js';
 
@@ -120,4 +125,65 @@ test('a tool name with path characters cannot escape the spill directory', async
   const path = await spillToolOutput(dir, '../../etc/passwd', 'x');
   assert.ok(path);
   assert.ok(path.startsWith(dir), `${path} stayed inside ${dir}`);
+});
+
+test('the user-input budget scales with the window, clamped at both ends', () => {
+  // The window is not a constant: llama.cpp divides n_ctx across --parallel slots and o4c re-probes
+  // the per-slot size at every launch, so these are the real windows a session can land in.
+  assert.equal(maxUserInputTokens(229_376), 22_938); // --parallel 1, genuinely scaled
+  assert.equal(maxUserInputTokens(114_688), 11_469); // --parallel 2
+  assert.equal(maxUserInputTokens(57_344), 5_734); // --parallel 4
+  assert.equal(maxUserInputTokens(14_336), 1_434); // --parallel 16
+  assert.equal(maxUserInputTokens(4_000), MIN_USER_INPUT_TOKENS); // 400 -> lifted to the floor
+  assert.equal(maxUserInputTokens(400_000), MAX_USER_INPUT_TOKENS); // 40,000 -> held at the ceiling
+  assert.equal(maxUserInputTokens(undefined), MAX_USER_INPUT_TOKENS); // unknown window is still bounded
+});
+
+test('a real task prompt is nowhere near the budget, at any concurrency', () => {
+  // Measured from the actual tier-3 test prompt (3,172 chars). The cap exists for a pasted
+  // megabyte, and must never touch an ordinary prompt - including on the smallest window a
+  // --parallel 16 server would hand out.
+  const realPrompt = 'x'.repeat(3_172);
+  for (const window of [14_336, 57_344, 114_688, 229_376]) {
+    assert.equal(truncateUserInput(realPrompt, maxUserInputChars(window)).truncated, false, `window ${window}`);
+  }
+});
+
+test('a user message within budget is returned byte-identical, with no marker', () => {
+  const msg = 'write me a tetris clone\nin one file';
+  const r = truncateUserInput(msg, maxUserInputChars(229_376));
+  assert.equal(r.text, msg);
+  assert.equal(r.truncated, false);
+  assert.equal(r.originalChars, msg.length);
+});
+
+test('an oversized user message keeps the head, where the instructions live', () => {
+  const head = 'RULES: only write to C:\\tmp.tmp, never touch D:\\AngelCode\n';
+  const tail = '\nENDS HERE: report when done';
+  const msg = head + 'filler line\n'.repeat(200_000) + tail;
+  const maxChars = maxUserInputChars(57_344);
+  const r = truncateUserInput(msg, maxChars, 'C:\\tmp.tmp\\.o4c\\tool-output\\spill.txt');
+
+  assert.equal(r.truncated, true);
+  assert.ok(r.text.length <= maxChars, `${r.text.length} > ${maxChars}`);
+  assert.equal(r.originalChars, msg.length);
+  assert.ok(r.text.startsWith('RULES:'), 'the head must survive - it carries the task rules');
+  assert.ok(r.text.endsWith(tail), 'the tail must survive too');
+  assert.ok(r.text.includes('o4c truncated this message'), 'says it was a message, not output');
+  assert.ok(r.text.includes('Full message:'), 'names the spill file');
+  assert.ok(!r.text.includes('narrow the command'), 'that advice is for tool output, not a user message');
+});
+
+test('an oversized user message with no spill says so instead of naming a path', () => {
+  const r = truncateUserInput('y'.repeat(200_000), maxUserInputChars(14_336));
+  assert.equal(r.truncated, true);
+  assert.ok(r.text.includes('not recoverable from here'), r.text.slice(0, 200));
+  assert.ok(!r.text.includes('Full message:'));
+});
+
+test('the user-input char budget stays the exact inverse of estimateTextTokens', () => {
+  for (const window of [4_000, 14_336, 57_344, 114_688, 229_376]) {
+    const filled = 'x'.repeat(maxUserInputChars(window));
+    assert.equal(estimateTextTokens(filled), maxUserInputTokens(window));
+  }
 });

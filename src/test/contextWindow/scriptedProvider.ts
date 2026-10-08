@@ -156,7 +156,7 @@ export class ScriptedProvider implements LLMProvider {
 
     const findings = [
       ...wireFindings(request.messages),
-      ...entryFindings(this.loop.getEntries(), this.loop.getVisibleTokenEstimate()),
+      ...entryFindings(this.loop.getEntries(), this.loop.getVisibleTokenEstimate(), window),
       ...maxTokensFindings(request.maxTokens, window),
       ...windowFindings(prompt, request.maxTokens, window),
       ...forbiddenFindings(request.messages, this.hiddenTags()),

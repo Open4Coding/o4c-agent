@@ -61,6 +61,46 @@ export function maxToolOutputChars(contextWindow: number | undefined): number {
 }
 
 /**
+ * The same bound for the other end of the pipe: one *user* message. Tool results were the first
+ * unbounded entry found (2026-10-06, an 11 MB `dir /s /b`), but a pasted megabyte has always had
+ * exactly the same shape - `caeb443` collapses a large paste in the UI, and nothing capped the
+ * entry behind it.
+ *
+ * Made urgent by two findings on 2026-10-07. First, the **pin**: `AgentLoop.pinnedEntryId()` keeps
+ * the first user message visible for the whole session (compaction had been hiding and destroying
+ * it, losing the model its own task), so an unbounded first message is now permanently resident
+ * rather than merely temporarily large. Second, **the window is not a constant**: llama.cpp divides
+ * `n_ctx` across `--parallel` slots and o4c re-probes the per-slot size at every launch
+ * (`cli.ts:416`), so the same session resumed after a server restart can land in a window several
+ * times smaller - 229,376 at `--parallel 1`, 57,344 at 4, 14,336 at 16. A fraction of the window
+ * scales with that automatically; a flat char count would not.
+ *
+ * Bounding at the append site is deliberate, and is why there is no truncation logic inside
+ * `maybeCompact()`: one bound, at the boundary, upstream of every tuned budget - the same shape that
+ * made `boundToolOutput()` work and left `pruneOversizedToolResults()` as a pure recovery path for
+ * history that predates it.
+ *
+ * Ceiling is higher than a tool result's 10,000. A task statement is re-read on every single request
+ * and is the one entry nothing else in the log can substitute for, so it earns more room than a
+ * directory listing; the 10% fraction binds first below a ~250K window anyway. For scale: a real
+ * task prompt measured 793 tokens, comfortably inside the 1,434-token budget even at the smallest
+ * window above, so this only ever bites on a genuine paste.
+ */
+export const USER_INPUT_WINDOW_FRACTION = 0.1;
+export const MIN_USER_INPUT_TOKENS = 1_000;
+export const MAX_USER_INPUT_TOKENS = 25_000;
+
+export function maxUserInputTokens(contextWindow: number | undefined): number {
+  if (!contextWindow || contextWindow <= 0) return MAX_USER_INPUT_TOKENS;
+  const scaled = Math.round(contextWindow * USER_INPUT_WINDOW_FRACTION);
+  return Math.min(MAX_USER_INPUT_TOKENS, Math.max(MIN_USER_INPUT_TOKENS, scaled));
+}
+
+export function maxUserInputChars(contextWindow: number | undefined): number {
+  return maxUserInputTokens(contextWindow) * CHARS_PER_TOKEN;
+}
+
+/**
  * How far past the budget an ALREADY-APPENDED tool result has to be before `maybeMicroCompact()`
  * hides it regardless of age (`AgentLoop.pruneOversizedToolResults()`).
  *
@@ -111,32 +151,58 @@ function snapTailStart(text: string, start: number): number {
   return boundary + 1 - start > Math.ceil(budget * MAX_SNAP_SHARE) ? start : boundary + 1;
 }
 
-function buildMarker(
-  originalChars: number,
-  originalTokens: number,
-  maxChars: number,
-  headChars: number,
-  tailChars: number,
-  spillPath?: string,
-): string {
+/** Builds the text that replaces the elided middle. Parameterized so the two kinds of oversized
+ * entry can explain themselves in their own terms - telling the model to "narrow the command" about
+ * something the *user* typed would be actively misleading. */
+type MarkerBuilder = (parts: {
+  originalChars: number;
+  originalTokens: number;
+  maxChars: number;
+  headChars: number;
+  tailChars: number;
+  spillPath?: string;
+}) => string;
+
+const toolOutputMarker: MarkerBuilder = (p) => {
   const parts = [
-    `[o4c truncated this output: ${originalChars.toLocaleString()} chars`,
-    ` (~${originalTokens.toLocaleString()} tokens)`,
-    ` exceeded the ${maxChars.toLocaleString()}-char limit.`,
-    ` First ${headChars.toLocaleString()} and last ${tailChars.toLocaleString()} chars shown.`,
+    `[o4c truncated this output: ${p.originalChars.toLocaleString()} chars`,
+    ` (~${p.originalTokens.toLocaleString()} tokens)`,
+    ` exceeded the ${p.maxChars.toLocaleString()}-char limit.`,
+    ` First ${p.headChars.toLocaleString()} and last ${p.tailChars.toLocaleString()} chars shown.`,
   ];
-  if (spillPath) parts.push(` Full output: ${spillPath}.`);
+  if (p.spillPath) parts.push(` Full output: ${p.spillPath}.`);
   parts.push(' Read a slice with read_file offset/limit, or narrow the command.]');
   return parts.join('');
-}
+};
+
+const userInputMarker: MarkerBuilder = (p) => {
+  const parts = [
+    `[o4c truncated this message: ${p.originalChars.toLocaleString()} chars`,
+    ` (~${p.originalTokens.toLocaleString()} tokens)`,
+    ` exceeded the ${p.maxChars.toLocaleString()}-char limit.`,
+    ` First ${p.headChars.toLocaleString()} and last ${p.tailChars.toLocaleString()} chars shown.`,
+  ];
+  // No "narrow the command" advice: the model did not cause this and cannot re-issue it. The spill
+  // path is the only actionable thing, and it is the whole message, verbatim.
+  if (p.spillPath) parts.push(` Full message: ${p.spillPath} - read it with read_file offset/limit.`);
+  else parts.push(' The middle is not recoverable from here - ask the user for the part you need.');
+  parts.push(']');
+  return parts.join('');
+};
 
 /**
- * Bounds one tool result to `maxChars`, keeping the head and the tail and replacing the middle with
- * a marker that says what was dropped, how big the original was, and where the full text is on disk
- * (when it was spilled). Output shorter than the budget is returned byte-identical - the common
- * case, and it must stay free of surprises.
+ * Head+tail truncation with the middle replaced by an explanatory marker. Shared by both public
+ * wrappers below so there is exactly one implementation of the bounding arithmetic (and one set of
+ * edge cases: the marker allowance, the line-boundary snapping, the defensive final trim) rather
+ * than a second copy that can drift. Text already within budget is returned byte-identical - the
+ * common case, and it must stay free of surprises.
  */
-export function truncateToolOutput(text: string, maxChars: number, spillPath?: string): TruncatedToolOutput {
+function truncateWithMarker(
+  text: string,
+  maxChars: number,
+  makeMarker: MarkerBuilder,
+  spillPath?: string,
+): TruncatedToolOutput {
   const originalChars = text.length;
   if (originalChars <= maxChars) return { text, truncated: false, originalChars };
 
@@ -146,7 +212,14 @@ export function truncateToolOutput(text: string, maxChars: number, spillPath?: s
   const tailStart = snapTailStart(text, originalChars - (contentBudget - headEnd));
   const head = text.slice(0, headEnd);
   const tail = text.slice(tailStart);
-  const marker = buildMarker(originalChars, estimateTextTokens(text), maxChars, head.length, tail.length, spillPath);
+  const marker = makeMarker({
+    originalChars,
+    originalTokens: estimateTextTokens(text),
+    maxChars,
+    headChars: head.length,
+    tailChars: tail.length,
+    spillPath,
+  });
 
   let result = `${head}\n${marker}\n${tail}`;
   // Defensive: the marker is built from real lengths, so it can run a little longer than the
@@ -157,6 +230,25 @@ export function truncateToolOutput(text: string, maxChars: number, spillPath?: s
     result = `${head}\n${marker}\n${tail.slice(Math.min(overflow, tail.length))}`;
   }
   return { text: result.slice(0, maxChars), truncated: true, originalChars };
+}
+
+/**
+ * Bounds one tool result to `maxChars`, keeping the head and the tail and replacing the middle with
+ * a marker that says what was dropped, how big the original was, and where the full text is on disk
+ * (when it was spilled).
+ */
+export function truncateToolOutput(text: string, maxChars: number, spillPath?: string): TruncatedToolOutput {
+  return truncateWithMarker(text, maxChars, toolOutputMarker, spillPath);
+}
+
+/**
+ * Bounds one user message, same mechanics as `truncateToolOutput` with wording that fits a message
+ * the model did not cause and cannot re-issue. See `maxUserInputTokens()` for why this exists at
+ * all; the head is where a task's instructions live, which is why `HEAD_SHARE` favouring it matters
+ * more here than for a directory listing.
+ */
+export function truncateUserInput(text: string, maxChars: number, spillPath?: string): TruncatedToolOutput {
+  return truncateWithMarker(text, maxChars, userInputMarker, spillPath);
 }
 
 /**

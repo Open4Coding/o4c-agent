@@ -37,8 +37,10 @@ import {
   OVERSIZED_TOOL_RESULT_MULTIPLE,
   maxToolOutputChars,
   maxToolOutputTokens,
+  maxUserInputChars,
   spillToolOutput,
   truncateToolOutput,
+  truncateUserInput,
 } from '../tools/toolOutput.js';
 
 export interface AgentEvent {
@@ -351,6 +353,27 @@ export class AgentLoop {
     if (output.length <= maxChars) return output;
     const spillPath = await spillToolOutput(options.toolOutputDir, toolName, output);
     return truncateToolOutput(output, maxChars, spillPath).text;
+  }
+
+  /**
+   * The same bound for a user message, applied where the entry is created so nothing downstream can
+   * ever see an unbounded one - see `maxUserInputTokens()` for why a pasted megabyte is now a
+   * standing hazard rather than a theoretical one (the first message is pinned for the whole
+   * session, and the window shrinks when llama-server is restarted with more slots).
+   *
+   * Spills to the same directory as oversized tool output, so the full text is always recoverable
+   * by `read_file` even though the entry is bounded. A failed spill degrades to a marker without a
+   * path, exactly as `boundToolOutput` does: a bounded message with no spill is still correct, and
+   * losing the turn over a diagnostic write would be worse.
+   *
+   * Images are deliberately untouched. They are not counted by `estimateTextTokens` and have their
+   * own provider-side limits; bounding them is a separate problem from bounding text.
+   */
+  private async boundUserInput(message: string, options: RunOptions): Promise<string> {
+    const maxChars = maxUserInputChars(options.contextWindow);
+    if (message.length <= maxChars) return message;
+    const spillPath = await spillToolOutput(options.toolOutputDir, 'user-input', message);
+    return truncateUserInput(message, maxChars, spillPath).text;
   }
 
   /**
@@ -776,7 +799,7 @@ export class AgentLoop {
     // Saved so an abort mid-turn can roll history back to exactly this point - see the catch
     // block below.
     const lengthBeforeTurn = this.entries.length;
-    this.appendEntry(userInputEntry(userMessage, options.images), onEntry);
+    this.appendEntry(userInputEntry(await this.boundUserInput(userMessage, options), options.images), onEntry);
     const toolDefs = this.tools.map((t) => ({
       name: t.name,
       description: t.description,

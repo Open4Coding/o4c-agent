@@ -838,3 +838,79 @@ test('a tool result within budget is appended byte-identical', async () => {
   const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
   assert.equal(response.content, output);
 });
+
+test('a megabyte-paste user message is bounded before it reaches the context', async () => {
+  // The other end of the pipe from the tool-result cap above. A paste has always had the same
+  // unbounded shape (caeb443 collapses it in the UI; nothing capped the entry), and two findings on
+  // 2026-10-07 made it urgent: the first user message is now PINNED for the whole session, so an
+  // unbounded one is permanently resident, and the window itself shrinks when llama-server is
+  // restarted with more --parallel slots.
+  const { mkdtemp, readdir, readFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-userinput-'));
+
+  const rules = 'RULES: only write to C:/tmp.tmp. D:/AngelCode is read-only.\n';
+  const ending = '\nEND OF SPEC: begin with section 1a.';
+  const paste = rules + 'spec line that goes on and on\n'.repeat(60_000) + ending; // ~1.8 MB
+
+  const provider = new FakeProvider([{ content: 'starting', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const result = await loop.run(paste, { contextWindow: 57_344, toolOutputDir: dir });
+
+  assert.equal(result, 'starting');
+
+  const input = loop.getEntries().find((e) => e.type === 'user' && e.sub_type === 'input');
+  assert.ok(input, 'the user entry was appended');
+  assert.ok(input.content.length <= 22_936, `entry was ${input.content.length} chars`); // 5,734 tokens * 4
+  assert.ok(input.content.startsWith('RULES:'), 'the head survives - that is where the rules are');
+  assert.ok(input.content.endsWith(ending), 'and so does the tail');
+  assert.match(input.content, /\[o4c truncated this message: 1,8\d\d,\d\d\d chars/);
+
+  // What would actually have been sent is bounded, and the whole visible context fits the window.
+  const wireChars = JSON.stringify(provider.receivedRequests[0].messages).length;
+  assert.ok(wireChars <= 40_000, `wire payload was ${wireChars} chars`);
+  assert.ok(loop.getVisibleTokenEstimate() < 57_344, 'the visible context fits the window');
+
+  // Nothing is lost - the full paste is on disk and the marker names it.
+  const spilled = await readdir(dir);
+  assert.equal(spilled.length, 1);
+  assert.ok(spilled[0].includes('user-input'), `spill file was ${spilled[0]}`);
+  const full = await readFile(join(dir, spilled[0]), 'utf-8');
+  assert.equal(full.length, paste.length);
+  assert.ok(input.content.includes(spilled[0]), 'the marker names the spill file');
+});
+
+test('the bound scales with the window, so a smaller slot bounds harder', async () => {
+  // Same paste, two windows a --parallel change can produce. A flat char cap would behave
+  // identically at both; a window-derived one must not.
+  const paste = 'z'.repeat(400_000);
+  const sizes: number[] = [];
+  for (const contextWindow of [229_376, 14_336]) {
+    const provider = new FakeProvider([{ content: 'ok', toolCalls: [], stopReason: 'end_turn' }]);
+    const loop = new AgentLoop(provider, [], 'system');
+    await loop.run(paste, { contextWindow });
+    const input = loop.getEntries().find((e) => e.type === 'user' && e.sub_type === 'input');
+    sizes.push(input?.content.length ?? -1);
+  }
+  assert.ok(sizes[0] <= 91_752, `229K window bounded to ${sizes[0]}`); // 22,938 tokens * 4
+  assert.ok(sizes[1] <= 5_736, `14K window bounded to ${sizes[1]}`); // 1,434 tokens * 4
+  assert.ok(sizes[0] > sizes[1], 'a bigger window must allow a bigger message');
+});
+
+test('an ordinary prompt is never touched, and no spill file is written for it', async () => {
+  const { mkdtemp, readdir } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-userinput-ok-'));
+
+  const prompt = 'write me a tetris clone in one html file';
+  const provider = new FakeProvider([{ content: 'ok', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+  await loop.run(prompt, { contextWindow: 14_336, toolOutputDir: dir });
+
+  const input = loop.getEntries().find((e) => e.type === 'user' && e.sub_type === 'input');
+  assert.equal(input?.content, prompt, 'byte-identical, no marker');
+  assert.deepEqual(await readdir(dir), [], 'nothing spilled for a normal prompt');
+});

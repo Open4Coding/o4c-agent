@@ -1,5 +1,6 @@
 import type { ContextEntry } from '../../agent/contextEntry.js';
 import type { Message, ToolDefinition } from '../../providers/types.js';
+import { maxUserInputChars } from '../../tools/toolOutput.js';
 
 export interface Finding {
   invariant: string;
@@ -58,7 +59,11 @@ export function wireFindings(messages: readonly Message[]): Finding[] {
   return out;
 }
 
-export function entryFindings(entries: readonly ContextEntry[], visibleEstimate: number): Finding[] {
+export function entryFindings(
+  entries: readonly ContextEntry[],
+  visibleEstimate: number,
+  window: number,
+): Finding[] {
   const out: Finding[] = [];
   let recount = 0;
   for (const entry of entries) {
@@ -101,10 +106,23 @@ export function entryFindings(entries: readonly ContextEntry[], visibleEstimate:
   // Hiding a later user turn is allowed; destroying one is not - a user message is the only content
   // in the log that cannot be re-derived or re-run (`releaseEntryContent()`'s own
   // `entry.type === 'user'` guard). Covers every user entry, hidden or visible.
+  //
+  // The second check is the paste bound (`AgentLoop.boundUserInput()`): a user entry is capped at
+  // append time, so no amount of later compaction or resuming can produce one over budget. Checked
+  // against this scenario's own window rather than a constant, because the window is not one - a
+  // session resumed after llama-server is restarted with more `--parallel` slots gets a per-slot
+  // window several times smaller, and a flat cap would silently stop scaling with it.
+  const maxUserChars = maxUserInputChars(window);
   for (const entry of entries) {
     if (entry.type !== 'user') continue;
     if (RELEASED_MARKER.test(entry.content)) {
       out.push({ invariant: 'user-content-never-released', detail: `user entry ${entry.id} was released` });
+    }
+    if (entry.content.length > maxUserChars) {
+      out.push({
+        invariant: 'user-input-within-budget',
+        detail: `user entry ${entry.id} is ${entry.content.length} chars, budget is ${maxUserChars}`,
+      });
     }
   }
 

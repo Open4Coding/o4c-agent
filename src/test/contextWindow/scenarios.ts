@@ -310,6 +310,29 @@ export const SCENARIOS: ScenarioSpec[] = [
     },
   },
   {
+    // The user-input counterpart to `giant-tool-result`: a pasted message many times the window.
+    // Same unbounded shape tool results had (nothing capped the entry; `caeb443` only collapses the
+    // paste in the UI), and the pin made it matter more rather than less - the first user message is
+    // now held visible for the whole session, so an unbounded one would be permanently resident.
+    // Bounded at append time by `AgentLoop.boundUserInput()`; the `user-input-within-budget`
+    // invariant checks every scenario, and this one guarantees an over-budget paste is attempted.
+    name: 'giant-user-input',
+    build: (window) => [
+      {
+        prompt: `RULES keep this head\n${'pasted spec line\n'.repeat(Math.max(1, window))}TAIL keep this too`,
+        rounds: [{ responseTokens: 20 }],
+      },
+    ],
+    check: (r) => {
+      assert.equal(r.hardStops, 0, 'a bounded paste must not wedge the session');
+      assert.equal(r.turns[0]?.outcome, 'text', 'the turn still reaches an answer');
+      const input = r.finalEntries.find((e) => e.type === 'user' && e.sub_type === 'input');
+      assert.ok(input, 'the user entry exists');
+      assert.ok(input.content.startsWith('RULES keep this head'), 'the instructions at the head survive');
+      assert.ok(input.content.includes('o4c truncated this message'), 'and it says it was truncated');
+    },
+  },
+  {
     // Reproduces the real 2026-10-07 failure in miniature: ONE user turn whose context is filled by
     // the model's own prose and reasoning (which pruning structurally cannot free - it only takes
     // `toolcall`/`toolcallresponse` pairs), punctuated by tool calls with near-empty results, which
