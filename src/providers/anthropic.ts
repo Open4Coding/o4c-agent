@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { anthropicThinkEffort } from '../agent/thinkLevel.js';
 import type {
   CompletionRequest,
   CompletionResponse,
@@ -73,6 +74,17 @@ const DEFAULT_MAX_TOKENS = 4096;
 // flat allowance rather than a budget-derived one.
 const THINKING_MAX_TOKENS_HEADROOM = 4096;
 
+/**
+ * Output tokens over elapsed milliseconds, as a spreadable `{ tokensPerSecond }` - or nothing at
+ * all when the numbers cannot produce a meaningful rate (no tokens, or a response fast enough to
+ * round to zero elapsed). Returning an absent field rather than `0` or `Infinity` keeps the status
+ * bar honest: it shows nothing until there is something real to show.
+ */
+function tokensPerSecondOver(outputTokens: number, elapsedMs: number): { tokensPerSecond?: number } {
+  if (outputTokens <= 0 || elapsedMs <= 0) return {};
+  return { tokensPerSecond: (outputTokens * 1000) / elapsedMs };
+}
+
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic';
   private client: Anthropic;
@@ -109,18 +121,25 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    // `/think`'s per-turn level wins over the constructor's configured effort, so the command takes
+    // effect on the next turn without a restart. `nothink` maps to no thinking block at all, which
+    // is why this is a `ThinkLevel`-shaped check rather than a truthiness one: 'nothink' is a real
+    // level that must switch thinking OFF, not an absent setting that falls back to the default.
+    const effort = request.thinkLevel ? anthropicThinkEffort(request.thinkLevel) : this.thinkingEffort;
+
     // Always requested via the SDK's streaming helper (`.stream()`, not `.create()`) - the only
     // change from the non-streaming form is that `onToken` (when given) sees text as it arrives
     // instead of only once the full message lands. `finalMessage()` still resolves to the exact
     // same `Anthropic.Message` shape `.create()` used to return, so everything below this point
     // is unchanged.
+    const startedAt = Date.now();
     const stream = this.client.messages.stream(
       {
         model: this.model,
         // Adaptive thinking has no fixed budget to size max_tokens against - flat extra headroom
         // on top of the configured cap instead, so a thinking-heavy response doesn't get cut off
         // mid-thought.
-        max_tokens: this.thinkingEffort ? this.maxTokens + THINKING_MAX_TOKENS_HEADROOM : this.maxTokens,
+        max_tokens: effort ? this.maxTokens + THINKING_MAX_TOKENS_HEADROOM : this.maxTokens,
         system: request.systemPrompt,
         messages: toAnthropicMessages(request.messages),
         tools: request.tools.map((t) => ({
@@ -128,10 +147,10 @@ export class AnthropicProvider implements LLMProvider {
           description: t.description,
           input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
         })),
-        ...(this.thinkingEffort
+        ...(effort
           ? {
               thinking: { type: 'adaptive' as const, display: 'summarized' as const },
-              output_config: { effort: this.thinkingEffort },
+              output_config: { effort },
             }
           : {}),
       },
@@ -194,6 +213,11 @@ export class AnthropicProvider implements LLMProvider {
       usage: {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
+        // Anthropic reports no throughput of its own (llama.cpp hands back
+        // `timings.predicted_per_second` directly), so this is measured here instead. It includes
+        // the time to first token, so it reads slightly lower than pure decode speed on a long
+        // prompt - the honest number available without a server-side figure to use.
+        ...tokensPerSecondOver(response.usage.output_tokens, Date.now() - startedAt),
       },
       thinkingSignature,
       redactedThinking,

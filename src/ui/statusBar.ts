@@ -1,3 +1,29 @@
+/**
+ * The model as a name rather than a path. The local provider's model id comes from the server's
+ * `/v1/models`, which for llama-server is the file it was launched with - on PHOEBE that is
+ * `/media/sda/models/qwen3.8-27b-Q4_K_M-imatFP16.gguf`, 50 characters of which only the last 27
+ * identify anything. The status line shares one row with five other segments, so it gets the name.
+ *
+ * Splits on both separators regardless of the host platform: the path comes from the *server*, so a
+ * Windows client routinely sees POSIX paths (and could see the reverse). Anything without a
+ * separator or extension - `claude-opus-5`, `local` - passes through untouched.
+ */
+export function formatModelName(model: string): string {
+  const base = model.split(/[\\/]/).pop() ?? model;
+  const trimmed = base.replace(/\.(gguf|bin|safetensors)$/i, '');
+  // Never return nothing: a path ending in a separator would otherwise blank the segment entirely,
+  // which reads as "no model" rather than "an oddly-named one".
+  return trimmed || model;
+}
+
+/** `45.9657` -> `"46 tok/s"`. Whole numbers above 10 (the difference between 46 and 45.97 is noise
+ * on a figure that moves every turn), one decimal below, so a slow local model still shows a
+ * meaningful rate instead of a flat `0`. */
+export function formatTokensPerSecond(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)} tok/s`;
+}
+
 /** `12345` -> `"12.3K"`, matching the compact style the status bar needs - under 1000 shown
  * as-is, otherwise one decimal place under 10K and none above (so it never grows past 5 chars). */
 export function formatTokenCount(n: number): string {

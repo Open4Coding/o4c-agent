@@ -10,8 +10,25 @@ import { ServerDownPicker, SERVER_POLL_MS, type ServerDownChoice, type ServerWai
 import { ServerUnavailableError } from '../providers/types.js';
 import type { ServerProbe, ServerStatus } from '../providers/local.js';
 import { CommandFamilyPicker } from './CommandFamilyPicker.js';
+import { ThinkPicker } from './ThinkPicker.js';
+
+/** `config.json` key holding the chosen thinking level per model id - `/think`'s choice is about
+ * how one particular model behaves, so Qwen3 and Claude keep separate values and neither is
+ * clobbered by switching provider. */
+const THINK_LEVEL_CONFIG_KEY = 'thinkLevelByModel';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
+import { projectLabel, readGitBranch, readMountPoint } from '../session/gitInfo.js';
+import {
+  DEFAULT_THINK_CAPS,
+  DEFAULT_THINK_LEVEL,
+  THINK_LEVELS,
+  THINK_LEVEL_INFO,
+  effectiveThinkLevel,
+  parseThinkLevel,
+  type ThinkCaps,
+  type ThinkLevel,
+} from '../agent/thinkLevel.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
 import { formatConfirmMessage } from './confirmPreview.js';
@@ -35,6 +52,8 @@ import {
   formatTokenCount,
   formatElapsed,
   formatElapsedCoarse,
+  formatModelName,
+  formatTokensPerSecond,
   elapsedTickMs,
   renderProgressBar,
   progressBarFilledCells,
@@ -109,6 +128,10 @@ export interface AppProps {
   /** Undefined for an untrusted/no-project run. Only consulted to scope Plan-Write mode's
    * write_file exception to `.o4c/plans/` - see modePolicy.ts's classifyToolAccess. */
   projectRoot?: string;
+  /** What the active model's chat template honours, from the startup capability probe
+   * (`probeThinkCaps`), cached per model id. Undefined for a provider needing no probe, or a
+   * server that could not be reached - `thinkLevel.ts` falls back to sane defaults. */
+  thinkCaps?: ThinkCaps;
   /** The model id this session is running (`-m`/config.json's `model`, as passed to the
    * provider) - display only, shown in the status bar. */
   model: string;
@@ -215,6 +238,7 @@ function StatusBar({
   liveText,
   mode,
   busy,
+  thinkLevel,
 }: {
   loop: AgentLoop;
   model: string;
@@ -235,6 +259,10 @@ function StatusBar({
   /** A turn is running: the clock ticks every second and shows seconds. At idle it ticks once a
    * minute and shows minutes only, so an untouched screen is not repainted every second. */
   busy: boolean;
+  /** The level that will actually take effect, which on a model missing a control can be weaker
+   * than the one chosen (`thinkLevel.ts`'s `effectiveThinkLevel()`). Shown so this line never
+   * claims a setting the request did not really make. */
+  thinkLevel: ThinkLevel;
 }) {
   const [, tick] = useState(0);
   const startRef = useRef(Date.now());
@@ -247,6 +275,11 @@ function StatusBar({
   const tokens = loop.getVisibleTokenEstimate() + liveTokens;
   const fraction = contextWindow ? tokens / contextWindow : undefined;
   const elapsed = busy ? formatElapsed(Date.now() - startRef.current) : formatElapsedCoarse(Date.now() - startRef.current);
+  // Blank until a response has actually reported a rate - showing `0 tok/s` before the first turn
+  // would read as "stalled" rather than "nothing measured yet". `formatTokensPerSecond` returns an
+  // empty string for anything unusable, so the segment is dropped rather than rendered empty.
+  const rate = loop.getTokensPerSecond();
+  const rateText = rate === undefined ? '' : formatTokensPerSecond(rate);
 
   return (
     <Text>
@@ -254,7 +287,9 @@ function StatusBar({
         Mode: {modeInfo(mode).label} (/mode or Tab to change)
       </Text>
       <Text color={theme.border}> | </Text>
-      <Text color={theme.accent}>◆ {model}</Text>
+      <Text color={theme.accent}>◆ {formatModelName(model)}</Text>
+      <Text color={theme.border}> | </Text>
+      <Text color={theme.accent}>Think: {THINK_LEVEL_INFO[thinkLevel].label}</Text>
       <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>
         {formatTokenCount(tokens)}
@@ -269,8 +304,40 @@ function StatusBar({
           <Text color={theme.accent}>{Math.round(fraction * 100)}%</Text>
         </Text>
       )}
+      {rateText && (
+        <Text>
+          <Text color={theme.border}> | </Text>
+          <Text color={theme.accent}>{rateText}</Text>
+        </Text>
+      )}
       <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>{elapsed}</Text>
+    </Text>
+  );
+}
+
+/**
+ * The footer's second line: which branch, and which volume/project/path you are in. Separate from
+ * `StatusBar` because it changes on a completely different cadence - the status line re-renders on
+ * a timer, where this only moves when you switch branch or project, so it takes its values as
+ * already-resolved strings and does no I/O of its own (see `session/gitInfo.ts` on why reading
+ * `.git/HEAD` per render would be the wrong shape even though it is cheap).
+ *
+ * Renders the directory alone when there is no branch, which is a normal case rather than an error:
+ * the meta workspace and the scratch directories are not repositories.
+ */
+function ProjectBar({ branch, project }: { branch?: string; project: string }) {
+  return (
+    <Text>
+      {branch ? (
+        <Text>
+          <Text color={theme.accent}> {branch}</Text>
+          <Text color={theme.border}> · </Text>
+        </Text>
+      ) : (
+        <Text> </Text>
+      )}
+      <Text color={theme.border}>dir: {project}</Text>
     </Text>
   );
 }
@@ -318,6 +385,7 @@ export function App({
   reloadAfterTurn,
   sessionView,
   projectRoot,
+  thinkCaps: probedThinkCaps,
   model: modelProp,
   provider,
   baseUrl,
@@ -532,8 +600,29 @@ export function App({
   // - see src/ui/modePolicy.ts. Manual is the default: a deliberate behavior change from "nothing
   // is ever confirmed" today, the actual fix for the long-open run_shell/write_file safety gap.
   const [mode, setMode] = useState<Mode>(initialMode ?? 'manual');
+  // `/think`'s level. Seeded from the default (unrestricted, i.e. exactly what the server did
+  // before this command existed) and replaced by the per-model value from config once it loads,
+  // so a first paint never shows a level the next turn would not actually use.
+  const [thinkLevel, setThinkLevel] = useState<ThinkLevel>(DEFAULT_THINK_LEVEL);
+  // What this model's chat template honours, from the startup probe. Defaults are assumed until
+  // the probe answers; `effectiveThinkLevel` is what reconciles the two for display.
+  // Not state: the probe runs once at startup (cli.ts, where the API key lives) and the answer
+  // cannot change while the process runs - a model swap restarts the process. If the server was
+  // down at launch, cli.ts re-probes on recovery and updates the PROVIDER, which is what governs
+  // actual requests; this display value keeps the assumed defaults until the next launch.
+  const thinkCaps = probedThinkCaps;
+  // Read once on mount and refreshed when a turn finishes - never per render (see gitInfo.ts).
+  const [gitBranch, setGitBranch] = useState<string | undefined>(undefined);
+  // The volume the project sits on - `D:` here, a POSIX mount point elsewhere. Read once only: a
+  // directory cannot change which device it is on while the process runs, so unlike the branch
+  // this never needs refreshing.
+  const [mountPoint, setMountPoint] = useState<string | undefined>(undefined);
   // Same pending-Promise-resolver pattern as resumePicker, for the /mode command's picker.
   const [modePicker, setModePicker] = useState<{ resolve: (m: Mode | undefined) => void } | null>(
+    null,
+  );
+  // Same pending-Promise-resolver pattern as modePicker above.
+  const [thinkPicker, setThinkPicker] = useState<{ resolve: (l: ThinkLevel | undefined) => void } | null>(
     null,
   );
   // True while the "Stop now?" check is showing: Esc during a running turn asks before it stops anything.
@@ -603,6 +692,65 @@ export function App({
   modeRef.current = mode;
   const plansDirRef = useRef(plansDir);
   plansDirRef.current = plansDir;
+
+  // Read inside the turn callback rather than captured: a level chosen while a turn was queued
+  // should still apply to it, exactly as modeRef/plansDirRef do for their own settings.
+  const thinkLevelRef = useRef(thinkLevel);
+  thinkLevelRef.current = thinkLevel;
+  // What the status bar shows: the level that will really take effect, which on a model missing
+  // a control can be weaker than the one chosen.
+  const shownThinkLevel = effectiveThinkLevel(thinkLevel, thinkCaps ?? DEFAULT_THINK_CAPS);
+  // Project-wise location for the footer's second line - pure, so it costs nothing per render.
+  // The volume prefix appears once `mountPoint` resolves (one stat, on mount).
+  const projectLabelText = projectLabel(projectRoot, process.cwd(), mountPoint);
+
+  // The saved level is per model id, so Qwen3 and Claude each keep their own - the setting is
+  // about how a particular model behaves, not a global preference. Read once on mount; a missing
+  // or unparseable value leaves the unrestricted default, which is what the server did anyway.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const saved = (await configStore.get(THINK_LEVEL_CONFIG_KEY)) as Record<string, unknown> | undefined;
+        const forModel = saved && typeof saved === 'object' ? saved[model] : undefined;
+        const level = typeof forModel === 'string' ? parseThinkLevel(forModel) : undefined;
+        if (!cancelled && level) setThinkLevel(level);
+      } catch {
+        // A cosmetic preference - an unreadable config must not stop the app starting.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [configStore, model]);
+
+  // Branch for the footer. Read on mount and again whenever a turn finishes (a turn can switch
+  // branches), never per render - see gitInfo.ts on why that distinction matters even though the
+  // read itself is one small file.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const branch = await readGitBranch(projectRoot ?? process.cwd());
+      if (!cancelled) setGitBranch(branch);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectRoot, isProcessing]);
+
+  // Volume for the footer, read once. Deliberately NOT keyed on isProcessing like the branch
+  // above: a drive letter or mount point is fixed for the life of the process, so re-reading it
+  // per turn would be stats spent to learn the same answer.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const mount = await readMountPoint(projectRoot ?? process.cwd());
+      if (!cancelled) setMountPoint(mount);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectRoot]);
 
   // Passed into loop.run() as RunOptions.toolPolicy - the current mode decides whether a
   // mutating tool call runs silently, needs a yes/no first (via the same generic ConfirmDialog
@@ -781,6 +929,51 @@ export function App({
           pushBlock([{ kind: 'system', text: `Mode set to ${modeInfo(chosen).label}.` }]);
         } else {
           pushBlock([{ kind: 'system', text: 'Mode unchanged.' }]);
+        }
+      } else if (input === '/think' || input.startsWith('/think ')) {
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        // `/think high` sets it outright; a bare `/think`, or an argument that is not a level,
+        // opens the dropdown rather than erroring - a typo should land you in the list, not a
+        // rejection message.
+        const typed = input.slice('/think'.length).trim();
+        const direct = typed ? parseThinkLevel(typed) : undefined;
+        if (typed && !direct) {
+          pushBlock([
+            {
+              kind: 'system',
+              text: `"${typed}" is not a thinking level - choose one of ${THINK_LEVELS.join(', ')}.`,
+            },
+          ]);
+        }
+        const chosen =
+          direct ??
+          (await new Promise<ThinkLevel | undefined>((resolve) => {
+            setThinkPicker({ resolve });
+          }));
+        if (chosen) {
+          setThinkLevel(chosen);
+          const effective = effectiveThinkLevel(chosen, thinkCaps ?? DEFAULT_THINK_CAPS);
+          // Said plainly when the model cannot deliver what was asked for, rather than letting the
+          // status bar quietly show something else than the command reported.
+          const note =
+            effective === chosen
+              ? ''
+              : ` (this model cannot do ${THINK_LEVEL_INFO[chosen].label}; using ${THINK_LEVEL_INFO[effective].label})`;
+          pushBlock([{ kind: 'system', text: `Thinking level set to ${THINK_LEVEL_INFO[chosen].label}.${note}` }]);
+          // Persisted per model, best-effort: the level is already live either way, and failing a
+          // turn over a preference write would be the wrong trade.
+          void (async () => {
+            try {
+              const saved = (await configStore.get(THINK_LEVEL_CONFIG_KEY)) as Record<string, unknown> | undefined;
+              const next = { ...(saved && typeof saved === 'object' ? saved : {}), [model]: chosen };
+              await configStore.set('global', THINK_LEVEL_CONFIG_KEY, next);
+            } catch {
+              // Keep the in-session level; it simply will not survive a restart.
+            }
+          })();
+          void runLogger.log({ type: 'system', sub_type: 'info', command: '/think', level: chosen });
+        } else {
+          pushBlock([{ kind: 'system', text: 'Thinking level unchanged.' }]);
         }
       } else if (input === '/set' || input === '/config') {
         // Submitted rather than chosen from the dropdown. The dropdown owns Enter while it is open,
@@ -1033,6 +1226,9 @@ export function App({
             signal: controller.signal,
             contextWindow,
             toolOutputDir,
+            // `/think`'s level, read fresh per turn via the ref so a change made while a turn
+            // was queued still applies to it.
+            thinkLevel: thinkLevelRef.current,
             maxIterations,
             // The full request/response wire transcript - "the sends", distinct from onEvent's
             // already-derived AgentEvent stream below (which only ever carries the *response*
@@ -1307,6 +1503,19 @@ export function App({
     modePicker?.resolve(undefined);
     setModePicker(null);
   }, [modePicker]);
+
+  // Mirrors handleModePickerSelect/Cancel above.
+  const handleThinkPickerSelect = useCallback(
+    (level: ThinkLevel) => {
+      thinkPicker?.resolve(level);
+      setThinkPicker(null);
+    },
+    [thinkPicker],
+  );
+  const handleThinkPickerCancel = useCallback(() => {
+    thinkPicker?.resolve(undefined);
+    setThinkPicker(null);
+  }, [thinkPicker]);
 
   const handleViewPickerSelect = useCallback(
     (choice: SessionViewChoice) => {
@@ -1687,7 +1896,7 @@ export function App({
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !viewPicker}
+        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !viewPicker}
         suppressNav={paletteOpen || familyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
@@ -1702,7 +1911,8 @@ export function App({
       {/* Front-end plan item #8: context max/current/%used now lives on the same line as Mode,
           under the input box - previously two separate lines (StatusBar above the input box,
           "Mode: X" below it). */}
-      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
+      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} thinkLevel={shownThinkLevel} />
+      <ProjectBar branch={gitBranch} project={projectLabelText} />
       <Text color={theme.border}>Esc stop (asks while thinking) · type to queue · Ctrl+C reset</Text>
       {confirmDialog ? (
         <ConfirmDialog
@@ -1739,6 +1949,14 @@ export function App({
           currentMode={mode}
           onSelect={handleModePickerSelect}
           onCancel={handleModePickerCancel}
+          highlightColor={highlightColor}
+        />
+      ) : thinkPicker ? (
+        <ThinkPicker
+          currentLevel={thinkLevel}
+          caps={thinkCaps ?? DEFAULT_THINK_CAPS}
+          onSelect={handleThinkPickerSelect}
+          onCancel={handleThinkPickerCancel}
           highlightColor={highlightColor}
         />
       ) : viewPicker ? (

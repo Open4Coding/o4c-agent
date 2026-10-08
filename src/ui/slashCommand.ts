@@ -69,6 +69,12 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Switch between Manual, Auto, Accept Edits, Plan, and Plan-Write mode.',
   },
   {
+    name: '/think',
+    description:
+      'Set how much the model reasons: nothink, low, med, high, xhigh. /think <level> to set it directly.',
+    select: 'run',
+  },
+  {
     name: '/help',
     description:
       'List every command with a one-line description. Use /help-<command> for more detail on one, e.g. /help-mode.',

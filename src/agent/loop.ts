@@ -33,6 +33,7 @@ import {
   type CompactionSettings,
 } from './compaction.js';
 import { createThinkTagStripper } from './streamFilter.js';
+import type { ThinkLevel } from './thinkLevel.js';
 import {
   OVERSIZED_TOOL_RESULT_MULTIPLE,
   maxToolOutputChars,
@@ -101,6 +102,13 @@ export interface RunOptions {
    * restarting `AgentLoop`. Omitted entirely, the system prompt is sent unchanged (existing
    * callers/tests keep working exactly as before). */
   modeInstruction?: string;
+  /** How much reasoning this turn is allowed, from `/think` - passed straight through to every
+   * request the turn makes (`providers/types.ts`'s `CompletionRequest.thinkLevel`), where each
+   * provider translates it with `thinkLevel.ts`'s helpers. Per-run rather than constructor-level
+   * for the same reason as `modeInstruction`: the level changes mid-session without restarting
+   * `AgentLoop`. Omitted, providers fall back to whatever `config.json` configured, so existing
+   * callers and tests behave exactly as before. */
+  thinkLevel?: ThinkLevel;
   /** Lets the caller cancel this turn before the provider responds (e.g. the user pressed
    * Escape while the "Thinking..." spinner was showing). On abort, `run()` throws
    * `AbortedError` and rolls back everything this call appended to history, as if the turn had
@@ -168,6 +176,8 @@ export class AgentLoop {
    * independently. `undefined` until the first real response of the process's lifetime. */
   private lastRealPromptTokens: number | undefined;
   private visibleEstimateAtLastRealCount = 0;
+  /** Last reported decode rate, for the status bar - see `getTokensPerSecond()`. */
+  private lastTokensPerSecond: number | undefined;
   /**
    * Real prompt tokens per plain chars/4 estimate, re-measured from every real response below.
    *
@@ -256,6 +266,16 @@ export class AgentLoop {
    * against a model's `contextWindow`. O(1) - see `visibleTokenEstimate`. */
   getVisibleTokenEstimate(): number {
     return this.visibleTokenEstimate;
+  }
+
+  /**
+   * Decode throughput of the most recent response that reported one, in tokens/second, or
+   * `undefined` before any has. For the local provider this is llama-server's own
+   * `timings.predicted_per_second` - generation only, prefill excluded - rather than anything
+   * measured here. Display-only: nothing in the loop reads it.
+   */
+  getTokensPerSecond(): number | undefined {
+    return this.lastTokensPerSecond;
   }
 
   /**
@@ -952,6 +972,9 @@ export class AgentLoop {
         tools: toolDefs,
         signal: options.signal,
         maxTokens: dynamicMaxTokens,
+        // Sent on every iteration of the turn, not just the first: a long tool-calling turn makes
+        // many requests, and all of them should reason at the level the user asked for.
+        thinkLevel: options.thinkLevel,
         onToken: (delta, kind) => {
           streamed = true;
           thinkFilter.feed(delta, kind);
@@ -968,6 +991,12 @@ export class AgentLoop {
           }
           this.lastRealPromptTokens = response.usage.inputTokens;
           this.visibleEstimateAtLastRealCount = visibleEstimateAtSendTime;
+          // Only overwritten when a response actually reported a rate, so the footer keeps showing
+          // the last real figure across a compaction call or a provider that reports none, rather
+          // than blanking mid-turn.
+          if (response.usage.tokensPerSecond !== undefined) {
+            this.lastTokensPerSecond = response.usage.tokensPerSecond;
+          }
         }
       } catch (err) {
         // Checked on the caller's own signal, not the error's name/type - a provider may wrap

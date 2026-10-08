@@ -9,7 +9,7 @@ import { RESTART_EXIT_CODE, buildRestartArgs, runSupervisor, writeHandoff } from
 import { MODES, type Mode } from './ui/modePolicy.js';
 import { parseSessionView, type SessionView } from './ui/formatEntries.js';
 import { AnthropicProvider } from './providers/anthropic.js';
-import { LocalProvider, probeLocalServer, type ServerProbe, type ServerStatus } from './providers/local.js';
+import { LocalProvider, probeLocalServer, probeThinkCaps, type ServerProbe, type ServerStatus } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider, Message } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
@@ -19,6 +19,24 @@ import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
 import { ConfigStore } from './session/configStore.js';
+import type { ThinkCaps } from './agent/thinkLevel.js';
+
+/** `config.json` key caching each model's probed reasoning capabilities, so the startup check
+ * runs once per model rather than at every launch. */
+const THINK_CAPS_CONFIG_KEY = 'thinkCapsByModel';
+
+/** Validates a cached capability record before trusting it - a hand-edited or stale config must
+ * not make every request fail with an effort string the template rejects. */
+function isThinkCaps(value: unknown): value is ThinkCaps {
+  if (!value || typeof value !== 'object') return false;
+  const c = value as Record<string, unknown>;
+  return (
+    Array.isArray(c.efforts) &&
+    c.efforts.every((e) => typeof e === 'string') &&
+    typeof c.supportsEnableThinking === 'boolean' &&
+    typeof c.supportsBudget === 'boolean'
+  );
+}
 import { installGcWatchdog } from './session/gcWatchdog.js';
 import { App } from './ui/App.js';
 import { installResizeReflowFix } from './ui/resizeReflowFix.js';
@@ -137,6 +155,7 @@ async function runRepl(
   sessionStore: SessionStore,
   opts: RestartableOpts,
   contextWindow: number | undefined,
+  thinkCaps: ThinkCaps | undefined,
   highlightColor: string,
   maxIterations: number | undefined,
   initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] },
@@ -199,6 +218,7 @@ async function runRepl(
       provider: opts.provider,
       baseUrl: opts.baseUrl,
       contextWindow,
+      thinkCaps,
       maxIterations,
       initialHighlightColor: highlightColor,
     }),
@@ -411,12 +431,35 @@ program
     // another model" box, waits however long a small laptop-sized server needs, and re-reads the context size once
     // it answers - startup never blocks on it.
     let autoContextWindow: number | undefined;
+    // Undefined for a non-local provider (Anthropic's five efforts are already known) and until
+    // the probe answers; `thinkLevel.ts` falls back to sane defaults in both cases.
+    let thinkCaps: ThinkCaps | undefined;
     let serverStatus: ServerStatus = 'up';
     if (opts.provider === 'local') {
       const probe = await probeLocalServer(opts.baseUrl, localApiKey);
       serverStatus = probe.status;
       if (probe.model) opts = { ...opts, model: probe.model };
       autoContextWindow = probe.contextWindow;
+      // Which reasoning controls this model honours, for `/think`. Cached per model id in
+      // config, so the probe runs once per model rather than at every launch - David's explicit
+      // requirement. The probe itself is ~0.01s (the chat template rejects the sentinel effort
+      // before generating anything), but caching also means a model stays usable when the server
+      // is briefly unprobeable.
+      if (probe.status === 'up' && opts.model) {
+        const cachedAll = (resolvedConfig[THINK_CAPS_CONFIG_KEY] ?? {}) as Record<string, unknown>;
+        const cached = cachedAll[opts.model];
+        if (isThinkCaps(cached)) {
+          thinkCaps = cached;
+        } else {
+          thinkCaps = await probeThinkCaps(opts.baseUrl, localApiKey);
+          // Best-effort: a failed write just means it is probed again next launch.
+          try {
+            await configStore.set('global', THINK_CAPS_CONFIG_KEY, { ...cachedAll, [opts.model]: thinkCaps });
+          } catch {
+            // Keep the probed value for this session.
+          }
+        }
+      }
     }
     // Front-end plan item #8: auto-detected max context, not a guess or a required manual value -
     // a manually-configured contextWindow (above) still wins when set. Local comes from the real
@@ -450,6 +493,7 @@ program
         apiKey: localApiKey,
         maxTokens: providerMaxTokens,
         reasoningBudgetTokens,
+        thinkCaps,
         connectTimeoutMs,
         idleTimeoutMs,
       });
@@ -517,6 +561,7 @@ program
         sessionStore,
         opts,
         contextWindow,
+        thinkCaps,
         highlightColor,
         maxIterations,
         initialSession,
@@ -527,6 +572,11 @@ program
               status: serverStatus,
               probe: () => probeLocalServer(opts.baseUrl, localApiKey),
               onRecovered: (probe) => {
+                // The capability probe never ran if the server was down at launch, so the levels
+                // were using assumed defaults. Re-probe here rather than in App.tsx: this is where
+                // localApiKey is in scope, and a key-protected server would simply 401 an
+                // unauthenticated probe and silently fall back to those same defaults.
+                void probeThinkCaps(opts.baseUrl, localApiKey).then((caps) => localProvider?.setThinkCaps(caps));
                 // The reply limit follows the context size - but only when the size came from the
                 // server; a size set in config.json was already applied at launch and stays.
                 // Was half the context size until 2026-10-03, when a real run showed that letting

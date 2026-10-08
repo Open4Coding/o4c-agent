@@ -1,3 +1,5 @@
+import type { ThinkLevel } from '../agent/thinkLevel.js';
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -66,6 +68,17 @@ export interface CompletionRequest {
    * `reasoning_content` vs `content`; Anthropic's SDK fires distinct `'thinking'`/`'text'` stream
    * events), so this is a direct signal, not a guess reconstructed from the complete text later. */
   onToken?: (delta: string, kind: 'think' | 'text') => void;
+  /**
+   * How much reasoning this request is allowed, from `/think` (see `agent/thinkLevel.ts`).
+   *
+   * Per-request rather than fixed on the provider, because the whole point is that `/think` takes
+   * effect on the very next turn with no restart - llama-server's own `--reasoning-effort` and
+   * `--reasoning-budget` are launch flags and could never back a live setting. Each provider
+   * translates it with `thinkLevel.ts`'s helpers and omits whatever its model cannot honour (an
+   * unsupported effort string is not harmless: the chat template raises and the request 500s). A
+   * provider with no reasoning control ignores this field.
+   */
+  thinkLevel?: ThinkLevel;
 }
 
 export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens';
@@ -74,6 +87,19 @@ export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens';
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Decode throughput in tokens/second - generation only, with prefill excluded, which is the
+   * number worth watching while a turn runs (prefill is a one-off and its rate says nothing about
+   * how fast the answer is arriving).
+   *
+   * llama.cpp reports it directly as `timings.predicted_per_second`, in both the non-streaming
+   * response and the final streaming chunk (measured 45.97-50.39 on PHOEBE's dual-3090 Qwen3), so
+   * for the local provider this is the server's own figure rather than a client-side guess.
+   * Anthropic reports no equivalent, so there it is computed from output tokens over generation
+   * time. Optional: absent until a response has actually completed, and absent from any provider
+   * that reports neither.
+   */
+  tokensPerSecond?: number;
 }
 
 export interface CompletionResponse {

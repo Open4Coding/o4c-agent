@@ -1,5 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
+import {
+  DEFAULT_THINK_CAPS,
+  localThinkParams,
+  parseSupportedEfforts,
+  type LocalThinkParams,
+  type ThinkCaps,
+} from '../agent/thinkLevel.js';
 import type {
   CompletionRequest,
   CompletionResponse,
@@ -166,6 +173,72 @@ function isUnreachable(err: unknown): boolean {
   return err instanceof TypeError || ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET'].includes(code);
 }
 
+/**
+ * Discovers what reasoning controls this model's chat template actually honours, so `/think` can
+ * send only parameters that will work. Two steps, both cheap, both before any generation:
+ *
+ * 1. `/props` reports `chat_template_caps.supports_reasoning_effort` and carries the whole
+ *    `chat_template`. The first is the gate; the second tells us whether `enable_thinking` exists
+ *    (the only way to express `nothink`).
+ * 2. A single request with a deliberately invalid `reasoning_effort` and `max_tokens: 1`. The
+ *    template raises while rendering - **measured at 0.01s, no decode, no slot time** - and names
+ *    the accepted set in the error, which `parseSupportedEfforts()` reads. Asking the model beats
+ *    maintaining a per-model registry that would go stale.
+ *
+ * Never throws: a server that cannot be probed (down, not llama.cpp, no `/props`) falls back to
+ * `DEFAULT_THINK_CAPS`, so `/think` keeps working with Qwen3's shape rather than silently losing
+ * every level. That is the right default here and the wrong one in general - the caller caches the
+ * result per model id, so a genuinely different model gets probed once and remembered.
+ *
+ * `supportsBudget` is assumed rather than probed: `reasoning_budget_tokens` is a llama-server
+ * feature, not a template one, so there is nothing in `/props` to read and the only honest test
+ * would be two full generations compared for length. The failure mode is mild - on a server without
+ * it the field is ignored and the levels degrade to effort steering - against a probe that would
+ * cost two slow requests at every launch.
+ */
+export async function probeThinkCaps(baseUrl: string, apiKey?: string): Promise<ThinkCaps> {
+  try {
+    const propsResponse = await fetch(`${baseUrl}/props`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!propsResponse.ok) return DEFAULT_THINK_CAPS;
+    const props = (await propsResponse.json()) as {
+      chat_template?: string;
+      chat_template_caps?: { supports_reasoning_effort?: boolean };
+    };
+
+    const template = props.chat_template ?? '';
+    const supportsEnableThinking = template.includes('enable_thinking');
+    if (!props.chat_template_caps?.supports_reasoning_effort) {
+      return { efforts: [], supportsEnableThinking, supportsBudget: true };
+    }
+
+    const probe = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'x' }],
+        max_tokens: 1,
+        // Deliberately not a real level, and namespaced so it is obvious in a server log what this
+        // request was for if anyone ever goes looking.
+        reasoning_effort: '__o4c_capability_probe__',
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    // The useful outcome is the REJECTION: a server that accepts this sentinel is not validating
+    // efforts at all, so nothing can be learned and the defaults stand.
+    if (probe.ok) return DEFAULT_THINK_CAPS;
+    const efforts = parseSupportedEfforts(await probe.text());
+    return { efforts, supportsEnableThinking, supportsBudget: true };
+  } catch {
+    return DEFAULT_THINK_CAPS;
+  }
+}
+
 export async function fetchLocalModelId(baseUrl: string, apiKey?: string): Promise<string | undefined> {
   try {
     const response = await fetch(`${baseUrl}/v1/models`, {
@@ -230,6 +303,10 @@ export class LocalProvider implements LLMProvider {
   // against the server: a 1000 budget cut reasoning from ~12K to ~4K chars). Off unless set in
   // config.json, since other OpenAI-compatible servers do not implement this field.
   private reasoningBudgetTokens: number | undefined;
+  /** What this model's chat template actually accepts, from the startup probe - see
+   * `probeThinkCaps()`. Defaults to Qwen3's shape so a server that cannot be probed still gets
+   * working `/think` levels rather than none. */
+  private thinkCaps: ThinkCaps;
 
   constructor(
     options: {
@@ -239,9 +316,11 @@ export class LocalProvider implements LLMProvider {
       apiKey?: string;
       maxTokens?: number;
       reasoningBudgetTokens?: number;
+      thinkCaps?: ThinkCaps;
     } = {},
   ) {
     this.reasoningBudgetTokens = options.reasoningBudgetTokens;
+    this.thinkCaps = options.thinkCaps ?? DEFAULT_THINK_CAPS;
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -253,6 +332,26 @@ export class LocalProvider implements LLMProvider {
    * was down at launch and its size was unknown until it came back. */
   setMaxTokens(maxTokens: number): void {
     this.maxTokens = maxTokens;
+  }
+
+  /** Same reason as `setMaxTokens`: the capability probe can only run once the server is actually
+   * up, which may be after construction (server down at launch, `/think` asked to re-check). */
+  setThinkCaps(caps: ThinkCaps): void {
+    this.thinkCaps = caps;
+  }
+
+  /**
+   * The reasoning fields for this request. `/think`'s level, when the turn carries one, is
+   * translated by `localThinkParams()` - which knows the measured budget ladder, pairs it with the
+   * template's own effort string, caps it at the output ceiling, and never emits the broken zero
+   * budget. Without a level this falls back to `config.json`'s static `reasoningBudgetTokens`,
+   * exactly as before this command existed, so an un-configured run is unchanged.
+   */
+  private thinkParams(request: CompletionRequest): LocalThinkParams {
+    if (request.thinkLevel) {
+      return localThinkParams(request.thinkLevel, this.thinkCaps, request.maxTokens ?? this.maxTokens);
+    }
+    return this.reasoningBudgetTokens ? { reasoning_budget_tokens: this.reasoningBudgetTokens } : {};
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
@@ -307,7 +406,10 @@ export class LocalProvider implements LLMProvider {
           // Per-request override preferred when given - see CompletionRequest.maxTokens's own
           // doc comment for the exact mid-generation truncation bug this closes.
           max_tokens: request.maxTokens ?? this.maxTokens,
-          ...(this.reasoningBudgetTokens ? { reasoning_budget_tokens: this.reasoningBudgetTokens } : {}),
+          // `/think` wins when the turn carries a level, because it is the live setting the user just
+          // chose; `config.json`'s static `reasoningBudgetTokens` remains the floor for a run that
+          // never touches the command. Both end up as the same server field - see thinkParams().
+          ...this.thinkParams(request),
           stream: true,
           // Without this, a streaming response omits usage entirely (the standard OpenAI-API
           // convention llama-server also implements - confirmed directly against its source,
@@ -442,13 +544,18 @@ interface StreamedOpenAIChunk {
     finish_reason?: string | null;
   }>;
   usage?: { prompt_tokens: number; completion_tokens: number };
+  /** llama-server's own timing block, sent on the final chunk alongside `usage` (not part of the
+   * OpenAI API - an llama.cpp extension). `predicted_per_second` is decode throughput with prefill
+   * excluded, which is what the status bar shows; `prompt_per_second` is prefill and is deliberately
+   * ignored, being a one-off that says nothing about how fast the answer is arriving. */
+  timings?: { predicted_per_second?: number };
 }
 
 interface ParsedStream {
   content: string;
   toolCalls: ToolCall[];
   finishReason: string;
-  usage: { inputTokens: number; outputTokens: number } | undefined;
+  usage: { inputTokens: number; outputTokens: number; tokensPerSecond?: number } | undefined;
 }
 
 /**
@@ -494,6 +601,13 @@ export async function parseSseStream(
 
         if (chunk.usage) {
           usage = { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens };
+        }
+        // Separate from the `usage` block above, and merged rather than assigned: the two arrive on
+        // the same final chunk in practice, but nothing in the protocol guarantees that, and losing
+        // token counts because a timings field moved would be a bad trade for a status-bar number.
+        const perSecond = chunk.timings?.predicted_per_second;
+        if (typeof perSecond === 'number' && perSecond > 0) {
+          usage = { inputTokens: 0, outputTokens: 0, ...usage, tokensPerSecond: perSecond };
         }
 
         const choice = chunk.choices?.[0];

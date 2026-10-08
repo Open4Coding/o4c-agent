@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  formatModelName,
+  formatTokensPerSecond,
   formatTokenCount,
   formatElapsed,
   formatElapsedCoarse,
@@ -82,4 +84,50 @@ test('formatElapsedCoarse shows minutes only, for the idle clock', () => {
 test('the clock ticks every second while a turn runs and once a minute at idle', () => {
   assert.equal(elapsedTickMs(true), 1000);
   assert.equal(elapsedTickMs(false), 60_000);
+});
+
+test('formatModelName reduces a server model path to the name', () => {
+  // The real value from PHOEBE's /v1/models - 50 characters of which only the last 27 identify
+  // anything, on a line that already carries five other segments.
+  assert.equal(
+    formatModelName('/media/sda/models/qwen3.8-27b-Q4_K_M-imatFP16.gguf'),
+    'qwen3.8-27b-Q4_K_M-imatFP16',
+  );
+});
+
+test('formatModelName handles both separators, whichever host it runs on', () => {
+  // The path comes from the SERVER, so a Windows client routinely sees POSIX paths - and the
+  // reverse is possible with a Windows-hosted llama-server.
+  assert.equal(formatModelName('C:\\models\\qwen3.gguf'), 'qwen3');
+  assert.equal(formatModelName('/models/qwen3.gguf'), 'qwen3');
+});
+
+test('formatModelName leaves a plain model id untouched', () => {
+  assert.equal(formatModelName('claude-opus-5'), 'claude-opus-5');
+  assert.equal(formatModelName('local'), 'local');
+});
+
+test('formatModelName strips other weight extensions too, and never returns nothing', () => {
+  assert.equal(formatModelName('/m/model.safetensors'), 'model');
+  assert.equal(formatModelName('/m/model.bin'), 'model');
+  // A path ending in a separator would otherwise blank the segment, reading as "no model".
+  assert.equal(formatModelName('/models/'), '/models/');
+  assert.equal(formatModelName(''), '');
+});
+
+test('formatTokensPerSecond rounds above 10 and keeps a decimal below', () => {
+  // 45.9657 is a real measured value; the difference between 46 and 45.97 is noise on a figure
+  // that moves every turn.
+  assert.equal(formatTokensPerSecond(45.9657), '46 tok/s');
+  assert.equal(formatTokensPerSecond(50.39), '50 tok/s');
+  assert.equal(formatTokensPerSecond(9.44), '9.4 tok/s');
+  assert.equal(formatTokensPerSecond(1.2), '1.2 tok/s');
+});
+
+test('formatTokensPerSecond shows nothing rather than a misleading zero', () => {
+  // Blank means "not measured yet"; `0 tok/s` would read as "stalled".
+  assert.equal(formatTokensPerSecond(0), '');
+  assert.equal(formatTokensPerSecond(-1), '');
+  assert.equal(formatTokensPerSecond(Number.NaN), '');
+  assert.equal(formatTokensPerSecond(Number.POSITIVE_INFINITY), '');
 });
