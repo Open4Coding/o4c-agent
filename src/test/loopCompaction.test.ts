@@ -409,7 +409,12 @@ test('maybeCompact caps its own summarization prompt so an oversized region cann
   const loop = new AgentLoop(provider, [makeFakeTool('unused_tool', 'n/a')], 'system');
   // 30 turns, each padded well past a size that would make the raw, uncapped region's serialized
   // text (~30 * ~1000+ chars) exceed MAX_REALISTIC_PROMPT_CHARS on its own.
-  const entries: ContextEntry[] = [];
+  // Starts with a SHORT user turn because the first user/input is pinned (never hidden, never
+  // released - see `AgentLoop.pinnedEntryId()`). These deliberately tiny windows make a padded
+  // ~1,000-char first turn a permanent 12-20% of the budget, which hard-stops the turn before it
+  // can reach what this test is actually about (the summarization prompt's own cap). A real task
+  // prompt is small next to the history it accumulates, so a short one is also the realistic shape.
+  const entries: ContextEntry[] = [userInputEntry('go')];
   for (let i = 0; i < 30; i++) {
     entries.push(userInputEntry(`turn ${i} ${'x'.repeat(996)}`)); // ~1000 chars each
     entries.push(aiResponseEntry(`resp ${i} ${'y'.repeat(996)}`));
@@ -582,7 +587,10 @@ test('a compaction whose generated summary genuinely shrinks a small region is s
     { content: 'answer', toolCalls: [], stopReason: 'end_turn' },
   ]);
   const loop = new AgentLoop(provider, [], 'system');
-  loop.loadEntries(buildOldTurns(3));
+  // Short leading user turn: the first user/input is pinned (`AgentLoop.pinnedEntryId()`), and at a
+  // 500-token window one of `buildOldTurns`' 400-char turns would hold 20% of the budget forever -
+  // enough to hard-stop this turn after a perfectly good compaction had already been applied.
+  loop.loadEntries([userInputEntry('go'), ...buildOldTurns(3)]);
 
   const result = await loop.run('go', {
     contextWindow: 500,

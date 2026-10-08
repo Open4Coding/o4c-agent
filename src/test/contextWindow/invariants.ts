@@ -74,6 +74,40 @@ export function entryFindings(entries: readonly ContextEntry[], visibleEstimate:
       detail: `running counter ${visibleEstimate}, full recount ${recount}`,
     });
   }
+
+  // The task definition outlives every compaction. Checked outside the loop above, because that one
+  // skips hidden entries and being hidden is precisely the failure here. Real failure 2026-10-07:
+  // twelve compactions across a single 180-subsection turn swept the prompt into `slice(0, cutPoint)`
+  // and released it, so the model lost its own instructions, burned its output budget reading o4c's
+  // own logs to reconstruct them, and the session became unrecoverable. Nothing in this suite
+  // noticed, which is why these two live here rather than only in a unit test - every scenario at
+  // every window now asserts them. See `AgentLoop.pinnedEntryId()`.
+  const firstUserInput = entries.find((e) => e.type === 'user' && e.sub_type === 'input');
+  if (firstUserInput) {
+    if (firstUserInput.agent_visible === false) {
+      out.push({
+        invariant: 'task-prompt-stays-visible',
+        detail: `first user input ${firstUserInput.id} was hidden from the model`,
+      });
+    }
+    if (RELEASED_MARKER.test(firstUserInput.content)) {
+      out.push({
+        invariant: 'task-prompt-stays-intact',
+        detail: `first user input ${firstUserInput.id} had its content released`,
+      });
+    }
+  }
+
+  // Hiding a later user turn is allowed; destroying one is not - a user message is the only content
+  // in the log that cannot be re-derived or re-run (`releaseEntryContent()`'s own
+  // `entry.type === 'user'` guard). Covers every user entry, hidden or visible.
+  for (const entry of entries) {
+    if (entry.type !== 'user') continue;
+    if (RELEASED_MARKER.test(entry.content)) {
+      out.push({ invariant: 'user-content-never-released', detail: `user entry ${entry.id} was released` });
+    }
+  }
+
   return out;
 }
 

@@ -276,6 +276,19 @@ export class AgentLoop {
    * stays `agent_visible=false`, so it stays out of the wire either way.
    */
   private releaseEntryContent(entry: ContextEntry): void {
+    // User text is never released. Releasing is irreversible - the content is overwritten in place,
+    // and the session file is written from these same entries, so afterwards no copy exists outside
+    // the run log. For AI/tool entries that is an accepted trade (a summary stands in for them, and
+    // a tool call can be re-run), but a user message is the one thing in the log that cannot be
+    // reconstructed or re-derived at any price. Real failure, 2026-10-07: the task prompt of a
+    // 180-section run was hidden AND released by the 13th compaction, leaving
+    // `[input content released from memory after compaction]` at index 0 - the model lost its own
+    // instructions, spent its output budget reading o4c's own logs trying to reverse-engineer them,
+    // and every later compaction summarized placeholders instead of history. Hiding a user turn is
+    // still allowed (see `pinnedEntryId()` for the one that cannot even be hidden); only the
+    // destruction is forbidden, so a hidden user turn can still seed a later summary and still
+    // reaches disk intact.
+    if (entry.type === 'user') return;
     if (entry.content.length <= 256) return;
     entry.content = `[${entry.sub_type} content released from memory after compaction]`;
     entry.thinking_signature = undefined;
@@ -338,6 +351,37 @@ export class AgentLoop {
     if (output.length <= maxChars) return output;
     const spillPath = await spillToolOutput(options.toolOutputDir, toolName, output);
     return truncateToolOutput(output, maxChars, spillPath).text;
+  }
+
+  /**
+   * The id of the one entry compaction may never hide: the **first** `user`/`input` entry, which is
+   * the task definition. Everything else in the log is derived from it - the model's reasoning, its
+   * tool calls, their results, and the summaries that replace them - so it is the single entry whose
+   * loss cannot be compensated for by any summary, however good.
+   *
+   * Real failure this exists to prevent (2026-10-07, first live tier-3 run): a 180-subsection task
+   * compacted twelve times over two hours. `findCutPoint()` legitimately cut past index 0 - a cut is
+   * safe before a turn boundary *or* after a completed tool round, and a single long turn has only
+   * the latter - so `maybeCompact()`'s `slice(0, cutPoint)` swept the prompt up with everything else
+   * and `releaseEntryContent()` destroyed it. The model then had no statement of its task: it began
+   * reading o4c's own `FULLCONTEXT.jsonl` files to reconstruct the subsystem matrix, its reasoning
+   * grew 3.2x (median 1,710 -> 5,456 chars), it hit the `max_tokens` ceiling fourteen times, and one
+   * truncated reply finally arrived with no tool call at all, which ends the turn. On `/resume` the
+   * next compaction summarized 252 entries that were by then mostly released placeholders, freed
+   * 2,363 tokens, and the pre-send hard stop refused the turn - an unrecoverable session.
+   *
+   * Only the first one is pinned, deliberately. Later user turns stay compactable (a long
+   * conversation's early questions genuinely are summarizable, and an unbounded pin would reintroduce
+   * the growth compaction exists to stop) - they are merely never *released* any more, which
+   * `releaseEntryContent()` enforces separately. Scans from the start rather than caching an id: the
+   * list is small, this runs once per compaction, and a cached id would have to survive `/resume`
+   * re-indexing and `/clear`.
+   */
+  private pinnedEntryId(): string | undefined {
+    for (const entry of this.entries) {
+      if (entry.type === 'user' && entry.sub_type === 'input') return entry.id;
+    }
+    return undefined;
   }
 
   /**
@@ -589,13 +633,23 @@ export class AgentLoop {
     // accumulated and there's an actual net win to make.
     const firstKeptEntryId = this.entries[cutPoint]?.id;
     const summaryEntry = aiCompactionEntry(summary, firstKeptEntryId, tokensBefore);
-    const tokensRemoved = toCompact.reduce((sum, e) => sum + (e.agent_visible !== false ? estimateTokens(e) : 0), 0);
+    // The pinned entry is excluded from the net-benefit arithmetic as well as from the hiding loop
+    // below - counting tokens this round is not going to remove would overstate the win and could
+    // wave through a compaction that actually grows the visible history, which is the exact flaw
+    // this guard exists to catch.
+    const pinnedId = this.pinnedEntryId();
+    const tokensRemoved = toCompact.reduce(
+      (sum, e) => sum + (e.agent_visible !== false && e.id !== pinnedId ? estimateTokens(e) : 0),
+      0,
+    );
     if (estimateTokens(summaryEntry) >= tokensRemoved) return;
 
     // Flip visibility via deindex/mutate/reindex so visibleTokenEstimate's bookkeeping (owned by
     // those two methods) stays correct - never touch agent_visible directly without going through
-    // them. Entries an earlier compaction already hid are skipped, not double-counted.
+    // them. Entries an earlier compaction already hid are skipped, not double-counted; the pinned
+    // task definition (`pinnedEntryId()`) is skipped permanently.
     for (const entry of toCompact) {
+      if (entry.id === pinnedId) continue;
       if (entry.agent_visible === false) continue;
       this.deindexEntry(entry);
       entry.agent_visible = false;

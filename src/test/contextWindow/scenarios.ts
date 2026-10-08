@@ -309,4 +309,45 @@ export const SCENARIOS: ScenarioSpec[] = [
       assert.ok(biggest <= 40_000, `largest entry was ${biggest} chars`);
     },
   },
+  {
+    // Reproduces the real 2026-10-07 failure in miniature: ONE user turn whose context is filled by
+    // the model's own prose and reasoning (which pruning structurally cannot free - it only takes
+    // `toolcall`/`toolcallresponse` pairs), punctuated by tool calls with near-empty results, which
+    // exist only to give `findCutPoint()` the safe cut points a single long turn would otherwise
+    // lack. That drives tier 3 round after round, and before the pin the twelfth or thirteenth pass
+    // swept the prompt itself into `slice(0, cutPoint)` and released it - the model lost its own task
+    // and the session never recovered. The `task-prompt-stays-visible` / `task-prompt-stays-intact`
+    // invariants assert this for every scenario; this one exists to guarantee the condition is
+    // actually *reached*, which no other scenario does.
+    name: 'repeated-compaction-keeps-task-prompt',
+    summarizer: 'ok',
+    build: (window) => [
+      {
+        prompt: `TASK-MATRIX-SENTINEL cover all 30 subsystems in order. ${'detail '.repeat(40)}`,
+        rounds: [
+          ...many(45, () => ({
+            thinkTokens: tokensOf(window, 0.06),
+            responseTokens: tokensOf(window, 0.05),
+            // A near-empty result: prune can take the pair but frees almost nothing, exactly as the
+            // real `echo <id> done >> progress.txt` rounds did.
+            calls: [{ argTokens: 8, resultTokens: 2 }],
+          })),
+          { responseTokens: 20 },
+        ],
+      },
+    ],
+    check: (r) => {
+      // Small windows can hard-stop on prose alone; the pin is what's under test, not the budget.
+      if (r.window >= 57344) {
+        assert.ok(r.compactions >= 2, `expected repeated compaction, got ${r.compactions}`);
+      }
+      const prompt = r.finalEntries.find((e) => e.type === 'user' && e.sub_type === 'input');
+      assert.ok(prompt, 'the task prompt entry must still exist');
+      assert.notEqual(prompt.agent_visible, false, 'the task prompt must never be hidden from the model');
+      assert.ok(
+        prompt.content.includes('TASK-MATRIX-SENTINEL'),
+        `the task prompt must stay intact, got ${JSON.stringify(prompt.content.slice(0, 80))}`,
+      );
+    },
+  },
 ];
