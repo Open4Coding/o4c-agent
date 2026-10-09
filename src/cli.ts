@@ -564,11 +564,15 @@ program
       // The project's lifetime token count, for the footer's token line. Loaded with the session
       // id being resumed (if any) so a per-turn reload picks this session's subtotal back up
       // rather than restarting it at zero every turn - see usageStore.ts on why that matters.
-      const usageStore = new UsageStore(usageFileFor(projectRoot), () => {
-        const used = loop.getUsage();
-        return used.inputTokens + used.outputTokens;
-      });
-      usageStore.load(opts.resume);
+      // Undefined without a trusted project: the count is deliberately per-project only.
+      const usageFile = usageFileFor(projectRoot);
+      const usageStore = usageFile
+        ? new UsageStore(usageFile, () => {
+            const used = loop.getUsage();
+            return { input: used.inputTokens, output: used.outputTokens };
+          })
+        : undefined;
+      usageStore?.load(opts.resume);
       let initialSession: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] } | undefined;
       if (opts.resume) {
         const data = await sessionStore.load(opts.resume);

@@ -312,16 +312,27 @@ function StatusBar({
 }
 
 /**
- * The footer's second line: what this has cost in tokens - `tks: <project>/<session>/<rate> tks/s`.
+ * The footer's second line: what this project has cost in tokens.
  *
- * Three figures that answer three different questions, deliberately together under one unit:
- * everything this project has ever spent, everything this session has spent, and how fast tokens
- * are arriving right now. The first two come from `UsageStore` (on disk, because a process here
- * lasts about one turn - see that file); the rate is the server's own `predicted_per_second`.
+ *     t-tks: 18.6M↑/1.3M↓ | s-tks: 1.6M↑/0.3M↓/46 tks/s
  *
- * Ticks on the same cadence as `StatusBar` and reads its values fresh on every render for the same
- * reason: `AgentLoop` mutates its usage counters outside React's state flow, so lifting them into
- * state would show stale numbers.
+ * `t-` is this project's lifetime total, `s-` this session. Prompt and completion are shown
+ * apart because they are not comparable quantities: a measured 8h run sent 18.6M prompt tokens
+ * and generated 1.3M, so one sum would be 94% prefill and would bury the figure that actually
+ * tracks output.
+ *
+ * The arrows are from the client's seat, not the model's - the way any transfer meter reads. The
+ * prompt goes UP to the server and the completion comes back DOWN, so the large figure carries
+ * the up arrow and the small one the down arrow.
+ *
+ * The totals come from `UsageStore` (on disk, because a process here lasts about one turn - see
+ * that file); the rate is the server's own `predicted_per_second`. Without a trusted project
+ * there is no lifetime total, so the `t-` half is dropped rather than shown as a figure pooled
+ * across unrelated directories.
+ *
+ * Ticks on the same cadence as `StatusBar` and reads its values fresh on every render for the
+ * same reason: `AgentLoop` mutates its usage counters outside React's state flow, so lifting
+ * them into state would show stale numbers.
  */
 function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; busy: boolean }) {
   const [, tick] = useState(0);
@@ -330,23 +341,38 @@ function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; 
     return () => clearInterval(id);
   }, [busy]);
 
-  // Without a store (no project and no writable global dir) the only honest figures are this
-  // process's own, which is what the loop reports anyway.
+  // Without a store there is no project, so only the session half is real - and this process's
+  // own spend is all of it, since nothing was ever carried in from disk.
   const spent = loop.getUsage();
-  const thisProcess = spent.inputTokens + spent.outputTokens;
-  const totals = usage?.totals() ?? { projectTokens: thisProcess, sessionTokens: thisProcess };
-  // `n/s` - no rate, rather than a number - until a response has actually reported one. Never `0`,
-  // which reads as "stalled", and never a unit with nothing in front of it. It replaces the whole
-  // value-and-unit group, so the line stays `tks: 0/0/n/s` instead of growing an empty slot.
+  const totals = usage?.totals();
+  const session = totals?.session ?? { input: spent.inputTokens, output: spent.outputTokens };
+  // `n/s` - no rate, rather than a number - until a response has actually reported one. Never
+  // `0`, which reads as stalled, and never a unit with nothing in front of it.
   const rate = loop.getTokensPerSecond();
   const rateText = rate === undefined ? '' : formatTokenRate(rate);
 
+  const pair = (spend: { input: number; output: number }) => (
+    <Text>
+      <Text color={theme.accent}>{formatCumulativeTokens(spend.input)}</Text>
+      <Text color={theme.border}>↑/</Text>
+      <Text color={theme.accent}>{formatCumulativeTokens(spend.output)}</Text>
+      <Text color={theme.border}>↓</Text>
+    </Text>
+  );
+
   return (
     <Text>
-      <Text color={theme.border}> tks: </Text>
-      <Text color={theme.accent}>{formatCumulativeTokens(totals.projectTokens)}</Text>
-      <Text color={theme.border}>/</Text>
-      <Text color={theme.accent}>{formatCumulativeTokens(totals.sessionTokens)}</Text>
+      {/* One leading space, aligning this line with the dir line below it. */}
+      <Text color={theme.border}> </Text>
+      {totals && (
+        <Text>
+          <Text color={theme.border}>t-tks: </Text>
+          {pair(totals.project)}
+          <Text color={theme.border}> | </Text>
+        </Text>
+      )}
+      <Text color={theme.border}>s-tks: </Text>
+      {pair(session)}
       <Text color={theme.border}>/</Text>
       {rateText ? (
         <Text>

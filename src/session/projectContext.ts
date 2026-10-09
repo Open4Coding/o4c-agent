@@ -32,14 +32,17 @@ export function toolOutputDirFor(projectRoot: string | undefined): string {
 
 /**
  * Where this project's lifetime token count lives (`usageStore.ts`). One small JSON file rather
- * than a directory: it holds a single running total plus the most recent sessions' subtotals.
+ * than a directory: it holds the project's running prompt/completion totals plus the most recent
+ * sessions' subtotals.
  *
- * Project-first with a global fallback, the same shape as `logsDirFor`, so an untrusted run still
- * counts its tokens somewhere instead of discarding them - but the figure only means "this
- * project" when there actually is one.
+ * Project-only, no global fallback - the same shape as `plansDirFor`, and for the same reason.
+ * "What has this project cost" is the question being asked; a figure pooled across every
+ * unrelated directory o4c was ever launched in would answer nothing. Undefined in an
+ * untrusted/no-project run means the footer shows the session's own figures and no project total,
+ * which is the honest answer rather than a misleading one.
  */
-export function usageFileFor(projectRoot: string | undefined): string {
-  return projectRoot ? join(projectRoot, '.o4c', 'usage.json') : join(defaultGlobalDir(), 'usage.json');
+export function usageFileFor(projectRoot: string | undefined): string | undefined {
+  return projectRoot ? join(projectRoot, '.o4c', 'usage.json') : undefined;
 }
 
 /**

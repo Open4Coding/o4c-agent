@@ -2,45 +2,69 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /**
- * The project's lifetime token count, and the current session's share of it, for the footer's
- * token line.
+ * This project's lifetime token count, and the current session's share of it, for the footer's
+ * token line. Prompt and completion are kept apart, because they are not comparable quantities:
+ * a measured 8h run sent 18.6M prompt tokens and generated 1.3M, so a single sum is 94% prefill
+ * and says almost nothing about how much the model actually produced.
  *
- * Two numbers that cannot come from `AgentLoop` alone. `loop.getUsage()` counts what THIS PROCESS
- * has spent, and a process here is short-lived: o4c reloads itself into a fresh process after most
+ * Numbers that cannot come from `AgentLoop` alone. `loop.getUsage()` counts what THIS PROCESS has
+ * spent, and a process here is short-lived: o4c reloads itself into a fresh process after most
  * turns (`reloadAfterTurn`, see App.tsx) so the screen can be repainted from saved history. A naive
  * "session total" would therefore reset to zero every turn or two, and a project total would never
  * exist at all. So both are carried on disk, and this process's own spend is added on top.
+ *
+ * Project-scoped and nothing else: no global fallback, same reasoning as `plansDirFor`. A count
+ * pooled across unrelated directories would answer no question anyone asks.
  *
  * Writes are synchronous, by necessity rather than preference: the save has to happen on the way
  * out, and `process.on('exit')` is the only hook that catches every exit path this app has - it
  * allows no asynchronous work, so an `await`ed write would simply never land.
  */
 
-/** Bumped only if the on-disk shape changes incompatibly. An unrecognised (newer) version makes
- * this store read-only rather than overwriting a format it does not understand. */
-export const USAGE_FILE_VERSION = 1;
+/**
+ * On-disk shape version. A newer (unrecognised) version makes this store read-only rather than
+ * overwriting a format it does not understand.
+ *
+ * v2 split the single `projectTokens` sum into prompt and completion. A v1 file is migrated by
+ * attributing its sum to `input` - stated plainly because it is an approximation, not a recovered
+ * split: v1 never recorded the two separately, and prompt tokens were 93.6% of the total in the
+ * one long run that was measured. The alternative was silently zeroing someone's lifetime count.
+ */
+export const USAGE_FILE_VERSION = 2;
 
 /** How many sessions' subtotals to keep. Bounded so the file cannot grow without limit, but more
  * than one: concurrent o4c sessions in the same project are a supported case, and a single
  * `session` field would make them clobber each other's running total. */
 export const MAX_TRACKED_SESSIONS = 32;
 
+/** Prompt tokens sent and completion tokens generated, always carried as a pair. */
+export interface TokenSpend {
+  /** Prompt tokens sent to the provider. Rendered with an up arrow: it goes up to the server. */
+  input: number;
+  /** Completion tokens generated. Rendered with a down arrow: it comes back down. */
+  output: number;
+}
+
 export interface UsageTotals {
-  /** Every token this project has ever spent, across all sessions and processes. */
-  projectTokens: number;
-  /** Tokens for the session on screen, which survives the per-turn reload and `/resume`. */
-  sessionTokens: number;
+  /** Everything this project has ever spent, across all sessions and processes. */
+  project: TokenSpend;
+  /** The session on screen, which survives the per-turn reload and `/resume`. */
+  session: TokenSpend;
 }
 
 interface StoredUsage {
   version: number;
-  projectTokens: number;
-  /** Session id -> that session's running total. Insertion-ordered, oldest first. */
-  sessions: Record<string, number>;
+  project: TokenSpend;
+  /** Session id -> that session's running spend. Insertion-ordered, oldest first. */
+  sessions: Record<string, TokenSpend>;
+}
+
+function zero(): TokenSpend {
+  return { input: 0, output: 0 };
 }
 
 function emptyUsage(): StoredUsage {
-  return { version: USAGE_FILE_VERSION, projectTokens: 0, sessions: {} };
+  return { version: USAGE_FILE_VERSION, project: zero(), sessions: {} };
 }
 
 /** A non-negative finite number, or 0. Guards against a hand-edited or half-written file putting
@@ -49,21 +73,30 @@ function sane(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+/** Accepts both shapes: a v2 `{input, output}` pair, or a v1 bare number (migrated to input). */
+function saneSpend(value: unknown): TokenSpend {
+  if (typeof value === 'number') return { input: sane(value), output: 0 };
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    return { input: sane(obj.input), output: sane(obj.output) };
+  }
+  return zero();
+}
+
 function parseUsage(text: string): StoredUsage {
   const raw: unknown = JSON.parse(text);
   if (!raw || typeof raw !== 'object') return emptyUsage();
   const obj = raw as Record<string, unknown>;
-  const sessions: Record<string, number> = {};
+  const sessions: Record<string, TokenSpend> = {};
   if (obj.sessions && typeof obj.sessions === 'object') {
-    for (const [id, tokens] of Object.entries(obj.sessions as Record<string, unknown>)) {
-      sessions[id] = sane(tokens);
+    for (const [id, spend] of Object.entries(obj.sessions as Record<string, unknown>)) {
+      sessions[id] = saneSpend(spend);
     }
   }
-  return {
-    version: sane(obj.version) || USAGE_FILE_VERSION,
-    projectTokens: sane(obj.projectTokens),
-    sessions,
-  };
+  // `projectTokens` is v1's name for the sum; `project` is v2's pair. Reading both means a v1 file
+  // keeps its lifetime figure instead of starting over.
+  const project = obj.project !== undefined ? saneSpend(obj.project) : saneSpend(obj.projectTokens);
+  return { version: sane(obj.version) || USAGE_FILE_VERSION, project, sessions };
 }
 
 /**
@@ -75,8 +108,8 @@ function parseUsage(text: string): StoredUsage {
  */
 export class UsageStore {
   /** What was on disk at startup - the display baseline this process adds its own spend to. */
-  private projectBaseline = 0;
-  private sessionBaseline = 0;
+  private projectBaseline = zero();
+  private sessionBaseline = zero();
   private sessionId: string | undefined;
   /** Set when the file is a version we do not understand: read nothing, write nothing. */
   private frozen = false;
@@ -85,12 +118,12 @@ export class UsageStore {
   private flushed = false;
 
   /**
-   * @param file         where to store the totals (`usageFileFor(projectRoot)`)
+   * @param file             where to store the totals (`usageFileFor(projectRoot)`)
    * @param spentThisProcess reads the provider-reported tokens this process has used so far
    */
   constructor(
     private readonly file: string,
-    private readonly spentThisProcess: () => number,
+    private readonly spentThisProcess: () => TokenSpend,
   ) {}
 
   /** Reads the file. `sessionId` is the session being resumed, if any - on a per-turn reload or an
@@ -108,13 +141,11 @@ export class UsageStore {
       this.frozen = true;
       return;
     }
-    this.projectBaseline = stored.projectTokens;
-    this.sessionBaseline = sessionId ? (stored.sessions[sessionId] ?? 0) : 0;
+    this.projectBaseline = stored.project;
+    this.sessionBaseline = (sessionId ? stored.sessions[sessionId] : undefined) ?? zero();
   }
 
-  /** Called when the session acquires an id mid-run (a new session gets one at its first save).
-   * Only adopts the stored subtotal for an id we did not already have, so a reload's restored
-   * baseline is never re-applied. */
+  /** Called when the session acquires an id mid-run (a new session gets one at its first save). */
   setSessionId(id: string | undefined): void {
     if (!id || id === this.sessionId) return;
     this.sessionId = id;
@@ -122,10 +153,18 @@ export class UsageStore {
 
   /** What the footer should show right now. Cheap and allocation-light - it is read on render. */
   totals(): UsageTotals {
-    const spent = Math.max(0, this.spentThisProcess());
+    const spent = this.spentThisProcess();
+    const input = Math.max(0, spent.input);
+    const output = Math.max(0, spent.output);
     return {
-      projectTokens: this.projectBaseline + spent,
-      sessionTokens: this.sessionBaseline + spent,
+      project: {
+        input: this.projectBaseline.input + input,
+        output: this.projectBaseline.output + output,
+      },
+      session: {
+        input: this.sessionBaseline.input + input,
+        output: this.sessionBaseline.output + output,
+      },
     };
   }
 
@@ -140,8 +179,10 @@ export class UsageStore {
   flush(): void {
     if (this.flushed || this.frozen) return;
     this.flushed = true;
-    const spent = Math.max(0, this.spentThisProcess());
-    if (spent === 0) return; // Nothing was spent - no reason to touch the file at all.
+    const spent = this.spentThisProcess();
+    const input = Math.max(0, spent.input);
+    const output = Math.max(0, spent.output);
+    if (input === 0 && output === 0) return; // Nothing spent - no reason to touch the file at all.
     try {
       let current: StoredUsage;
       try {
@@ -150,9 +191,13 @@ export class UsageStore {
         current = emptyUsage();
       }
       if (current.version > USAGE_FILE_VERSION) return; // Appeared since load - leave it alone.
-      current.projectTokens += spent;
+      current.project = {
+        input: current.project.input + input,
+        output: current.project.output + output,
+      };
       if (this.sessionId) {
-        const total = (current.sessions[this.sessionId] ?? this.sessionBaseline) + spent;
+        const base = current.sessions[this.sessionId] ?? this.sessionBaseline;
+        const total = { input: base.input + input, output: base.output + output };
         // Delete before setting so the touched session moves to the end, making the key order a
         // real recency order for the trim below.
         delete current.sessions[this.sessionId];
