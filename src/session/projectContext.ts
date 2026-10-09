@@ -31,6 +31,18 @@ export function toolOutputDirFor(projectRoot: string | undefined): string {
 }
 
 /**
+ * Where this project's lifetime token count lives (`usageStore.ts`). One small JSON file rather
+ * than a directory: it holds a single running total plus the most recent sessions' subtotals.
+ *
+ * Project-first with a global fallback, the same shape as `logsDirFor`, so an untrusted run still
+ * counts its tokens somewhere instead of discarding them - but the figure only means "this
+ * project" when there actually is one.
+ */
+export function usageFileFor(projectRoot: string | undefined): string {
+  return projectRoot ? join(projectRoot, '.o4c', 'usage.json') : join(defaultGlobalDir(), 'usage.json');
+}
+
+/**
  * Where Plan-Write mode (`modePolicy.ts`) is allowed to write plan documents - project-only, no
  * global fallback, since a plan document is inherently tied to the project it plans. Undefined in
  * an untrusted/no-project run means Plan-Write has nowhere it's allowed to write, so it behaves

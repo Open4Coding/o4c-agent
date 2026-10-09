@@ -17,7 +17,8 @@ import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
-import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor } from './session/projectContext.js';
+import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor, usageFileFor } from './session/projectContext.js';
+import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
 
@@ -156,6 +157,7 @@ async function runRepl(
   opts: RestartableOpts,
   contextWindow: number | undefined,
   thinkCaps: ThinkCaps | undefined,
+  usageStore: UsageStore | undefined,
   highlightColor: string,
   maxIterations: number | undefined,
   initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] },
@@ -191,6 +193,23 @@ async function runRepl(
   // rather than each calling detectCurrentOs() on its own.
   const startupOs = detectCurrentOs();
   installResizeReflowFix(process.stdout);
+  // Save the token counts on the way out, whichever way out it is. `process.on('exit')` is the
+  // one hook that catches every path this app has - /exit, the per-turn reload, a restart
+  // handoff, the uncaughtException handler's process.exit(1), and a Ctrl+C that ever becomes a
+  // hard exit again (today App.tsx's Ctrl+C is a reset, not an exit - see the hint line). It
+  // permits no asynchronous work, which is exactly why UsageStore writes synchronously, and
+  // `flush()` is idempotent so this backstop cannot double-count the explicit call below.
+  if (usageStore) {
+    process.on('exit', () => usageStore.flush());
+    // A kill from outside the app (or any terminal that delivers the signal rather than the raw
+    // byte) would otherwise skip 'exit' entirely.
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+      process.on(signal, () => {
+        usageStore.flush();
+        process.exit(0);
+      });
+    }
+  }
   let pendingRestart: { resumeId: string | undefined; mode: Mode | undefined } | undefined;
   const restart = (resumeId?: string, mode?: Mode) => {
     pendingRestart = { resumeId, mode };
@@ -219,6 +238,7 @@ async function runRepl(
       baseUrl: opts.baseUrl,
       contextWindow,
       thinkCaps,
+      usageStore,
       maxIterations,
       initialHighlightColor: highlightColor,
     }),
@@ -245,6 +265,9 @@ async function runRepl(
     },
   );
   await waitUntilExit();
+  // Explicitly, before the restart paths below call process.exit(): the 'exit' backstop would
+  // still catch it, but this keeps the ordinary way out off the emergency path.
+  usageStore?.flush();
   if (pendingRestart) {
     const handoffFile = process.env.O4C_HANDOFF_FILE;
     if (handoffFile) {
@@ -538,6 +561,14 @@ program
 
     if (!prompt) {
       const sessionStore = new SessionStore(sessionsDirFor(projectRoot), sessionsToSave);
+      // The project's lifetime token count, for the footer's token line. Loaded with the session
+      // id being resumed (if any) so a per-turn reload picks this session's subtotal back up
+      // rather than restarting it at zero every turn - see usageStore.ts on why that matters.
+      const usageStore = new UsageStore(usageFileFor(projectRoot), () => {
+        const used = loop.getUsage();
+        return used.inputTokens + used.outputTokens;
+      });
+      usageStore.load(opts.resume);
       let initialSession: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] } | undefined;
       if (opts.resume) {
         const data = await sessionStore.load(opts.resume);
@@ -562,6 +593,7 @@ program
         opts,
         contextWindow,
         thinkCaps,
+        usageStore,
         highlightColor,
         maxIterations,
         initialSession,

@@ -53,7 +53,8 @@ import {
   formatElapsed,
   formatElapsedCoarse,
   formatModelName,
-  formatTokensPerSecond,
+  formatTokenRate,
+  formatCumulativeTokens,
   elapsedTickMs,
   renderProgressBar,
   progressBarFilledCells,
@@ -62,6 +63,7 @@ import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js'
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import { ConfigStore, type ConfigScope } from '../session/configStore.js';
+import type { UsageStore } from '../session/usageStore.js';
 import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } from './highlightColor.js';
 import { buildSplashText } from './splash.js';
 import type { Tool } from '../tools/types.js';
@@ -132,6 +134,9 @@ export interface AppProps {
    * (`probeThinkCaps`), cached per model id. Undefined for a provider needing no probe, or a
    * server that could not be reached - `thinkLevel.ts` falls back to sane defaults. */
   thinkCaps?: ThinkCaps;
+  /** The project's lifetime token count, for the footer's token line. Undefined only in
+   * tests and headless runs, where the bar falls back to this process's own figures. */
+  usageStore?: UsageStore;
   /** The model id this session is running (`-m`/config.json's `model`, as passed to the
    * provider) - display only, shown in the status bar. */
   model: string;
@@ -275,12 +280,8 @@ function StatusBar({
   const tokens = loop.getVisibleTokenEstimate() + liveTokens;
   const fraction = contextWindow ? tokens / contextWindow : undefined;
   const elapsed = busy ? formatElapsed(Date.now() - startRef.current) : formatElapsedCoarse(Date.now() - startRef.current);
-  // Blank until a response has actually reported a rate - showing `0 tok/s` before the first turn
-  // would read as "stalled" rather than "nothing measured yet". `formatTokensPerSecond` returns an
-  // empty string for anything unusable, so the segment is dropped rather than rendered empty.
-  const rate = loop.getTokensPerSecond();
-  const rateText = rate === undefined ? '' : formatTokensPerSecond(rate);
-
+  // Throughput used to sit here; it moved to the token line below, where it belongs with the other
+  // two token figures rather than being the same number printed twice in two formats.
   return (
     <Text>
       <Text color={modeInfo(mode).color}>
@@ -304,12 +305,6 @@ function StatusBar({
           <Text color={theme.accent}>{Math.round(fraction * 100)}%</Text>
         </Text>
       )}
-      {rateText && (
-        <Text>
-          <Text color={theme.border}> | </Text>
-          <Text color={theme.accent}>{rateText}</Text>
-        </Text>
-      )}
       <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>{elapsed}</Text>
     </Text>
@@ -317,7 +312,49 @@ function StatusBar({
 }
 
 /**
- * The footer's second line: which branch, and which volume/project/path you are in. Separate from
+ * The footer's second line: what this has cost in tokens - `tks: <project>/<session>/<rate> tks/s`.
+ *
+ * Three figures that answer three different questions, deliberately together under one unit:
+ * everything this project has ever spent, everything this session has spent, and how fast tokens
+ * are arriving right now. The first two come from `UsageStore` (on disk, because a process here
+ * lasts about one turn - see that file); the rate is the server's own `predicted_per_second`.
+ *
+ * Ticks on the same cadence as `StatusBar` and reads its values fresh on every render for the same
+ * reason: `AgentLoop` mutates its usage counters outside React's state flow, so lifting them into
+ * state would show stale numbers.
+ */
+function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; busy: boolean }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick((t) => t + 1), elapsedTickMs(busy));
+    return () => clearInterval(id);
+  }, [busy]);
+
+  // Without a store (no project and no writable global dir) the only honest figures are this
+  // process's own, which is what the loop reports anyway.
+  const spent = loop.getUsage();
+  const thisProcess = spent.inputTokens + spent.outputTokens;
+  const totals = usage?.totals() ?? { projectTokens: thisProcess, sessionTokens: thisProcess };
+  // A dash, not `0`, before any response has reported a rate: `0 tks/s` reads as "stalled" where
+  // `-` reads as "not measured yet", and those are very different things to see mid-turn.
+  const rate = loop.getTokensPerSecond();
+  const rateText = (rate === undefined ? '' : formatTokenRate(rate)) || '-';
+
+  return (
+    <Text>
+      <Text color={theme.border}> tks: </Text>
+      <Text color={theme.accent}>{formatCumulativeTokens(totals.projectTokens)}</Text>
+      <Text color={theme.border}>/</Text>
+      <Text color={theme.accent}>{formatCumulativeTokens(totals.sessionTokens)}</Text>
+      <Text color={theme.border}>/</Text>
+      <Text color={theme.accent}>{rateText}</Text>
+      <Text color={theme.border}> tks/s</Text>
+    </Text>
+  );
+}
+
+/**
+ * The footer's third line: which branch, and which volume/project/path you are in. Separate from
  * `StatusBar` because it changes on a completely different cadence - the status line re-renders on
  * a timer, where this only moves when you switch branch or project, so it takes its values as
  * already-resolved strings and does no I/O of its own (see `session/gitInfo.ts` on why reading
@@ -386,6 +423,7 @@ export function App({
   sessionView,
   projectRoot,
   thinkCaps: probedThinkCaps,
+  usageStore,
   model: modelProp,
   provider,
   baseUrl,
@@ -1451,6 +1489,10 @@ export function App({
                 inputHistoryRef.current,
               );
               turnSaved = true;
+              // A brand new session only gets its id here, at its first save. The store needs
+              // it before the reload below exits, or this session's subtotal would be filed
+              // under no id at all and restart from zero on the next process.
+              usageStore?.setSessionId(currentSessionIdRef.current);
             } catch (saveErr) {
               if (!stale) pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
             }
@@ -1912,6 +1954,7 @@ export function App({
           under the input box - previously two separate lines (StatusBar above the input box,
           "Mode: X" below it). */}
       <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} thinkLevel={shownThinkLevel} />
+      <UsageBar loop={loop} usage={usageStore} busy={isProcessing} />
       <ProjectBar branch={gitBranch} project={projectLabelText} />
       <Text color={theme.border}>Esc stop (asks while thinking) · type to queue · Ctrl+C reset</Text>
       {confirmDialog ? (

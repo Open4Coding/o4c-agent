@@ -16,12 +16,14 @@ export function formatModelName(model: string): string {
   return trimmed || model;
 }
 
-/** `45.9657` -> `"46 tok/s"`. Whole numbers above 10 (the difference between 46 and 45.97 is noise
- * on a figure that moves every turn), one decimal below, so a slow local model still shows a
- * meaningful rate instead of a flat `0`. */
-export function formatTokensPerSecond(n: number): string {
+/** `45.9657` -> `"46"`. Whole numbers above 10 (the difference between 46 and 45.97 is noise on a
+ * figure that moves every turn), one decimal below, so a slow local model still shows a meaningful
+ * rate instead of a flat `0`. The bare number: the `tks/s` label is part of the footer's token
+ * line, which carries three values under one unit. Empty for anything unusable, so the caller can
+ * show a placeholder rather than a fabricated `0`. */
+export function formatTokenRate(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '';
-  return `${n < 10 ? n.toFixed(1) : Math.round(n)} tok/s`;
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)}`;
 }
 
 /** `12345` -> `"12.3K"`, matching the compact style the status bar needs - under 1000 shown
@@ -30,6 +32,34 @@ export function formatTokenCount(n: number): string {
   if (n < 1000) return String(Math.round(n));
   const k = n / 1000;
   return `${k < 10 ? k.toFixed(1) : Math.round(k)}K`;
+}
+
+/** Each step up, largest first - a lifetime total outgrows `formatTokenCount`'s K-only scale
+ * quickly (a single long local run is already tens of millions), and `50000K` is unreadable. */
+const CUMULATIVE_UNITS = [
+  { at: 1e12, suffix: 'T' },
+  { at: 1e9, suffix: 'B' },
+  { at: 1e6, suffix: 'M' },
+  { at: 1e3, suffix: 'K' },
+] as const;
+
+/**
+ * `12_345_678` -> `"12.3M"`. Same compact shape as `formatTokenCount` (one decimal under 10, none
+ * above, never past 5 characters) but carried up through M/B/T, for the project and session
+ * lifetime totals on the footer's token line.
+ *
+ * Returns `"0"` rather than an empty string for nothing-yet: a project that has spent no tokens is
+ * a real, correct answer worth showing, unlike a throughput rate that has not been measured.
+ */
+export function formatCumulativeTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  for (const { at, suffix } of CUMULATIVE_UNITS) {
+    if (n >= at) {
+      const scaled = n / at;
+      return `${scaled < 10 ? scaled.toFixed(1) : Math.round(scaled)}${suffix}`;
+    }
+  }
+  return String(Math.round(n));
 }
 
 /** `ms` since session start -> `"29s"` / `"9m 12s"` / `"1h 9m"` - drops the smallest unit once

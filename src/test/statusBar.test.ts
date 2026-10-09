@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatModelName,
-  formatTokensPerSecond,
+  formatTokenRate,
+  formatCumulativeTokens,
   formatTokenCount,
   formatElapsed,
   formatElapsedCoarse,
@@ -115,19 +116,46 @@ test('formatModelName strips other weight extensions too, and never returns noth
   assert.equal(formatModelName(''), '');
 });
 
-test('formatTokensPerSecond rounds above 10 and keeps a decimal below', () => {
+test('formatTokenRate rounds above 10 and keeps a decimal below', () => {
   // 45.9657 is a real measured value; the difference between 46 and 45.97 is noise on a figure
-  // that moves every turn.
-  assert.equal(formatTokensPerSecond(45.9657), '46 tok/s');
-  assert.equal(formatTokensPerSecond(50.39), '50 tok/s');
-  assert.equal(formatTokensPerSecond(9.44), '9.4 tok/s');
-  assert.equal(formatTokensPerSecond(1.2), '1.2 tok/s');
+  // that moves every turn. Bare numbers - the `tks/s` label belongs to the whole token line.
+  assert.equal(formatTokenRate(45.9657), '46');
+  assert.equal(formatTokenRate(50.39), '50');
+  assert.equal(formatTokenRate(9.44), '9.4');
+  assert.equal(formatTokenRate(1.2), '1.2');
 });
 
-test('formatTokensPerSecond shows nothing rather than a misleading zero', () => {
-  // Blank means "not measured yet"; `0 tok/s` would read as "stalled".
-  assert.equal(formatTokensPerSecond(0), '');
-  assert.equal(formatTokensPerSecond(-1), '');
-  assert.equal(formatTokensPerSecond(Number.NaN), '');
-  assert.equal(formatTokensPerSecond(Number.POSITIVE_INFINITY), '');
+test('formatTokenRate shows nothing rather than a misleading zero', () => {
+  // Empty means "not measured yet", which the footer renders as `-`; `0` would read as stalled.
+  assert.equal(formatTokenRate(0), '');
+  assert.equal(formatTokenRate(-1), '');
+  assert.equal(formatTokenRate(Number.NaN), '');
+  assert.equal(formatTokenRate(Number.POSITIVE_INFINITY), '');
+});
+
+test('formatCumulativeTokens carries a lifetime total up past K', () => {
+  // The reason this is not formatTokenCount: a project total reaches millions in a handful of
+  // long local runs, and `50000K` is not a readable number.
+  assert.equal(formatCumulativeTokens(0), '0');
+  assert.equal(formatCumulativeTokens(947), '947');
+  assert.equal(formatCumulativeTokens(12_345), '12K');
+  assert.equal(formatCumulativeTokens(1_234), '1.2K');
+  assert.equal(formatCumulativeTokens(1_234_567), '1.2M');
+  assert.equal(formatCumulativeTokens(50_000_000), '50M');
+  assert.equal(formatCumulativeTokens(2_500_000_000), '2.5B');
+  assert.equal(formatCumulativeTokens(3_000_000_000_000), '3.0T');
+});
+
+test('formatCumulativeTokens stays narrow enough for the token line', () => {
+  // Three of these share one line with its label, so none may blow out to a raw digit string.
+  for (const n of [0, 1, 999, 1_000, 999_999, 1e6, 9.99e8, 1e9, 1e12, 9.9e14]) {
+    assert.ok(formatCumulativeTokens(n).length <= 5, `${n} rendered as ${formatCumulativeTokens(n)}`);
+  }
+});
+
+test('formatCumulativeTokens reports a broken counter as zero, not NaN', () => {
+  // A hand-edited or half-written usage.json must not leave `NaN` on screen for every later run.
+  assert.equal(formatCumulativeTokens(Number.NaN), '0');
+  assert.equal(formatCumulativeTokens(-5), '0');
+  assert.equal(formatCumulativeTokens(Number.POSITIVE_INFINITY), '0');
 });
