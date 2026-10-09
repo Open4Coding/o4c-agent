@@ -438,6 +438,33 @@ test('startup splash header shows the word-mark, provider/model, and starting mo
   });
 });
 
+test('the footer is four lines, in order, with the hint line last', async () => {
+  await withTempDir(async (dir) => {
+    const { lastFrame } = await setup({ dir });
+    const frameLines = (lastFrame() ?? '').split('\n').map((l) => l.trimEnd());
+
+    // Found by index rather than by a regex over the whole frame: the point of this test is the
+    // ORDER of the four lines, which was specified explicitly, and the hint line staying last
+    // however many lines appear above it.
+    // The splash header names the starting mode too, so anchor on the status bar's own hint,
+    // which only it renders.
+    const status = frameLines.findIndex((l) => l.includes('/mode or Tab to change'));
+    assert.ok(status >= 0, 'no status line in the frame');
+    assert.match(frameLines[status + 1], / tks: /, `token line should follow: ${frameLines[status + 1]}`);
+    assert.match(frameLines[status + 2], /dir: /, `dir line should follow that: ${frameLines[status + 2]}`);
+    assert.match(frameLines[status + 3], /^Esc stop/, `hint line should be last: ${frameLines[status + 3]}`);
+  });
+});
+
+test('before any response, the token line reports no rate rather than a zero one', async () => {
+  await withTempDir(async (dir) => {
+    const { lastFrame } = await setup({ dir });
+    // `0 tks/s` would read as stalled and a bare unit with no number reads as broken; `n/s` says
+    // there is no measurement yet. Nothing has been spent either, so both totals are 0.
+    assert.match(lastFrame() ?? '', /tks: 0\/0\/n\/s/);
+  });
+});
+
 test('/exit bypasses the FIFO queue even while a turn is stuck processing, instead of sitting queued behind it', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames } = await setup({ dir, provider: new HangingProvider() });

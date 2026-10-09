@@ -335,10 +335,11 @@ function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; 
   const spent = loop.getUsage();
   const thisProcess = spent.inputTokens + spent.outputTokens;
   const totals = usage?.totals() ?? { projectTokens: thisProcess, sessionTokens: thisProcess };
-  // A dash, not `0`, before any response has reported a rate: `0 tks/s` reads as "stalled" where
-  // `-` reads as "not measured yet", and those are very different things to see mid-turn.
+  // `n/s` - no rate, rather than a number - until a response has actually reported one. Never `0`,
+  // which reads as "stalled", and never a unit with nothing in front of it. It replaces the whole
+  // value-and-unit group, so the line stays `tks: 0/0/n/s` instead of growing an empty slot.
   const rate = loop.getTokensPerSecond();
-  const rateText = (rate === undefined ? '' : formatTokenRate(rate)) || '-';
+  const rateText = rate === undefined ? '' : formatTokenRate(rate);
 
   return (
     <Text>
@@ -347,8 +348,14 @@ function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; 
       <Text color={theme.border}>/</Text>
       <Text color={theme.accent}>{formatCumulativeTokens(totals.sessionTokens)}</Text>
       <Text color={theme.border}>/</Text>
-      <Text color={theme.accent}>{rateText}</Text>
-      <Text color={theme.border}> tks/s</Text>
+      {rateText ? (
+        <Text>
+          <Text color={theme.accent}>{rateText}</Text>
+          <Text color={theme.border}> tks/s</Text>
+        </Text>
+      ) : (
+        <Text color={theme.border}>n/s</Text>
+      )}
     </Text>
   );
 }
