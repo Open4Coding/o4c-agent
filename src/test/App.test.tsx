@@ -438,32 +438,32 @@ test('startup splash header shows the word-mark, provider/model, and starting mo
   });
 });
 
-test('the footer is four lines, in order, with the hint line last', async () => {
+test('the footer is three lines, in order, with the model and dir line last', async () => {
   await withTempDir(async (dir) => {
     const { lastFrame } = await setup({ dir });
     const frameLines = (lastFrame() ?? '').split('\n').map((l) => l.trimEnd());
 
     // Found by index rather than by a regex over the whole frame: the point of this test is the
-    // ORDER of the four lines, which was specified explicitly, and the hint line staying last
-    // however many lines appear above it.
+    // ORDER of the three lines, which was specified explicitly.
     // The splash header names the starting mode too, so anchor on the status bar's own hint,
     // which only it renders.
     const status = frameLines.findIndex((l) => l.includes('/mode or Tab to change'));
     assert.ok(status >= 0, 'no status line in the frame');
-    assert.match(frameLines[status + 1], /tks: /, `token line should follow: ${frameLines[status + 1]}`);
-    assert.match(frameLines[status + 2], /dir: /, `dir line should follow that: ${frameLines[status + 2]}`);
-    assert.match(frameLines[status + 3], /^Esc stop/, `hint line should be last: ${frameLines[status + 3]}`);
+    // The key hints share the status line now instead of occupying a fourth line below.
+    assert.match(frameLines[status], /Esc stop · type to queue/, `hints belong on the status line: ${frameLines[status]}`);
+    assert.match(frameLines[status + 1], /^[ts]-tks: /, `token line should follow, flush left: ${frameLines[status + 1]}`);
+    assert.match(frameLines[status + 2], /^◆ .* \| dir: /, `model and dir line should be last, flush left: ${frameLines[status + 2]}`);
   });
 });
 
-test('before any response, the token line reports no rate rather than a zero one', async () => {
+test('before any response, the token line shows a zero rate in the same shape as a real one', async () => {
   await withTempDir(async (dir) => {
     const { lastFrame } = await setup({ dir });
-    // `0 tks/s` would read as stalled and a bare unit with no number reads as broken; `n/s` says
-    // there is no measurement yet. Nothing has been spent either, so both totals are 0.
-    // No trusted project in this harness, so there is no lifetime total to show - only the
-    // session half, which is this process's own spend.
-    assert.match(lastFrame() ?? '', /s-tks: 0\u2191\/0\u2193\/n\/s/);
+    // Every field holds one shape whether or not anything has been measured: `0 t/s` reads as
+    // idle, where a swapped-in placeholder makes the eye re-read the column to see what it is.
+    // Nothing has been spent either, so both totals are 0. No trusted project in this harness,
+    // so there is no lifetime total to show - only the session half, this process's own spend.
+    assert.match(lastFrame() ?? '', /s-tks: 0\u2191\/0\u2193\/0 t\/s/);
   });
 });
 

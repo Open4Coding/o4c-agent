@@ -118,19 +118,21 @@ test('formatModelName strips other weight extensions too, and never returns noth
 
 test('formatTokenRate rounds above 10 and keeps a decimal below', () => {
   // 45.9657 is a real measured value; the difference between 46 and 45.97 is noise on a figure
-  // that moves every turn. Bare numbers - the `tks/s` label belongs to the whole token line.
+  // that moves every turn. Bare numbers - the `t/s` label belongs to the whole token line.
   assert.equal(formatTokenRate(45.9657), '46');
   assert.equal(formatTokenRate(50.39), '50');
   assert.equal(formatTokenRate(9.44), '9.4');
   assert.equal(formatTokenRate(1.2), '1.2');
 });
 
-test('formatTokenRate shows nothing rather than a misleading zero', () => {
-  // Empty means "not measured yet", which the footer renders as `-`; `0` would read as stalled.
-  assert.equal(formatTokenRate(0), '');
-  assert.equal(formatTokenRate(-1), '');
-  assert.equal(formatTokenRate(Number.NaN), '');
-  assert.equal(formatTokenRate(Number.POSITIVE_INFINITY), '');
+test('formatTokenRate falls back to a plain zero, never an empty or junk figure', () => {
+  // Nothing measured yet, or a nonsense reading, both show `0` so the footer renders `0 t/s` and
+  // the column keeps its shape. An empty string here would leave a bare unit with no number in
+  // front of it, which reads as broken rather than as idle.
+  assert.equal(formatTokenRate(0), '0');
+  assert.equal(formatTokenRate(-1), '0');
+  assert.equal(formatTokenRate(Number.NaN), '0');
+  assert.equal(formatTokenRate(Number.POSITIVE_INFINITY), '0');
 });
 
 test('formatCumulativeTokens carries a lifetime total up past K', () => {

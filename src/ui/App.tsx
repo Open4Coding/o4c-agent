@@ -238,7 +238,6 @@ function Spinner() {
  * (same reasoning as `getUsage()` elsewhere in this file). */
 function StatusBar({
   loop,
-  model,
   contextWindow,
   liveText,
   mode,
@@ -246,7 +245,6 @@ function StatusBar({
   thinkLevel,
 }: {
   loop: AgentLoop;
-  model: string;
   contextWindow?: number;
   /** The text currently streaming in (`textWindow.live`), not yet a committed `ContextEntry` -
    * real bug found via direct user report: without this, the bar sat frozen at its pre-turn value
@@ -287,8 +285,10 @@ function StatusBar({
       <Text color={modeInfo(mode).color}>
         Mode: {modeInfo(mode).label} (/mode or Tab to change)
       </Text>
-      <Text color={theme.border}> | </Text>
-      <Text color={theme.accent}>◆ {formatModelName(model)}</Text>
+      {/* The key hints sit directly after the mode they qualify rather than on a line of their
+          own at the foot of the footer, and the model name moved down to the dir line: it
+          changes once a session, where everything left on this line moves constantly. */}
+      <Text color={theme.border}> Esc stop · type to queue</Text>
       <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>Think: {THINK_LEVEL_INFO[thinkLevel].label}</Text>
       <Text color={theme.border}> | </Text>
@@ -314,7 +314,7 @@ function StatusBar({
 /**
  * The footer's second line: what this project has cost in tokens.
  *
- *     t-tks: 18.6M↑/1.3M↓ | s-tks: 1.6M↑/0.3M↓/46 tks/s
+ *     t-tks: 18.6M↑/1.3M↓ | s-tks: 1.6M↑/0.3M↓/46 t/s
  *
  * `t-` is this project's lifetime total, `s-` this session. Prompt and completion are shown
  * apart because they are not comparable quantities: a measured 8h run sent 18.6M prompt tokens
@@ -346,10 +346,9 @@ function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; 
   const spent = loop.getUsage();
   const totals = usage?.totals();
   const session = totals?.session ?? { input: spent.inputTokens, output: spent.outputTokens };
-  // `n/s` - no rate, rather than a number - until a response has actually reported one. Never
-  // `0`, which reads as stalled, and never a unit with nothing in front of it.
-  const rate = loop.getTokensPerSecond();
-  const rateText = rate === undefined ? '' : formatTokenRate(rate);
+  // `0 t/s` before any response has reported a rate, rather than a `n/s` placeholder: the column
+  // keeps one shape, so the eye does not have to re-read it to see what it is showing.
+  const rateText = formatTokenRate(loop.getTokensPerSecond() ?? 0);
 
   const pair = (spend: { input: number; output: number }) => (
     <Text>
@@ -362,8 +361,7 @@ function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; 
 
   return (
     <Text>
-      {/* One leading space, aligning this line with the dir line below it. */}
-      <Text color={theme.border}> </Text>
+      {/* Flush left, like every other footer line. */}
       {totals && (
         <Text>
           <Text color={theme.border}>t-tks: </Text>
@@ -374,38 +372,36 @@ function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; 
       <Text color={theme.border}>s-tks: </Text>
       {pair(session)}
       <Text color={theme.border}>/</Text>
-      {rateText ? (
-        <Text>
-          <Text color={theme.accent}>{rateText}</Text>
-          <Text color={theme.border}> tks/s</Text>
-        </Text>
-      ) : (
-        <Text color={theme.border}>n/s</Text>
-      )}
+      <Text color={theme.accent}>{rateText}</Text>
+      <Text color={theme.border}> t/s</Text>
     </Text>
   );
 }
 
 /**
- * The footer's third line: which branch, and which volume/project/path you are in. Separate from
- * `StatusBar` because it changes on a completely different cadence - the status line re-renders on
- * a timer, where this only moves when you switch branch or project, so it takes its values as
- * already-resolved strings and does no I/O of its own (see `session/gitInfo.ts` on why reading
- * `.git/HEAD` per render would be the wrong shape even though it is cheap).
+ * The footer's third line: which model, which branch, and which volume/project/path you are in.
  *
- * Renders the directory alone when there is no branch, which is a normal case rather than an error:
- * the meta workspace and the scratch directories are not repositories.
+ *     ◆ qwen3.8-27b-Q4_K_M-imatFP16 | main · dir: D:/Open4Coding/o4c-agent
+ *
+ * These three belong together because they share a cadence: all of them hold still for a whole
+ * session. That is why the model name lives here and not on the status line, which re-renders on
+ * a timer - this component takes already-resolved strings and does no I/O of its own (see
+ * `session/gitInfo.ts` on why reading `.git/HEAD` per render would be the wrong shape even though
+ * it is cheap).
+ *
+ * Renders without a branch when there is none, which is a normal case rather than an error: the
+ * meta workspace and the scratch directories are not repositories.
  */
-function ProjectBar({ branch, project }: { branch?: string; project: string }) {
+function ProjectBar({ model, branch, project }: { model: string; branch?: string; project: string }) {
   return (
     <Text>
-      {branch ? (
+      <Text color={theme.accent}>◆ {formatModelName(model)}</Text>
+      <Text color={theme.border}> | </Text>
+      {branch && (
         <Text>
-          <Text color={theme.accent}> {branch}</Text>
+          <Text color={theme.accent}>{branch}</Text>
           <Text color={theme.border}> · </Text>
         </Text>
-      ) : (
-        <Text> </Text>
       )}
       <Text color={theme.border}>dir: {project}</Text>
     </Text>
@@ -1983,13 +1979,14 @@ export function App({
         historyAppend={historyAppend}
         onHistoryChange={handleInputHistoryChange}
       />
-      {/* Front-end plan item #8: context max/current/%used now lives on the same line as Mode,
-          under the input box - previously two separate lines (StatusBar above the input box,
-          "Mode: X" below it). */}
-      <StatusBar loop={loop} model={model} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} thinkLevel={shownThinkLevel} />
+      {/* Three footer lines, grouped by how fast each one changes: what is live (mode, hints,
+          think level, context fill, clock), what accumulates (tokens), and what holds still for
+          the session (model, branch, directory). Front-end plan item #8 put context
+          max/current/%used on the Mode line; the hint line that used to sit last is now folded
+          into it. */}
+      <StatusBar loop={loop} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} thinkLevel={shownThinkLevel} />
       <UsageBar loop={loop} usage={usageStore} busy={isProcessing} />
-      <ProjectBar branch={gitBranch} project={projectLabelText} />
-      <Text color={theme.border}>Esc stop (asks while thinking) · type to queue · Ctrl+C reset</Text>
+      <ProjectBar model={model} branch={gitBranch} project={projectLabelText} />
       {confirmDialog ? (
         <ConfirmDialog
           key={confirmDialog.id}

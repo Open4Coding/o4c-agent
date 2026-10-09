@@ -18,11 +18,16 @@ export function formatModelName(model: string): string {
 
 /** `45.9657` -> `"46"`. Whole numbers above 10 (the difference between 46 and 45.97 is noise on a
  * figure that moves every turn), one decimal below, so a slow local model still shows a meaningful
- * rate instead of a flat `0`. The bare number: the `tks/s` label is part of the footer's token
- * line, which carries three values under one unit. Empty for anything unusable, so the caller can
- * show a placeholder rather than a fabricated `0`. */
+ * rate instead of a flat `0`. The bare number: the `t/s` label is part of the footer's token line,
+ * which carries three values under one unit.
+ *
+ * `0` for anything unusable - not measured yet, negative, NaN, infinite. This returned the empty
+ * string until 2026-10-09 so the caller could print `n/s` instead, on the reasoning that `0` reads
+ * as stalled; changed on request, because a column that keeps its shape is easier to read at a
+ * glance than one that swaps in a different token, and before the first response nothing has been
+ * generated, which `0` states accurately enough. */
 export function formatTokenRate(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '';
+  if (!Number.isFinite(n) || n <= 0) return '0';
   return `${n < 10 ? n.toFixed(1) : Math.round(n)}`;
 }
 
