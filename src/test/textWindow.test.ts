@@ -287,3 +287,37 @@ test('a plain commit stays a non-flow block', () => {
   const state = textWindowReducer(initialTextWindow(), { type: 'commit', lines: [{ kind: 'user', text: '> hi' }] });
   assert.equal(state.blocks[0].flow, undefined);
 });
+
+test('a tag committed after streamed text gets the blank row the flow block cannot provide', () => {
+  // Seen on screen 2026-10-10: mid-turn, [response]/[tool] sat glued to the last line of the
+  // reasoning above them, while the end-of-turn repaint spaced them correctly.
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'system', text: 'reasoning tail' }], flow: true });
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'final', text: '[response]' }], flow: true });
+  const second = state.blocks[1].lines;
+  assert.equal(second.length, 2, 'a blank row was prepended');
+  assert.equal(second[0].text.trim(), '');
+  assert.equal(second[1].text, '[response]');
+});
+
+test('a tool block after streamed text gets one too', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'system', text: 'reasoning tail' }], flow: true });
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'tool_call', text: '[tool] run_shell' }] });
+  assert.equal(state.blocks[1].lines[0].text.trim(), '');
+  assert.equal(state.blocks[1].lines[1].text, '[tool] run_shell');
+});
+
+test('an ordinary block is not padded - its own bottom margin already separates it', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'user', text: '[user]' }] });
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'system', text: '[think]' }], flow: true });
+  assert.equal(state.blocks[1].lines.length, 1, 'no blank row after a block that has a margin');
+});
+
+test('unlabelled streamed text keeps flowing with no blank row inserted', () => {
+  let state = initialTextWindow();
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'system', text: 'first chunk' }], flow: true });
+  state = textWindowReducer(state, { type: 'commit', lines: [{ kind: 'system', text: 'second chunk' }], flow: true });
+  assert.equal(state.blocks[1].lines.length, 1, 'continuous text must not be broken up');
+});

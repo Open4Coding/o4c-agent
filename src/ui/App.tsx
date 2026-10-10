@@ -45,6 +45,7 @@ import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
 import { parseOsArg } from './osKeyboardNotes.js';
 import { detectCurrentOs, type OsKey } from './platform.js';
 import type { Line, LineKind } from './types.js';
+import { RESPONSE_TAG, THINK_TAG, infoLine, labelled, userLine } from './labels.js';
 import {
   initialTextWindow,
   makeBlock,
@@ -1064,50 +1065,50 @@ export function App({
           `  Messages in history: ${loop.getMessages().length}`,
         ].join('\n');
         pushBlock([
-          { kind: 'user', text: `> ${input}` },
-          { kind: 'system', text },
+          userLine(input),
+          infoLine(text),
         ]);
       } else if (commandName(input).startsWith('/keyboard-')) {
         // The "/keyboard-<os>" family: same table, asked about a system other than this
         // one. Named commands rather than only the `[windows|mac|linux]` argument so they are
         // discoverable from the picker instead of having to be known in advance.
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const wanted = parseOsArg(commandName(input).slice('/keyboard-'.length));
         if (!wanted) {
           pushBlock([{ kind: 'error', text: 'Usage: /keyboard-windows, /keyboard-mac or /keyboard-linux' }]);
         } else {
-          pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, wanted) }]);
+          pushBlock([infoLine(renderKeyboardCommandsHelp(undefined, wanted))]);
         }
       } else if (commandName(input) === '/keyboard') {
         // Local, display-only, exactly like /context above - never calls loop.run(), so this
         // table is never sent to the model or added to conversation history (see the module's
         // own doc comment for why that matters for a later, currently out-of-scope feature -
         // docs/plans/0001.FrontEndIDEChanges.checklist.md #16, "infinite context window").
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const osArg = input.slice(commandName(input).length).trim();
         if (!osArg) {
-          pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, os) }]);
+          pushBlock([infoLine(renderKeyboardCommandsHelp(undefined, os))]);
         } else {
           const parsed = parseOsArg(osArg);
           if (!parsed) {
             pushBlock([{ kind: 'error', text: 'Usage: /keyboard [windows|mac|linux]' }]);
           } else {
-            pushBlock([{ kind: 'system', text: renderKeyboardCommandsHelp(undefined, parsed) }]);
+            pushBlock([infoLine(renderKeyboardCommandsHelp(undefined, parsed))]);
           }
         }
       } else if (input === '/mode') {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const chosen = await new Promise<Mode | undefined>((resolve) => {
           setModePicker({ resolve });
         });
         if (chosen) {
           setMode(chosen);
-          pushBlock([{ kind: 'system', text: `Mode set to ${modeInfo(chosen).label}.` }]);
+          pushBlock([infoLine(`Mode set to ${modeInfo(chosen).label}.`)]);
         } else {
-          pushBlock([{ kind: 'system', text: 'Mode unchanged.' }]);
+          pushBlock([infoLine('Mode unchanged.')]);
         }
       } else if (input === '/think' || input.startsWith('/think ')) {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         // `/think high` sets it outright; a bare `/think`, or an argument that is not a level,
         // opens the dropdown rather than erroring - a typo should land you in the list, not a
         // rejection message.
@@ -1115,10 +1116,7 @@ export function App({
         const direct = typed ? parseThinkLevel(typed) : undefined;
         if (typed && !direct) {
           pushBlock([
-            {
-              kind: 'system',
-              text: `"${typed}" is not a thinking level - choose one of ${THINK_LEVELS.join(', ')}.`,
-            },
+            infoLine(`"${typed}" is not a thinking level - choose one of ${THINK_LEVELS.join(', ')}.`),
           ]);
         }
         const chosen =
@@ -1135,7 +1133,7 @@ export function App({
             effective === chosen
               ? ''
               : ` (this model cannot do ${THINK_LEVEL_INFO[chosen].label}; using ${THINK_LEVEL_INFO[effective].label})`;
-          pushBlock([{ kind: 'system', text: `Thinking level set to ${THINK_LEVEL_INFO[chosen].label}.${note}` }]);
+          pushBlock([infoLine(`Thinking level set to ${THINK_LEVEL_INFO[chosen].label}.${note}`)]);
           // Persisted per model, best-effort: the level is already live either way, and failing a
           // turn over a preference write would be the wrong trade.
           //
@@ -1159,26 +1157,23 @@ export function App({
           })();
           void runLogger.log({ type: 'system', sub_type: 'info', command: '/think', level: chosen });
         } else {
-          pushBlock([{ kind: 'system', text: 'Thinking level unchanged.' }]);
+          pushBlock([infoLine('Thinking level unchanged.')]);
         }
       } else if (input === '/set' || input === '/config') {
         // Submitted rather than chosen from the dropdown. The dropdown owns Enter while it is open,
         // so reaching here means it was dismissed with Esc first - these commands have no action of
         // their own (`select: 'none'`), they head their family's list. Say where the list is rather
         // than opening a second, separate picker for the same rows, which is what used to happen.
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         pushBlock([
-          {
-            kind: 'system',
-            text: `Type ${input} and choose from the list below the input box (↑/↓ then Enter).`,
-          },
+          infoLine(`Type ${input} and choose from the list below the input box (↑/↓ then Enter).`),
         ]);
       } else if (
         commandName(input) === '/config-highlightcolor' ||
         commandName(input) === '/config-local-highlightcolor' ||
         commandName(input) === '/config-global-highlightcolor'
       ) {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const name = commandName(input);
         const scope: ConfigScope = name === '/config-global-highlightcolor' ? 'global' : 'local';
         const color = input.slice(name.length).trim();
@@ -1198,27 +1193,24 @@ export function App({
           try {
             await configStore.set(scope, 'highlightColor', color);
             setHighlightColor(color);
-            pushBlock([{ kind: 'system', text: `Highlight color set to ${color} (${scope}).` }]);
+            pushBlock([infoLine(`Highlight color set to ${color} (${scope}).`)]);
           } catch (err) {
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
         }
       } else if (commandName(input) === '/set-sessionname') {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const newName = input.slice(commandName(input).length).trim();
         if (!currentSessionIdRef.current) {
           pushBlock([
-            {
-              kind: 'system',
-              text: 'No active session yet - send a message first, then /set-sessionname <name>.',
-            },
+            infoLine('No active session yet - send a message first, then /set-sessionname <name>.'),
           ]);
         } else if (!newName) {
           pushBlock([{ kind: 'error', text: 'Usage: /set-sessionname <name>' }]);
         } else {
           try {
             await sessionStore.rename(currentSessionIdRef.current, newName);
-            pushBlock([{ kind: 'system', text: `Session renamed to "${newName}".` }]);
+            pushBlock([infoLine(`Session renamed to "${newName}".`)]);
           } catch (err) {
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
@@ -1232,7 +1224,7 @@ export function App({
         // Deliberately does NOT touch the running session or reload it: a reload mid-session is
         // justified for `/set-sessionview` (it repaints the screen the setting describes) but here
         // it would throw away a live session to apply a setting that is about the next one.
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const name = commandName(input);
         const scope: ConfigScope = name === '/set-global-think' ? 'global' : 'local';
         if (scope === 'local' && !configStore.hasScope('local')) {
@@ -1258,7 +1250,7 @@ export function App({
               setThinkScopePicker({ scope, storedLevel, globalLevel, resolve });
             });
             if (!chosen) {
-              pushBlock([{ kind: 'system', text: 'Thinking level for new sessions unchanged.' }]);
+              pushBlock([infoLine('Thinking level for new sessions unchanged.')]);
             } else {
               const levels = await levelsIn(scope);
               if (chosen === 'default') delete levels[model];
@@ -1279,10 +1271,9 @@ export function App({
                   ? ' This project has its own value, which still wins here.'
                   : '';
               pushBlock([
-                {
-                  kind: 'system',
-                  text: `${what}${note} This session stays on ${THINK_LEVEL_INFO[thinkLevelRef.current].label} - use /think to change it now.`,
-                },
+                infoLine(
+                  `${what}${note} This session stays on ${THINK_LEVEL_INFO[thinkLevelRef.current].label} - use /think to change it now.`,
+                ),
               ]);
               void runLogger.log({ type: 'system', sub_type: 'info', command: name, level: chosen, scope });
             }
@@ -1298,7 +1289,7 @@ export function App({
         // How much of a saved session the screen shows after a reload or /resume (compact or full). A
         // picklist, not a typed value: bare and -local- edit the project tier, -global- the machine
         // tier. "default (global)" copies the current global value into the project (one-time copy).
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const name = commandName(input);
         const scope: ConfigScope = name === '/set-global-sessionview' ? 'global' : 'local';
         if (scope === 'local' && !configStore.hasScope('local')) {
@@ -1325,7 +1316,7 @@ export function App({
               });
             });
             if (!chosen) {
-              pushBlock([{ kind: 'system', text: 'Session view unchanged.' }]);
+              pushBlock([infoLine('Session view unchanged.')]);
             } else {
               const value: SessionView = chosen === 'default' ? globalValue : chosen;
               await configStore.set(scope, 'sessionView', value);
@@ -1343,12 +1334,10 @@ export function App({
               const sessionId = currentSessionIdRef.current;
               const repaintNow = Boolean(reloadAfterTurn && sessionId);
               pushBlock([
-                {
-                  kind: 'system',
-                  text:
-                    `Session view set to ${value} (${scope}${chosen === 'default' ? ', copied from the global value' : ''}).${note}` +
+                infoLine(
+                  `Session view set to ${value} (${scope}${chosen === 'default' ? ', copied from the global value' : ''}).${note}` +
                     (repaintNow ? '' : ' It takes effect at the next reload or /resume.'),
-                },
+                ),
               ]);
               if (repaintNow) {
                 // Reload into the same session so the screen repaints in the new view right away - the
@@ -1368,7 +1357,7 @@ export function App({
       ) {
         // Front-end plan item #9 - same local/global structure as /config-highlightcolor above,
         // just under the /set family (a session-store retention setting, not a plugin config).
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const name = commandName(input);
         const scope: ConfigScope = name === '/set-global-sessionsToSave' ? 'global' : 'local';
         const raw = input.slice(name.length).trim();
@@ -1391,30 +1380,26 @@ export function App({
             // Immediate effect for this process too, not just persisted for the next launch -
             // same dual effect /config-highlightcolor already established.
             sessionStore.maxSessions = n;
-            pushBlock([{ kind: 'system', text: `Sessions to save set to ${n} (${scope}).` }]);
+            pushBlock([infoLine(`Sessions to save set to ${n} (${scope}).`)]);
           } catch (err) {
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
         }
       } else if (input === '/help') {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const lines = COMMANDS.map(
           (c) => `${c.name}${c.aliases?.length ? ` (${c.aliases.join(', ')})` : ''} — ${c.description}`,
         );
         pushBlock([
-          {
-            kind: 'system',
-            text: [
-              'Available commands:',
-              ...lines,
-              '',
-              'Use /help-<command> for more detail on one, e.g. /help-mode.',
-            ].join('\n'),
-          },
+          infoLine(
+            ['Available commands:', ...lines, '', 'Use /help-<command> for more detail on one, e.g. /help-mode.'].join(
+              '\n',
+            ),
+          ),
         ]);
         void runLogger.log({ type: 'system', sub_type: 'info', command: '/help' });
       } else if (commandName(input).startsWith('/help-')) {
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
         const rest = commandName(input).slice('/help-'.length);
         const target = commandForHelpTarget(rest);
         if (!target) {
@@ -1429,12 +1414,12 @@ export function App({
             detailLines.push('', 'Modes:');
             for (const m of MODES) detailLines.push(`  ${m.label} — ${m.description}`);
           }
-          pushBlock([{ kind: 'system', text: detailLines.join('\n') }]);
+          pushBlock([infoLine(detailLines.join('\n'))]);
           void runLogger.log({ type: 'system', sub_type: 'info', command: `/help-${rest}` });
         }
       } else if (looksLikeSlashCommand(input) && !KNOWN_COMMANDS.includes(commandName(input))) {
         pushBlock([
-          { kind: 'user', text: `> ${input}` },
+          userLine(input),
           {
             kind: 'error',
             text: `Unknown command: ${commandName(input)}. Known commands: ${KNOWN_COMMANDS.join(', ')}.`,
@@ -1443,7 +1428,7 @@ export function App({
       } else {
         // Echo the user's own line immediately, as its own permanent block - don't
         // wait for the (possibly very long) response before it shows up in scrollback.
-        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        pushBlock([userLine(input)]);
 
         const responseLines: Line[] = [];
         dispatchTextWindow({ type: 'clearLive' });
@@ -1540,7 +1525,12 @@ export function App({
                   const kindChanged = lastDeltaKindRef.current !== kind;
                   lastDeltaKindRef.current = kind;
                   if (kindChanged) setIsInThinkBlock(kind === 'think');
-                  const text = kindChanged && kind === 'think' ? `[think] ${event.text}` : event.text;
+                  // The label goes in as its own line (labelled() puts the newline there), so the
+                  // progressive commit splits it onto a line of its own and the text that follows
+                  // starts at the left margin under it - live and repaint produce the same shape.
+                  const text = kindChanged
+                    ? labelled(kind === 'think' ? THINK_TAG : RESPONSE_TAG, event.text)
+                    : event.text;
                   // Buffered, not dispatched directly - see deltaBufferRef's own doc comment for
                   // the O(n²) render-cost blowup this avoids. A kind change flushes whatever was
                   // pending under the OLD kind first, so it never gets merged into the new kind's
@@ -1685,7 +1675,7 @@ export function App({
           // Skipped in `full` when the answer streamed: every line of it is already in scrollback,
           // committed as it arrived, so this would be a second copy of the whole thing.
           if (finalAnswer && !(sessionViewRef.current === 'full' && streamCommittedRef.current.text)) {
-            responseLines.push({ kind: 'final', text: finalAnswer });
+            responseLines.push({ kind: 'final', text: labelled(RESPONSE_TAG, finalAnswer) });
           }
         } catch (err) {
           turnFailed = true;

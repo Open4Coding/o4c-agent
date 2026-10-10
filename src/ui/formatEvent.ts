@@ -1,4 +1,5 @@
 import type { AgentEvent } from '../agent/loop.js';
+import { RESPONSE_TAG, RESULT_TAG, THINK_TAG, labelled, toolTag } from './labels.js';
 
 const PREVIEW_LENGTH = 200;
 
@@ -51,30 +52,32 @@ export function formatEvent(event: AgentEvent, view: EventView = 'compact'): str
   const full = view === 'full';
   const trim = (text: string): string => (full ? capFull(text) : truncate(text));
   if (event.type === 'text') {
-    return event.text ? trim(event.text) : null;
+    // The model talking to the user, whether it turns out to be the turn's answer or narration
+    // between two tool calls - both are a response, and both get the label.
+    return event.text ? labelled(RESPONSE_TAG, trim(event.text)) : null;
   }
   if (event.type === 'think') {
-    // Per direct instruction: `[think]` label, no closing marker - the line just ends, same as
-    // every other bracketed-label line here (`[tool]`, `[result]`).
-    return event.text ? `[think] ${trim(event.text)}` : null;
+    return event.text ? labelled(THINK_TAG, trim(event.text)) : null;
   }
   if (event.type === 'tool_call') {
     const json = JSON.stringify(event.toolInput ?? {});
     const shown =
       full || json.length <= TOOL_CALL_PREVIEW_CHARS ? capFull(json) : `${json.slice(0, TOOL_CALL_PREVIEW_CHARS)}...`;
-    return `[tool] ${event.toolName}(${shown})`;
+    // The name belongs to the label, the arguments to the content - so a call and its result line
+    // up under tags of the same shape instead of the arguments wrapping around a `name(` prefix.
+    return labelled(toolTag(event.toolName ?? '?'), shown);
   }
   if (event.type === 'tool_result') {
-    return `[result] ${trim(event.toolOutput ?? '')}`;
+    return labelled(RESULT_TAG, trim(event.toolOutput ?? ''));
   }
   if (event.type === 'compaction') {
-    return event.text ? `[compact] ${event.text}` : null;
+    return event.text ? labelled('[compact]', event.text) : null;
   }
   if (event.type === 'prune') {
-    return event.text ? `[prune] ${event.text}` : null;
+    return event.text ? labelled('[prune]', event.text) : null;
   }
   if (event.type === 'warning') {
-    return event.text ? `[warning] ${event.text}` : null;
+    return event.text ? labelled('[warning]', event.text) : null;
   }
   if (event.type === 'delta') {
     // Raw, unprefixed, untruncated - callers that want the bracketed/truncated treatment other

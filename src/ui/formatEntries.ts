@@ -34,6 +34,7 @@ export function parseSessionView(value: unknown): SessionView {
 // rule rather than two copies that drifted apart. Re-exported because callers (and tests) have
 // always imported them from here.
 import { capFull } from './formatEvent.js';
+import { RESPONSE_TAG, RESULT_TAG, THINK_TAG, labelled, toolTag, userLine } from './labels.js';
 export { FULL_ENTRY_CAP_CHARS, capFull } from './formatEvent.js';
 
 function clip(text: string, max: number): string {
@@ -50,7 +51,7 @@ function clip(text: string, max: number): string {
  * because the live path committed nothing at all.
  */
 export function thinkLineText(content: string, view: SessionView | undefined): string {
-  return `[think] ${view === 'full' ? capFull(content) : clip(content, THINK_PREVIEW_CHARS)}`;
+  return labelled(THINK_TAG, view === 'full' ? capFull(content) : clip(content, THINK_PREVIEW_CHARS));
 }
 
 function toolCallEvent(entry: ContextEntry): AgentEvent {
@@ -102,8 +103,8 @@ export function formatEntries(
       // Full view: every tool event, whole, no [scan] collapse.
       const text =
         event.type === 'tool_call'
-          ? `[tool] ${event.toolName}(${capFull(JSON.stringify(event.toolInput ?? {}))})`
-          : `[result] ${capFull(event.toolOutput ?? '')}`;
+          ? labelled(toolTag(event.toolName ?? '?'), capFull(JSON.stringify(event.toolInput ?? {})))
+          : labelled(RESULT_TAG, capFull(event.toolOutput ?? ''));
       lines.push({ kind: event.type === 'tool_call' ? 'tool_call' : 'tool_result', text });
       return;
     }
@@ -128,7 +129,7 @@ export function formatEntries(
     if (entry.type === 'user' && entry.sub_type === 'input') {
       toolEvents = 0;
       summary = null;
-      lines.push({ kind: 'user', text: `> ${entry.content}` });
+      lines.push(userLine(entry.content));
       if (entry.images?.length) lines.push({ kind: 'system', text: `  (attached: ${entry.images.join(', ')})` });
       return;
     }
@@ -144,9 +145,12 @@ export function formatEntries(
       case 'response': {
         if (!entry.content) break;
         if (isFinalResponse(index)) {
-          lines.push({ kind: 'final', text: full ? capFull(entry.content) : entry.content });
+          lines.push({ kind: 'final', text: labelled(RESPONSE_TAG, full ? capFull(entry.content) : entry.content) });
         } else {
-          lines.push({ kind: 'system', text: full ? capFull(entry.content) : clip(entry.content, NARRATION_PREVIEW_CHARS) });
+          lines.push({
+            kind: 'system',
+            text: labelled(RESPONSE_TAG, full ? capFull(entry.content) : clip(entry.content, NARRATION_PREVIEW_CHARS)),
+          });
         }
         break;
       }

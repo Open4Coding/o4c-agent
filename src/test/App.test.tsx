@@ -671,7 +671,7 @@ test('Esc once the think block has ended (final answer streaming) stops at once,
     const { stdin, frames, lastFrame } = await setup({ dir, provider });
 
     await submit(stdin, 'explain it');
-    await waitFor(() => anyFrameIncludes(frames, '[think] reasoning about it'));
+    await waitFor(() => anyFrameIncludes(frames, '[think]') && anyFrameIncludes(frames, 'reasoning about it'));
 
     provider.resume();
     await waitFor(() => anyFrameIncludes(frames, 'the final answer'));
@@ -841,7 +841,7 @@ test('a live-streaming think chunk shows "[think] " the instant reasoning starts
     // real behavior being fixed: previously nothing distinguished a live reasoning chunk from a
     // live answer chunk, so this label never appeared until after the fact (see the ThinkingWithToolProvider
     // test above, which only ever exercises the non-streamed fallback path).
-    await waitFor(() => (lastFrame() ?? '').includes('[think] reasoning about it'));
+    await waitFor(() => (lastFrame() ?? '').includes('[think]') && (lastFrame() ?? '').includes('reasoning about it'));
 
     // The real answer hasn't streamed in yet - it's still paused - so it must not appear yet.
     assert.equal((lastFrame() ?? '').includes('the final answer'), false);
@@ -1553,13 +1553,19 @@ test('in the repainted history a [think] / [tool] line has a blank row above it,
       initialSession: { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries), entries: data!.entries },
     });
     await waitFor(() => anyFrameIncludes(frames, '[tool] read_file'));
-    const frame = frames.find((f) => f.includes('[tool] read_file') && f.includes('[think] weigh'))!;
+    const frame = frames.find((f) => f.includes('[tool] read_file') && f.includes('weigh the options'))!;
     const rows = frame.split('\n').map((r) => r.trim());
-    const rowAbove = (needle: string) => rows[rows.findIndex((r) => r.startsWith(needle)) - 1];
-    assert.equal(rowAbove('[think] weigh the options first'), '', 'blank row above the first [think]');
-    assert.equal(rowAbove('[think] a second thought'), '', 'blank row above the second [think]');
-    assert.equal(rowAbove('[tool] read_file'), '', 'blank row above [tool]');
-    assert.equal(rowAbove('[result] contents'), '', 'the blank after [tool] separates it from [result], as before');
+    // Each tag is its own row now, so a block reads: blank, tag, then the text it names.
+    const taggedBlock = (content: string, tag: string) => {
+      const at = rows.findIndex((r) => r.startsWith(content));
+      assert.ok(at > 1, `${content} is on screen`);
+      assert.equal(rows[at - 1], tag, `${tag} sits directly above its text`);
+      assert.equal(rows[at - 2], '', `blank row above ${tag}`);
+    };
+    taggedBlock('weigh the options first', '[think]');
+    taggedBlock('a second thought', '[think]');
+    taggedBlock('some narration before the tool', '[response]');
+    taggedBlock('contents', '[result]');
   });
 });
 
@@ -1579,11 +1585,12 @@ test('in the repainted history the final answer is not glued to the [think] line
       initialSession: { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries), entries: data!.entries },
     });
     await waitFor(() => anyFrameIncludes(frames, 'Done - it is written.'));
-    const frame = frames.find((f) => f.includes('Done - it is written.') && f.includes('[think] the file'))!;
+    const frame = frames.find((f) => f.includes('Done - it is written.') && f.includes('the file has been written'))!;
     const rows = frame.split('\n').map((r) => r.trim());
     const answerRow = rows.findIndex((r) => r.startsWith('Done - it is written.'));
-    assert.ok(answerRow > 0);
-    assert.equal(rows[answerRow - 1], '', 'a blank row between the [think] line and the answer');
+    assert.ok(answerRow > 1);
+    assert.equal(rows[answerRow - 1], '[response]', 'the answer sits under its own tag');
+    assert.equal(rows[answerRow - 2], '', 'a blank row between the reasoning above and the [response] tag');
   });
 });
 
@@ -1605,7 +1612,7 @@ test('a resumed session repaints from its full entries: [think] blocks and the [
       initialSession: { id: data!.id, title: data!.title, messages: toWireMessages(data!.entries), entries: data!.entries },
     });
 
-    assert.ok(anyFrameIncludes(frames, '[think] weigh the options first'));
+    assert.ok(anyFrameIncludes(frames, '[think]') && anyFrameIncludes(frames, 'weigh the options first'));
     assert.ok(anyFrameIncludes(frames, '[scan] 6 more tool calls collapsed'));
     assert.ok(anyFrameIncludes(frames, 'the thing is built'));
   });
@@ -2471,14 +2478,14 @@ test('a turn keeps its thinking on screen after it ends, in the configured view'
     await submit(compact.stdin, 'think about it');
     await waitFor(() => (compact.lastFrame() ?? '').includes('the final answer'));
     const compactFrame = compact.lastFrame() ?? '';
-    assert.match(compactFrame, /\[think\] HEAD/, 'the thinking survives the end of the turn');
+    assert.match(compactFrame, /\[think\]\s+HEAD/, 'the thinking survives the end of the turn');
     assert.equal(compactFrame.includes('TAIL'), false, 'compact clips it to a preview');
 
     const full = await setup({ dir, provider: thinker, sessionView: 'full' });
     await submit(full.stdin, 'think about it');
     await waitFor(() => (full.lastFrame() ?? '').includes('the final answer'));
     const fullFrame = full.lastFrame() ?? '';
-    assert.match(fullFrame, /\[think\] HEAD/);
+    assert.match(fullFrame, /\[think\]\s+HEAD/);
     assert.ok(fullFrame.includes('TAIL'), 'full keeps the whole think, which is what full means');
   });
 });

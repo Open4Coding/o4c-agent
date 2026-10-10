@@ -35,12 +35,12 @@ test('formatEntries repaints a turn in live order: user, [think], tool lines, fi
   assert.deepEqual(
     lines.map((l) => [l.kind, l.text]),
     [
-      ['user', '> build it'],
-      ['system', '[think] plan the work'],
-      ['system', 'starting now'],
-      ['tool_call', '[tool] run_shell({"n":"t1"})'],
-      ['tool_result', '[result] ok'],
-      ['final', 'All done.'],
+      ['user', '[user]\nbuild it'],
+      ['system', '[think]\nplan the work'],
+      ['system', '[response]\nstarting now'],
+      ['tool_call', '[tool] run_shell\n{"n":"t1"}'],
+      ['tool_result', '[result]\nok'],
+      ['final', '[response]\nAll done.'],
     ],
   );
 });
@@ -71,18 +71,18 @@ test('formatEntries only treats the last response of a turn as the final answer'
     ...toolPair('t1', 'x', 'r'),
     aiResponseEntry('the real answer'),
   ]);
-  assert.deepEqual(lines.filter((l) => l.kind === 'final').map((l) => l.text), ['the real answer']);
+  assert.deepEqual(lines.filter((l) => l.kind === 'final').map((l) => l.text), ['[response]\nthe real answer']);
 });
 
 test('formatEntries skips empty responses, hidden entries and non-ai bookkeeping', () => {
   const hidden = { ...aiResponseEntry('hidden'), user_visible: false };
   const lines = formatEntries([userInputEntry('q'), aiResponseEntry(''), hidden]);
-  assert.deepEqual(lines.map((l) => l.text), ['> q']);
+  assert.deepEqual(lines.map((l) => l.text), ['[user]\nq']);
 });
 
 test('formatEntries notes attached images under the user line', () => {
   const lines = formatEntries([userInputEntry('look', ['a.png', 'b.png'])]);
-  assert.deepEqual(lines.map((l) => l.text), ['> look', '  (attached: a.png, b.png)']);
+  assert.deepEqual(lines.map((l) => l.text), ['[user]\nlook', '  (attached: a.png, b.png)']);
 });
 
 test('formatEntries shows far more think/narration than the live preview, but still bounds every field', () => {
@@ -97,10 +97,10 @@ test('formatEntries shows far more think/narration than the live preview, but st
   ]);
   const think = lines.find((l) => l.text.startsWith('[think]'))!.text;
   assert.ok(think.length > 1000 && think.length < THINK_PREVIEW_CHARS + 20);
-  const narration = lines.find((l) => l.kind === 'system' && l.text.startsWith('zzz'))!.text;
+  const narration = lines.find((l) => l.kind === 'system' && l.text.startsWith('[response]'))!.text;
   assert.ok(narration.length > 3000 && narration.length < NARRATION_PREVIEW_CHARS + 20);
   const call = lines.find((l) => l.kind === 'tool_call')!.text;
-  assert.ok(call.startsWith('[tool] write_file(') && call.length < TOOL_CALL_PREVIEW_CHARS + 60);
+  assert.ok(call.startsWith('[tool] write_file\n') && call.length < TOOL_CALL_PREVIEW_CHARS + 60);
   assert.ok(lines.find((l) => l.kind === 'tool_result')!.text.length < 230);
 });
 
@@ -125,7 +125,8 @@ test('the full view shows the whole think, narration, tool arguments and result 
     { view: 'full' },
   );
   assert.ok(lines.find((l) => l.text.startsWith('[think]'))!.text.length > 9000);
-  assert.ok(lines.find((l) => l.kind === 'system' && l.text.startsWith('zzz'))!.text.length === 9000);
+  const narration = lines.find((l) => l.kind === 'system' && l.text.startsWith('[response]'))!.text;
+  assert.ok(narration.endsWith(big) && narration.length === big.length + '[response]\n'.length);
   assert.ok(lines.find((l) => l.kind === 'tool_call')!.text.length > 9000);
   assert.ok(lines.find((l) => l.kind === 'tool_result')!.text.length > 9000);
 });
@@ -165,7 +166,7 @@ test('full view shows an event whole where compact shows a preview', () => {
 
   const full = formatEvent(result, 'full') ?? '';
   assert.ok(full.includes('TAIL'), 'full keeps the end of the output');
-  assert.equal(full, '[result] ' + long);
+  assert.equal(full, '[result]\n' + long);
 
   // A tool call's arguments carry whole files, so they are the other half of the same problem.
   const call: AgentEvent = { type: 'tool_call', toolName: 'write_file', toolInput: { text: long } };

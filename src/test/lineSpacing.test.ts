@@ -45,3 +45,8 @@ test('the other labelled lines get a gap too', () => {
     assert.equal(needsGapBefore(final('x'), system('[' + label + '] y')), true, label);
   }
 });
+
+test('a line after a blank row gets no second one', () => {
+  assert.equal(needsGapBefore({ kind: 'system', text: ' ' }, { kind: 'system', text: '[think] x' }), false);
+  assert.equal(needsGapBefore({ kind: 'system', text: '' }, { kind: 'tool_call', text: '[tool] run_shell' }), false);
+});

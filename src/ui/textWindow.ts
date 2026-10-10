@@ -1,4 +1,5 @@
 import type { Line } from './types.js';
+import { isLabelledLine } from './lineSpacing.js';
 
 /**
  * One permanently-committed block of the terminal's scrollback - exactly what Ink's `<Static>`
@@ -256,9 +257,20 @@ export function textWindowReducer(state: TextWindowState, action: TextWindowActi
   switch (action.type) {
     case 'commit': {
       if (action.lines.length === 0) return state;
+      // A flow block carries no bottom margin, because consecutive chunks of one think block or
+      // answer have to join into continuous text. That leaves nothing to separate the NEXT thing
+      // from it, so a `[think]`/`[response]`/`[tool]` arriving after streamed text sat glued to
+      // the last line of it - seen on screen 2026-10-10, and only mid-turn: the repaint builds
+      // ordinary blocks whose margins already space them. The blank row goes at the head of the
+      // incoming block, since `<Static>` can never revisit the one already written.
+      const previous = state.blocks.at(-1);
+      const lines =
+        previous?.flow === true && isLabelledLine(action.lines[0])
+          ? [{ kind: 'system', text: ' ' } as Line, ...action.lines]
+          : action.lines;
       return {
         ...state,
-        blocks: [...state.blocks, { id: state.nextId, lines: action.lines, ...(action.flow ? { flow: true } : {}) }],
+        blocks: [...state.blocks, { id: state.nextId, lines, ...(action.flow ? { flow: true } : {}) }],
         nextId: state.nextId + 1,
       };
     }
