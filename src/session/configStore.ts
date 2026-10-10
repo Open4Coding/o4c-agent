@@ -136,6 +136,37 @@ export class ConfigStore {
 }
 
 /**
+ * Which scope a write to `config[key][entry]` must land in for the merged view to actually return
+ * it - the highest-precedence scope that already has an entry under that name, or `fallback` when
+ * none does.
+ *
+ * Needed because writing and reading are not symmetric here: `resolve()` layers global -> local ->
+ * personal, and `copyGlobalConfigToProject()` below seeds a newly trusted project's local
+ * `config.json` as a snapshot of global. A feature that reads with `get()` but always writes
+ * `global` therefore works until the first project is trusted, and from then on writes into a file
+ * the snapshot permanently shadows. `/think` had exactly that bug (reported 2026-10-09: the level
+ * reverted to the snapshot's value at every end-of-turn reload), which is what this exists to stop.
+ *
+ * Checks the entry rather than the key because `deepMerge` merges these maps entry-by-entry: a
+ * local `thinkLevelByModel` holding some other model says nothing about where this model's level
+ * should go.
+ */
+export async function scopeOwningEntry(
+  store: ConfigStore,
+  key: string,
+  entry: string,
+  fallback: ConfigScope = 'global',
+): Promise<ConfigScope> {
+  // Highest precedence first - personal wins over local, so it is also where an update must go.
+  for (const scope of ['personal', 'local'] as const) {
+    if (!store.hasScope(scope)) continue;
+    const own = (await store.readScope(scope))[key];
+    if (own && typeof own === 'object' && (own as Record<string, unknown>)[entry] !== undefined) return scope;
+  }
+  return fallback;
+}
+
+/**
  * Copy-on-trust seeding: the moment a project is trusted for the first time (`ensureTrusted()`
  * in `projectContext.ts`), its new local `config.json` starts as a copy of the current global
  * one - optionally deep-merged with a chosen profile's own bundle on top (`profileBundle`,

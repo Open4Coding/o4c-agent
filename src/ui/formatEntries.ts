@@ -30,20 +30,27 @@ export function parseSessionView(value: unknown): SessionView {
   return value === 'full' ? 'full' : 'compact';
 }
 
-/** Full view's one safety limit per entry: a multi-megabyte tool output must not flood the terminal. */
-export const FULL_ENTRY_CAP_CHARS = 200_000;
-
-function capFull(text: string): string {
-  const trimmed = text.replace(/\s+$/, '');
-  if (trimmed.length <= FULL_ENTRY_CAP_CHARS) return trimmed;
-  const hidden = trimmed.length - FULL_ENTRY_CAP_CHARS;
-  return `${trimmed.slice(0, FULL_ENTRY_CAP_CHARS)}
-... (+${hidden.toLocaleString('en-US')} more characters, full text in the session file)`;
-}
+// The cap and its trim now live in formatEvent.ts, so the live turn and this repaint apply one
+// rule rather than two copies that drifted apart. Re-exported because callers (and tests) have
+// always imported them from here.
+import { capFull } from './formatEvent.js';
+export { FULL_ENTRY_CAP_CHARS, capFull } from './formatEvent.js';
 
 function clip(text: string, max: number): string {
   const trimmed = text.replace(/\s+$/, '');
   return trimmed.length > max ? `${trimmed.slice(0, max)}...` : trimmed;
+}
+
+/**
+ * The one definition of what a `[think]` line looks like in a given view - whole (to the
+ * per-entry cap) in `full`, clipped to a preview in `compact`.
+ *
+ * Shared by the repaint below and by App.tsx's live turn, which commits the same line to
+ * scrollback as the turn ends. Keeping it in one place is the point: the two used to disagree,
+ * because the live path committed nothing at all.
+ */
+export function thinkLineText(content: string, view: SessionView | undefined): string {
+  return `[think] ${view === 'full' ? capFull(content) : clip(content, THINK_PREVIEW_CHARS)}`;
 }
 
 function toolCallEvent(entry: ContextEntry): AgentEvent {
@@ -130,7 +137,7 @@ export function formatEntries(
     switch (entry.sub_type) {
       case 'think': {
         if (entry.content) {
-          lines.push({ kind: 'system', text: `[think] ${full ? capFull(entry.content) : clip(entry.content, THINK_PREVIEW_CHARS)}` });
+          lines.push({ kind: 'system', text: thinkLineText(entry.content, options.view) });
         }
         break;
       }

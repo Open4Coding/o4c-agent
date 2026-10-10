@@ -5,6 +5,8 @@ import {
   makeBlock,
   rowsFor,
   shouldFlushDelta,
+  splitStreamLines,
+  STREAM_TAIL_CAP_CHARS,
   textWindowReducer,
   trimLiveToRows,
   type TextWindowState,
@@ -225,4 +227,63 @@ test('setLiveCaps re-bounds the live region to a smaller terminal, keeping the n
   assert.ok(rowsFor(shrunk.live.join('\n'), 80) <= 10, 'live region must fit the new row cap');
   assert.equal(shrunk.live.at(-1), 'line 39', 'the newest content is kept');
   assert.equal(shrunk.liveCapRows, 10);
+});
+
+// --- full view's progressive commit (the streamed-output-is-lost bug) -------------------------
+
+test('splitStreamLines commits finished lines and keeps the unfinished one live', () => {
+  const { lines, tail } = splitStreamLines(['[think] first', 'second', 'third so far'].join('\n'));
+  assert.deepEqual(lines, ['[think] first', 'second']);
+  assert.equal(tail, 'third so far');
+});
+
+test('splitStreamLines keeps blank lines, so paragraph breaks survive the commit', () => {
+  const { lines, tail } = splitStreamLines(['one', '', 'two', ''].join('\n'));
+  assert.deepEqual(lines, ['one', '', 'two']);
+  assert.equal(tail, '');
+});
+
+test('splitStreamLines breaks a newline-free paragraph at a space once it passes the cap', () => {
+  const word = 'word ';
+  const paragraph = word.repeat(Math.ceil((STREAM_TAIL_CAP_CHARS + 200) / word.length));
+  const { lines, tail } = splitStreamLines(paragraph);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].length <= STREAM_TAIL_CAP_CHARS, 'committed line respects the cap');
+  assert.ok(lines[0].endsWith('word'), 'cut at a space, not mid-word');
+  assert.equal(`${lines[0]} ${tail}`, paragraph, 'no character is lost at the break');
+});
+
+test('splitStreamLines hard-breaks a paragraph with no space in reach', () => {
+  const run = 'z'.repeat(STREAM_TAIL_CAP_CHARS + 50);
+  const { lines, tail } = splitStreamLines(run);
+  assert.equal(lines[0].length, STREAM_TAIL_CAP_CHARS);
+  assert.equal(lines[0] + tail, run, 'no character is lost at the break');
+});
+
+test('a committed stream chunk becomes permanent scrollback, not trimmable live content', () => {
+  // The bug: streamed output only ever lived in the capped live region, so a long think dropped
+  // its own beginning off the screen and into nothing. Committed chunks are blocks instead.
+  let state = initialTextWindow([], 200, 3, 80);
+  const chunk: Line[] = [{ kind: 'system', text: '[think] the first thing it said' }];
+  state = textWindowReducer(state, { type: 'commit', lines: chunk, flow: true });
+  for (let i = 0; i < 100; i++) {
+    state = textWindowReducer(state, { type: 'setLiveTail', text: `later line ${i}` });
+  }
+  assert.equal(state.blocks.length, 1, 'the committed chunk is still there after 100 live updates');
+  assert.equal(state.blocks[0].lines[0].text, '[think] the first thing it said');
+  assert.equal(state.blocks[0].flow, true, 'flow blocks render without a gap between chunks');
+  assert.deepEqual(state.live, ['later line 99'], 'the live region holds only the unfinished line');
+});
+
+test('setLiveTail with an empty tail clears the live region', () => {
+  let state = initialTextWindow([], 1000, 10, 80);
+  state = textWindowReducer(state, { type: 'setLiveTail', text: 'half a sentence' });
+  state = textWindowReducer(state, { type: 'setLiveTail', text: '' });
+  assert.deepEqual(state.live, []);
+  assert.equal(state.deltaActive, false);
+});
+
+test('a plain commit stays a non-flow block', () => {
+  const state = textWindowReducer(initialTextWindow(), { type: 'commit', lines: [{ kind: 'user', text: '> hi' }] });
+  assert.equal(state.blocks[0].flow, undefined);
 });

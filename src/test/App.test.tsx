@@ -327,8 +327,21 @@ async function waitFor(
 // blocks if a later live-only re-render happened after. Checking across every captured frame is
 // the robust way to assert "this text appeared at some point," matching what Static is actually
 // for (permanent scrollback), not "this text is in the current frame."
+/** Markers for the full-view streaming test below - each has to be unique in the output, and
+ * each think chunk ends in a newline so it commits immediately instead of waiting in the tail. */
+const THINK_HEAD_MARK = `HEADMARK the first thing it reasoned${'\n'}`;
+const THINK_TAIL_MARK = `TAILMARK the last thing it reasoned${'\n'}`;
+const ANSWER_MARK = `ANSWERMARK the answer${'\n'}`;
+
 function anyFrameIncludes(frames: string[], text: string): boolean {
   return frames.some((f) => f.includes(text));
+}
+
+/** Same, but blind to where the terminal wrapped the line - a sentence longer than the width is
+ * broken across rows, so `includes` on the raw frame misses a message that is plainly on screen. */
+function anyFrameSays(frames: string[], text: string): boolean {
+  const flat = (v: string) => v.replace(/\s+/g, ' ');
+  return frames.some((f) => flat(f).includes(flat(text)));
 }
 
 // Every render() left mounted for the rest of the process, across every test in this file - this
@@ -443,16 +456,25 @@ test('the footer is three lines, in order, with the model and dir line last', as
     const { lastFrame } = await setup({ dir });
     const frameLines = (lastFrame() ?? '').split('\n').map((l) => l.trimEnd());
 
-    // Found by index rather than by a regex over the whole frame: the point of this test is the
-    // ORDER of the three lines, which was specified explicitly.
+    // Found by content rather than by a fixed offset from the status line: the point of this test
+    // is the ORDER of the three lines, and line 1 legitimately wraps to a second row on a narrow
+    // terminal (at this harness's 100 columns it already does - the elapsed clock spills over).
+    // Asserting `status + 1` made a wrap look like a reordering, which is a different bug.
     // The splash header names the starting mode too, so anchor on the status bar's own hint,
     // which only it renders.
-    const status = frameLines.findIndex((l) => l.includes('/mode or Tab to change'));
+    const status = frameLines.findIndex((l) => l.includes('/mode or Tab'));
     assert.ok(status >= 0, 'no status line in the frame');
     // The key hints share the status line now instead of occupying a fourth line below.
     assert.match(frameLines[status], /Esc stop · type to queue/, `hints belong on the status line: ${frameLines[status]}`);
-    assert.match(frameLines[status + 1], /^[ts]-tks: /, `token line should follow, flush left: ${frameLines[status + 1]}`);
-    assert.match(frameLines[status + 2], /^◆ .* \| dir: /, `model and dir line should be last, flush left: ${frameLines[status + 2]}`);
+    // The two settings lead line 2, in that order, with the token totals after them - they are not
+    // on line 1, which was running to ~126 columns with them on it.
+    const settings = frameLines.findIndex((l) => /^view: (compact|full) \| Think: \w+ \| [ts]-tks: /.test(l));
+    assert.ok(
+      settings > status,
+      `settings should lead the token line, flush left: ${frameLines.slice(status).join(' / ')}`,
+    );
+    assert.equal(/view:|Think:/.test(frameLines[status]), false, `settings left line 1: ${frameLines[status]}`);
+    assert.match(frameLines[settings + 1], /^◆ .* \| dir: /, `model and dir line should be last, flush left: ${frameLines[settings + 1]}`);
   });
 });
 
@@ -874,7 +896,7 @@ test('the command palette narrows as more is typed', async () => {
     // narrowing the palette costs one extra render cycle after the keystroke - waitFor polls
     // until that's actually settled instead of gambling on a fixed delay.
     await type(stdin, '/c');
-    // Not "/mode" - App.tsx's always-visible "Mode: Manual (/mode or Tab to change)" status line
+    // Not "/mode" - App.tsx's always-visible "Mode: Manual (/mode or Tab)" status line
     // contains that substring regardless of the palette, so it would never disappear. "/set" has
     // no such collision anywhere else on screen.
     await waitFor(() => !(lastFrame() ?? '').includes('/set'));
@@ -1821,10 +1843,10 @@ test('/set opens its family dropdown; choosing a setting prefills the input box 
     await tick(50);
     assert.ok((lastFrame() ?? '').includes('/set commands'), 'the inert first row keeps the list open');
 
-    // Rows below the first are alphabetical, so /set-sessionname is the sixth: /set,
-    // -global-sessionsToSave, -global-sessionview, -local-sessionsToSave, -local-sessionview,
-    // -sessionname.
-    for (let i = 0; i < 5; i++) {
+    // Rows below the first are alphabetical, so /set-sessionname is the eighth: /set,
+    // -global-sessionsToSave, -global-sessionview, -global-think, -local-sessionsToSave,
+    // -local-sessionview, -local-think, -sessionname.
+    for (let i = 0; i < 7; i++) {
       stdin.write(DOWN);
       await tick(50);
     }
@@ -2069,6 +2091,161 @@ test('/set-global-sessionsToSave writes only the global scope, isolated from the
   });
 });
 
+// ---- /think persistence across the end-of-turn reload ----
+
+test('/think writes the scope the merged read returns, so the level survives a reload instead of snapping back', async () => {
+  await withTempDir(async (dir) => {
+    // The exact shape of the 2026-10-09 report: the user picks high/med/low, and at the next
+    // end-of-turn reload the footer is back to xhigh. Cause was not the reload or the persistence
+    // but the asymmetry between them - `/think` wrote ~/.o4c/config.json while the restore read the
+    // merged view, where the project's local config.json (seeded as a snapshot of global when the
+    // project was trusted) held an older xhigh that shadowed every later choice, permanently.
+    const configGlobalDir = join(dir, 'fake-global');
+    const projectRoot = join(dir, 'project');
+    const globalStore = new ConfigStore(projectRoot, configGlobalDir);
+    await globalStore.set('global', 'thinkLevelByModel', { 'test-model': 'xhigh' });
+    await globalStore.set('local', 'thinkLevelByModel', { 'test-model': 'xhigh', 'other-model': 'low' });
+
+    const { stdin, lastFrame } = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir });
+    await submit(stdin, '/think med');
+    await waitFor(() => (lastFrame() ?? '').includes('Thinking level set to med'));
+
+    // The effective value - what the next launch reads - is the chosen one, which is the whole point.
+    await waitFor(async () => {
+      const saved = (await globalStore.get('thinkLevelByModel')) as Record<string, unknown>;
+      return saved?.['test-model'] === 'med';
+    });
+    // Written into the file that actually wins, and only that one.
+    assert.deepEqual((await globalStore.readScope('local')).thinkLevelByModel, {
+      'test-model': 'med',
+      'other-model': 'low', // the rest of that file's own map is left alone
+    });
+    // Never flattens the resolved view into one scope: global keeps its own entries, untouched.
+    assert.deepEqual((await globalStore.readScope('global')).thinkLevelByModel, { 'test-model': 'xhigh' });
+
+    // And a fresh mount - which is all the end-of-turn reload is - comes up on med, not xhigh.
+    const reloaded = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir });
+    await waitFor(() => (reloaded.lastFrame() ?? '').includes('Think: med'));
+  });
+});
+
+// ---- /set-think, /set-local-think, /set-global-think (a picklist, for the NEXT session) ----
+
+async function openThinkScopePicker(
+  stdin: { write: (data: string) => void },
+  frames: string[],
+  command: string,
+): Promise<void> {
+  await submit(stdin, command);
+  await waitFor(() => anyFrameIncludes(frames, 'Thinking level for new sessions'));
+  await tick(150); // the picker's key handler registers just after its first frame paints
+}
+
+test('/set-think stores the level for the next session, per model, and leaves this one alone', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, frames, lastFrame, restartCalls } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    assert.match(lastFrame() ?? '', /Think: med/); // the built-in default, nothing stored yet
+
+    await openThinkScopePicker(stdin, frames, '/set-think');
+    stdin.write(DOWN); // default -> nothink
+    await tick(100);
+    stdin.write(DOWN); // -> low
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameSays(frames, 'Thinking level for new sessions set to low (local).'));
+
+    // Stored per model id, in the project tier only.
+    const store = new ConfigStore(dir, configGlobalDir);
+    assert.deepEqual((await store.readScope('local')).thinkLevelByModel, { 'test-model': 'low' });
+    assert.equal((await store.readScope('global')).thinkLevelByModel, undefined);
+
+    // The running session is untouched - no reload, and the footer still reads med. This is the
+    // whole difference from /think, and the message says so rather than leaving it to be noticed.
+    assert.deepEqual(restartCalls, []);
+    assert.match(lastFrame() ?? '', /Think: med/);
+    assert.ok(anyFrameSays(frames, 'This session stays on med - use /think to change it now.'));
+  });
+});
+
+test('/set-local-think is the same command as /set-think, writing the same tier', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await openThinkScopePicker(stdin, frames, '/set-local-think');
+    stdin.write(DOWN); // default -> nothink
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameSays(frames, 'Thinking level for new sessions set to nothink (local).'));
+    const store = new ConfigStore(dir, configGlobalDir);
+    assert.deepEqual((await store.readScope('local')).thinkLevelByModel, { 'test-model': 'nothink' });
+  });
+});
+
+test('/set-global-think writes only the machine tier, and says when the project still wins', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const store = new ConfigStore(dir, configGlobalDir);
+    await store.set('local', 'thinkLevelByModel', { 'test-model': 'high' });
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir });
+
+    await openThinkScopePicker(stdin, frames, '/set-global-think');
+    stdin.write(DOWN); // default -> nothink
+    await tick(100);
+    stdin.write(DOWN); // -> low
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameSays(frames, 'Thinking level for new sessions set to low (global).'));
+    assert.ok(anyFrameSays(frames, 'This project has its own value, which still wins here.'));
+
+    assert.deepEqual((await store.readScope('global')).thinkLevelByModel, { 'test-model': 'low' });
+    assert.deepEqual((await store.readScope('local')).thinkLevelByModel, { 'test-model': 'high' }, 'untouched');
+  });
+});
+
+test('the default row clears the stored level rather than pinning one, so a model can be put back', async () => {
+  await withTempDir(async (dir) => {
+    // The 2026-10-09 trap this row exists for: a level stored once won every launch, could not be
+    // unset from inside o4c, and copy-on-trust carried it into every project trusted afterwards.
+    const configGlobalDir = join(dir, 'fake-global');
+    const store = new ConfigStore(dir, configGlobalDir);
+    await store.set('local', 'thinkLevelByModel', { 'test-model': 'nothink', 'other-model': 'high' });
+    const { stdin, frames } = await setup({ dir, projectRoot: dir, configGlobalDir });
+
+    await openThinkScopePicker(stdin, frames, '/set-think');
+    // The list opens on the stored level (nothink), so the default row is one step up - which is
+    // also the proof that the picker reflects what this tier currently holds.
+    stdin.write(UP);
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameSays(frames, 'Stored thinking level cleared (local);'));
+    assert.ok(anyFrameSays(frames, "follow this machine's choice (currently med)"));
+
+    // This model's entry is gone; every other model in the same file is left alone.
+    assert.deepEqual((await store.readScope('local')).thinkLevelByModel, { 'other-model': 'high' });
+  });
+});
+
+test('/set-think with no trusted project says so instead of opening a picker', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir }); // no projectRoot: no local tier to write
+    await submit(stdin, '/set-think');
+    await waitFor(() => anyFrameIncludes(frames, 'No trusted project in this directory'));
+    assert.ok(anyFrameIncludes(frames, 'use /set-global-think instead'));
+    assert.equal(anyFrameIncludes(frames, 'Thinking level for new sessions ('), false);
+  });
+});
+
+test('a stored level is what the next session starts on, which is what /set-think is for', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    await new ConfigStore(dir, configGlobalDir).set('global', 'thinkLevelByModel', { 'test-model': 'low' });
+    // A fresh mount is exactly what the next launch does.
+    const { lastFrame } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    await waitFor(() => (lastFrame() ?? '').includes('Think: low'));
+  });
+});
+
 // ---- /set-sessionview, /set-local-sessionview, /set-global-sessionview (a picklist) ----
 
 async function openViewPicker(
@@ -2113,6 +2290,44 @@ test('/set-local-sessionview choosing full writes only the project tier and says
     assert.equal((await store.readScope('local')).sessionView, 'full');
     assert.equal((await store.readScope('global')).sessionView, undefined);
     assert.deepEqual(restartCalls, []); // reloads are off in this test
+  });
+});
+
+test('the footer shows the view loaded from config at startup, the effective value not the global one', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const store = new ConfigStore(dir, configGlobalDir);
+    await store.set('global', 'sessionView', 'compact');
+    await store.set('local', 'sessionView', 'full'); // the project's own value wins
+    // cli.ts resolves the merged value at every launch and passes it in; this is that value.
+    const { lastFrame } = await setup({ dir, projectRoot: dir, configGlobalDir, sessionView: 'full' });
+    assert.match(lastFrame() ?? '', /view: full \| Think: /);
+  });
+});
+
+test('the footer follows a /set-sessionview change, and ignores a global change the project overrides', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    // Reloads are off in this harness, so nothing repaints and the footer is the only thing that
+    // can report the new setting - exactly the case where a stale label would mislead.
+    const { stdin, frames, lastFrame } = await setup({ dir, projectRoot: dir, configGlobalDir });
+    assert.match(lastFrame() ?? '', /view: compact \| Think: /);
+
+    await openViewPicker(stdin, frames, '/set-local-sessionview');
+    stdin.write(DOWN); // default (global) -> compact
+    await tick(100);
+    stdin.write(DOWN); // -> full
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => (lastFrame() ?? '').includes('view: full'));
+
+    // Now set the GLOBAL value to compact: the project's `full` still wins, so the footer must
+    // keep saying full. The displayed value is re-resolved from the merged config for this reason.
+    await openViewPicker(stdin, frames, '/set-global-sessionview');
+    stdin.write(ENTER); // the global list has no `default` row, so it opens on compact already
+    await waitFor(() => anyFrameIncludes(frames, 'Session view set to compact (global).'));
+    assert.ok(anyFrameIncludes(frames, 'This project has its own value (full), which still wins here.'));
+    assert.match(lastFrame() ?? '', /view: full \| Think: /);
   });
 });
 
@@ -2232,6 +2447,101 @@ test('the configured view decides how a resumed session is repainted: full shows
   });
 });
 
+test('a turn keeps its thinking on screen after it ends, in the configured view', async () => {
+  await withTempDir(async (dir) => {
+    // Reported 2026-10-09: "/set-sessionview full displaying all the thinking - please fix it".
+    // Thinking used to live only in the transient live region, so it vanished the moment a turn
+    // ended; the end-of-turn reload's repaint was the only thing that brought it back, and that
+    // reload is skipped whenever a draft is left in the input box, something is queued, the turn
+    // failed, or O4C_NO_RELOAD=1. Reloads are off in this harness, which is exactly that case.
+    const long = 'HEAD ' + 'z'.repeat(4000) + ' TAIL';
+    const thinker: LLMProvider = {
+      name: 'thinker',
+      // Both halves matter and the real local provider does both: reasoning streams as `think`
+      // deltas for the live region, and comes back inside <think>...</think> in the content,
+      // which is what makes loop.ts emit a think event at all (local.ts reassembles it so).
+      async complete(request: CompletionRequest): Promise<CompletionResponse> {
+        request.onToken?.(long, 'think');
+        request.onToken?.('the final answer', 'text');
+        return { content: '<think>' + long + '</think>the final answer', toolCalls: [], stopReason: 'end_turn' };
+      },
+    };
+
+    const compact = await setup({ dir, provider: thinker, sessionView: 'compact' });
+    await submit(compact.stdin, 'think about it');
+    await waitFor(() => (compact.lastFrame() ?? '').includes('the final answer'));
+    const compactFrame = compact.lastFrame() ?? '';
+    assert.match(compactFrame, /\[think\] HEAD/, 'the thinking survives the end of the turn');
+    assert.equal(compactFrame.includes('TAIL'), false, 'compact clips it to a preview');
+
+    const full = await setup({ dir, provider: thinker, sessionView: 'full' });
+    await submit(full.stdin, 'think about it');
+    await waitFor(() => (full.lastFrame() ?? '').includes('the final answer'));
+    const fullFrame = full.lastFrame() ?? '';
+    assert.match(fullFrame, /\[think\] HEAD/);
+    assert.ok(fullFrame.includes('TAIL'), 'full keeps the whole think, which is what full means');
+  });
+});
+
+test('full view streams reasoning into scrollback as it arrives, and never prints it twice', async () => {
+  await withTempDir(async (dir) => {
+    // Reported 2026-10-09 with screenshots: with view=full a long think "goes back to compact
+    // mode" mid-turn. Cause: streamed output only ever lived in textWindow's live region, which
+    // is head-trimmed to fit the frame (trimLiveToCap/trimLiveToRows) - so a turn's own output
+    // scrolled out of that window and was dropped, never reaching scrollback where it could be
+    // scrolled back to. full now commits each finished line as it arrives; the risk that creates
+    // is the end-of-turn commit printing the same think and answer a second time underneath.
+    const streamer: LLMProvider = {
+      name: 'streamer',
+      async complete(request: CompletionRequest): Promise<CompletionResponse> {
+        request.onToken?.(THINK_HEAD_MARK, 'think');
+        request.onToken?.(THINK_TAIL_MARK, 'think');
+        request.onToken?.(ANSWER_MARK, 'text');
+        return {
+          content: '<think>' + THINK_HEAD_MARK + THINK_TAIL_MARK + '</think>' + ANSWER_MARK,
+          toolCalls: [],
+          stopReason: 'end_turn',
+        };
+      },
+    };
+
+    const full = await setup({ dir, provider: streamer, sessionView: 'full' });
+    await submit(full.stdin, 'think about it');
+    await waitFor(() => anyFrameIncludes(full.frames, 'ANSWERMARK'));
+    // Settle: the end-of-turn commit is what would duplicate, and it lands after the answer.
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.ok(anyFrameIncludes(full.frames, 'HEADMARK'), 'the start of the reasoning reached the screen');
+    assert.ok(anyFrameIncludes(full.frames, 'TAILMARK'), 'so did the end of it');
+    // A duplicate would show up as the same marker twice inside one rendered screen, which is
+    // what the end-of-turn commit printing an already-streamed block looks like.
+    const screen = full.frames.at(-1) ?? '';
+    const occurrences = (text: string): number => screen.split(text).length - 1;
+    assert.equal(occurrences('HEADMARK'), 1, 'the reasoning is committed once, not re-printed when the turn ends');
+    assert.equal(occurrences('TAILMARK'), 1, 'the end of the reasoning is there exactly once too');
+    assert.equal(occurrences('ANSWERMARK'), 1, 'and so is the answer');
+  });
+});
+
+test('full view does not collapse a live turn the way compact does - full means full', async () => {
+  await withTempDir(async (dir) => {
+    // Reported 2026-10-09 ("full means full, not compacted even after reload"): the repaint had
+    // always honoured full, but the live turn truncated every line and collapsed tool events past
+    // the cap no matter what the setting said, so a full session still looked compacted while it
+    // was running - and the end-of-turn reload then repainted it in full, which is a confusing
+    // pair of behaviours for one setting.
+    const compact = await setup({ dir, provider: new ManyToolCallsProvider(15), sessionView: 'compact' });
+    await submit(compact.stdin, 'explore the codebase');
+    await waitFor(() => anyFrameIncludes(compact.frames, 'done scanning'));
+    assert.ok(anyFrameIncludes(compact.frames, '[scan] '), 'compact still collapses past the cap');
+
+    const full = await setup({ dir, provider: new ManyToolCallsProvider(15), sessionView: 'full' });
+    await submit(full.stdin, 'explore the codebase');
+    await waitFor(() => anyFrameIncludes(full.frames, 'done scanning'));
+    assert.equal(anyFrameIncludes(full.frames, '[scan] '), false, 'full shows every tool event');
+  });
+});
+
 test('choosing /set-sessionview from the dropdown opens its picklist straight away instead of prefilling', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, lastFrame } = await setup({ dir, projectRoot: dir, configGlobalDir: join(dir, 'fake-global') });
@@ -2240,8 +2550,9 @@ test('choosing /set-sessionview from the dropdown opens its picklist straight aw
     await waitFor(() => (lastFrame() ?? '').includes('/set commands'));
     await tick(150); // the palette unmounts and the dropdown's key handler takes over input
 
-    // Row 0 is the inert /set itself and the rest are alphabetical, so /set-sessionview is last.
-    for (let i = 0; i < 7; i++) {
+    // Row 0 is the inert /set itself and the rest are alphabetical, so /set-sessionview is the
+    // tenth row: the three -global-*, the three -local-*, -sessionname, -sessionsToSave, then it.
+    for (let i = 0; i < 9; i++) {
       stdin.write(DOWN);
       await tick(100);
     }

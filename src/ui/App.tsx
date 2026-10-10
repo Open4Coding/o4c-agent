@@ -10,7 +10,7 @@ import { ServerDownPicker, SERVER_POLL_MS, type ServerDownChoice, type ServerWai
 import { ServerUnavailableError } from '../providers/types.js';
 import type { ServerProbe, ServerStatus } from '../providers/local.js';
 import { CommandFamilyPicker } from './CommandFamilyPicker.js';
-import { ThinkPicker } from './ThinkPicker.js';
+import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice } from './ThinkPicker.js';
 
 /** `config.json` key holding the chosen thinking level per model id - `/think`'s choice is about
  * how one particular model behaves, so Qwen3 and Claude keep separate values and neither is
@@ -34,12 +34,25 @@ import { formatError } from './formatError.js';
 import { formatConfirmMessage } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
 import { formatMessage } from './formatMessage.js';
-import { MAX_VISIBLE_TOOL_EVENTS_PER_TURN, formatEntries, parseSessionView, type SessionView } from './formatEntries.js';
+import {
+  MAX_VISIBLE_TOOL_EVENTS_PER_TURN,
+  formatEntries,
+  parseSessionView,
+  thinkLineText,
+  type SessionView,
+} from './formatEntries.js';
 import { renderKeyboardCommandsHelp } from './keyboardCommandsHelp.js';
 import { parseOsArg } from './osKeyboardNotes.js';
 import { detectCurrentOs, type OsKey } from './platform.js';
-import type { Line } from './types.js';
-import { initialTextWindow, makeBlock, shouldFlushDelta, textWindowReducer, type TextBlock } from './textWindow.js';
+import type { Line, LineKind } from './types.js';
+import {
+  initialTextWindow,
+  makeBlock,
+  shouldFlushDelta,
+  splitStreamLines,
+  textWindowReducer,
+  type TextBlock,
+} from './textWindow.js';
 import {
   expandedInputBoxCapRows,
   inputBoxCapRows,
@@ -62,7 +75,7 @@ import {
 import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
-import { ConfigStore, type ConfigScope } from '../session/configStore.js';
+import { ConfigStore, scopeOwningEntry, type ConfigScope } from '../session/configStore.js';
 import type { UsageStore } from '../session/usageStore.js';
 import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } from './highlightColor.js';
 import { buildSplashText } from './splash.js';
@@ -242,7 +255,6 @@ function StatusBar({
   liveText,
   mode,
   busy,
-  thinkLevel,
 }: {
   loop: AgentLoop;
   contextWindow?: number;
@@ -262,10 +274,6 @@ function StatusBar({
   /** A turn is running: the clock ticks every second and shows seconds. At idle it ticks once a
    * minute and shows minutes only, so an untouched screen is not repainted every second. */
   busy: boolean;
-  /** The level that will actually take effect, which on a model missing a control can be weaker
-   * than the one chosen (`thinkLevel.ts`'s `effectiveThinkLevel()`). Shown so this line never
-   * claims a setting the request did not really make. */
-  thinkLevel: ThinkLevel;
 }) {
   const [, tick] = useState(0);
   const startRef = useRef(Date.now());
@@ -283,14 +291,12 @@ function StatusBar({
   return (
     <Text>
       <Text color={modeInfo(mode).color}>
-        Mode: {modeInfo(mode).label} (/mode or Tab to change)
+        Mode: {modeInfo(mode).label} (/mode or Tab)
       </Text>
       {/* The key hints sit directly after the mode they qualify rather than on a line of their
           own at the foot of the footer, and the model name moved down to the dir line: it
           changes once a session, where everything left on this line moves constantly. */}
       <Text color={theme.border}> Esc stop · type to queue</Text>
-      <Text color={theme.border}> | </Text>
-      <Text color={theme.accent}>Think: {THINK_LEVEL_INFO[thinkLevel].label}</Text>
       <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>
         {formatTokenCount(tokens)}
@@ -334,7 +340,27 @@ function StatusBar({
  * same reason: `AgentLoop` mutates its usage counters outside React's state flow, so lifting
  * them into state would show stale numbers.
  */
-function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; busy: boolean }) {
+function UsageBar({
+  loop,
+  usage,
+  busy,
+  sessionView,
+  thinkLevel,
+}: {
+  loop: AgentLoop;
+  usage?: UsageStore;
+  busy: boolean;
+  /** How much of a session a reload or `/resume` repaints (`/set-sessionview`). Shown because it
+   * is otherwise invisible until the next repaint, by which time the screen it produced is the
+   * only evidence of what the setting was - and `compact` silently hides think blocks, which is
+   * exactly the thing a user then goes looking for. The effective (merged-scope) value, so a
+   * project-local setting is displayed rather than the global one it overrides. */
+  sessionView: SessionView;
+  /** The level that will actually take effect, which on a model missing a control can be weaker
+   * than the one chosen (`thinkLevel.ts`'s `effectiveThinkLevel()`). Shown so this line never
+   * claims a setting the request did not really make. */
+  thinkLevel: ThinkLevel;
+}) {
   const [, tick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => tick((t) => t + 1), elapsedTickMs(busy));
@@ -361,7 +387,16 @@ function UsageBar({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; 
 
   return (
     <Text>
-      {/* Flush left, like every other footer line. */}
+      {/* Flush left, like every other footer line.
+
+          The two settings lead this line rather than trailing it, and sit here rather than on line
+          1, which was running to ~126 columns. Leading matters: the token totals below grow
+          through a session (3.8K -> 272K), so anything printed after them drifts sideways all
+          session, while at the left edge these two only move when you actually change one. */}
+      <Text color={theme.accent}>view: {sessionView}</Text>
+      <Text color={theme.border}> | </Text>
+      <Text color={theme.accent}>Think: {THINK_LEVEL_INFO[thinkLevel].label}</Text>
+      <Text color={theme.border}> | </Text>
       {totals && (
         <Text>
           <Text color={theme.border}>t-tks: </Text>
@@ -622,7 +657,7 @@ export function App({
    * the number of renders/repaints to a fixed rate regardless of the model's token rate or chunk
    * size, closing the O(n²) blowup at the source rather than just making each render cheaper.
    */
-  const deltaBufferRef = useRef<{ text: string; startNewLine: boolean } | null>(null);
+  const deltaBufferRef = useRef<{ text: string; startNewLine: boolean; kind: 'think' | 'text' } | null>(null);
   const deltaFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // True while openResumePicker is mid-flight, so a second /resume can't stack another picker.
   const resumePickerOpenRef = useRef(false);
@@ -633,13 +668,71 @@ export function App({
     systemPrompt: undefined,
   });
 
+  /**
+   * `full` view only: the piece of the current stream that has arrived with no newline after it
+   * yet, so it is not a finished line and cannot be committed as one. Everything before it is
+   * already permanent scrollback - this is the only streamed text the live region still holds.
+   */
+  const streamTailRef = useRef('');
+
+  /** Which kinds of streamed text this turn has already committed to scrollback as it arrived
+   * (`full` view). What it is for: the end-of-turn commit must not print the think block or the
+   * final answer a second time under the copy that already streamed into place. Reset per turn. */
+  const streamCommittedRef = useRef<{ think: boolean; text: boolean }>({ think: false, text: false });
+
+  /**
+   * `full` view's progressive commit: streamed text goes into the terminal's permanent scrollback
+   * as it arrives, one finished line at a time, instead of into the rolling live region.
+   *
+   * This is the fix for the reported bug. The live region is bounded (`textWindow.ts`'s
+   * `trimLiveToCap`/`trimLiveToRows`) because an Ink frame that reaches the viewport height
+   * corrupts the display - so while a turn ran, its own output scrolled out of that window and
+   * was simply dropped: not in scrollback, not scrollable, gone, and only a summary reached the
+   * screen when the turn ended. On a long think the screen therefore "went compact" mid-turn no
+   * matter what /set-sessionview said. Committing each finished line to `<Static>` makes it real
+   * terminal history the moment it is complete, so nothing a turn prints can be lost again and
+   * the live region only ever holds one unfinished line.
+   */
+  const commitStreamText = (text: string, kind: 'think' | 'text'): void => {
+    // `kind` is what the provider said this chunk was, so reasoning keeps the dim system styling
+    // and the answer keeps the accent - the same colours the end-of-turn commit gave them.
+    const lineKind: LineKind = kind === 'think' ? 'system' : 'final';
+    const { lines, tail } = splitStreamLines(streamTailRef.current + text);
+    streamTailRef.current = tail;
+    if (lines.length > 0) {
+      dispatchTextWindow({ type: 'commit', lines: lines.map((t) => ({ kind: lineKind, text: t })), flow: true });
+    }
+    dispatchTextWindow({ type: 'setLiveTail', text: tail });
+  };
+
+  /** Commits whatever partial line is left, at the end of a stream segment (the kind changing, a
+   * tool call interrupting, the turn ending) so the tail is never the thing that gets dropped. */
+  const flushStreamTail = (kind: 'think' | 'text' | null): void => {
+    const pending = streamTailRef.current;
+    streamTailRef.current = '';
+    if (pending !== '') {
+      dispatchTextWindow({
+        type: 'commit',
+        lines: [{ kind: kind === 'text' ? 'final' : 'system', text: pending }],
+        flow: true,
+      });
+    }
+    dispatchTextWindow({ type: 'setLiveTail', text: '' });
+  };
+
   // Dispatches whatever's buffered, if anything - the only place `appendDelta` actually gets
   // sent. `dispatchTextWindow` itself is stable (useReducer's own guarantee), so this needs no
   // dependency array/useCallback to stay correct across renders.
   const flushDeltaBuffer = () => {
     const pending = deltaBufferRef.current;
     deltaBufferRef.current = null;
-    if (pending) dispatchTextWindow({ type: 'appendDelta', text: pending.text, startNewLine: pending.startNewLine });
+    if (!pending) return;
+    if (sessionViewRef.current === 'full') {
+      streamCommittedRef.current[pending.kind] = true;
+      commitStreamText(pending.text, pending.kind);
+      return;
+    }
+    dispatchTextWindow({ type: 'appendDelta', text: pending.text, startNewLine: pending.startNewLine });
   };
 
   // Bumped only by handleForceRecover (Ctrl+C) - lets a processTurn invocation that's still
@@ -670,6 +763,11 @@ export function App({
   // `/think`'s level. Seeded from the default (unrestricted, i.e. exactly what the server did
   // before this command existed) and replaced by the per-model value from config once it loads,
   // so a first paint never shows a level the next turn would not actually use.
+  // What the footer reports for `/set-sessionview`. Seeded with the value cli.ts resolved from
+  // config at launch (so it is right from the first frame, with no read on mount), and updated
+  // when a `/set-sessionview` actually changes the *effective* value. Separate from the
+  // `sessionView` prop, which stays the value the current screen was painted with.
+  const [shownSessionView, setShownSessionView] = useState<SessionView>(parseSessionView(sessionView));
   const [thinkLevel, setThinkLevel] = useState<ThinkLevel>(DEFAULT_THINK_LEVEL);
   // What this model's chat template honours, from the startup probe. Defaults are assumed until
   // the probe answers; `effectiveThinkLevel` is what reconciles the two for display.
@@ -698,6 +796,14 @@ export function App({
   // message started while the box sat open.
   const stopTargetRef = useRef<AbortController | null>(null);
   // Same pending-Promise-resolver pattern again, for the /set-*sessionview picklist.
+  // `/set-think`'s picker. Separate from `thinkPicker` above because it edits a config tier for
+  // future sessions rather than this session's live level, and so resolves a different choice type.
+  const [thinkScopePicker, setThinkScopePicker] = useState<{
+    scope: ThinkScope;
+    storedLevel: ThinkLevel | undefined;
+    globalLevel: ThinkLevel | undefined;
+    resolve: (c: ThinkScopeChoice | undefined) => void;
+  } | null>(null);
   const [viewPicker, setViewPicker] = useState<{
     scope: ConfigScope;
     currentValue: SessionView;
@@ -764,6 +870,9 @@ export function App({
   // should still apply to it, exactly as modeRef/plansDirRef do for their own settings.
   const thinkLevelRef = useRef(thinkLevel);
   thinkLevelRef.current = thinkLevel;
+  // Read inside a running turn's event handler, which is outside the render that owns the state.
+  const sessionViewRef = useRef(shownSessionView);
+  sessionViewRef.current = shownSessionView;
   // What the status bar shows: the level that will really take effect, which on a model missing
   // a control can be weaker than the one chosen.
   const shownThinkLevel = effectiveThinkLevel(thinkLevel, thinkCaps ?? DEFAULT_THINK_CAPS);
@@ -1029,11 +1138,21 @@ export function App({
           pushBlock([{ kind: 'system', text: `Thinking level set to ${THINK_LEVEL_INFO[chosen].label}.${note}` }]);
           // Persisted per model, best-effort: the level is already live either way, and failing a
           // turn over a preference write would be the wrong trade.
+          //
+          // Written to the scope the *merged* read will actually return (`scopeOwningEntry`), not
+          // always to global. This used to write global unconditionally, which made the setting
+          // look broken from the user's side: copy-on-trust seeds a trusted project's local
+          // `config.json` as a snapshot of global, that snapshot's level then won every
+          // `configStore.get()`, and so the end-of-turn reload restored the snapshot instead of
+          // the chosen level - reported 2026-10-09 as "it resets to xhigh when it finishes a
+          // thought". Also merges into that one file's own map rather than the resolved view, so a
+          // save can no longer copy another scope's entries into this one.
           void (async () => {
             try {
-              const saved = (await configStore.get(THINK_LEVEL_CONFIG_KEY)) as Record<string, unknown> | undefined;
-              const next = { ...(saved && typeof saved === 'object' ? saved : {}), [model]: chosen };
-              await configStore.set('global', THINK_LEVEL_CONFIG_KEY, next);
+              const scope = await scopeOwningEntry(configStore, THINK_LEVEL_CONFIG_KEY, model);
+              const own = (await configStore.readScope(scope))[THINK_LEVEL_CONFIG_KEY];
+              const next = { ...(own && typeof own === 'object' ? own : {}), [model]: chosen };
+              await configStore.set(scope, THINK_LEVEL_CONFIG_KEY, next);
             } catch {
               // Keep the in-session level; it simply will not survive a restart.
             }
@@ -1105,6 +1224,73 @@ export function App({
           }
         }
       } else if (
+        commandName(input) === '/set-think' ||
+        commandName(input) === '/set-local-think' ||
+        commandName(input) === '/set-global-think'
+      ) {
+        // The stored level new sessions start at, as opposed to `/think`, which changes this one.
+        // Deliberately does NOT touch the running session or reload it: a reload mid-session is
+        // justified for `/set-sessionview` (it repaints the screen the setting describes) but here
+        // it would throw away a live session to apply a setting that is about the next one.
+        pushBlock([{ kind: 'user', text: `> ${input}` }]);
+        const name = commandName(input);
+        const scope: ConfigScope = name === '/set-global-think' ? 'global' : 'local';
+        if (scope === 'local' && !configStore.hasScope('local')) {
+          pushBlock([
+            {
+              kind: 'error',
+              text: 'No trusted project in this directory - nothing to set a local value into. Trust this project first, or use /set-global-think instead.',
+            },
+          ]);
+        } else {
+          try {
+            const levelsIn = async (s: ConfigScope): Promise<Record<string, unknown>> => {
+              const raw = (await configStore.readScope(s))[THINK_LEVEL_CONFIG_KEY];
+              return raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+            };
+            // Per model, like `/think`: the setting is about how one model behaves, so a project
+            // pinned to `low` for Qwen3 says nothing about Claude.
+            const storedRaw = (await levelsIn(scope))[model];
+            const globalRaw = (await levelsIn('global'))[model];
+            const storedLevel = typeof storedRaw === 'string' ? parseThinkLevel(storedRaw) : undefined;
+            const globalLevel = typeof globalRaw === 'string' ? parseThinkLevel(globalRaw) : undefined;
+            const chosen = await new Promise<ThinkScopeChoice | undefined>((resolve) => {
+              setThinkScopePicker({ scope, storedLevel, globalLevel, resolve });
+            });
+            if (!chosen) {
+              pushBlock([{ kind: 'system', text: 'Thinking level for new sessions unchanged.' }]);
+            } else {
+              const levels = await levelsIn(scope);
+              if (chosen === 'default') delete levels[model];
+              else levels[model] = chosen;
+              await configStore.set(scope, THINK_LEVEL_CONFIG_KEY, levels);
+              const follows =
+                scope === 'local'
+                  ? `this machine's choice (currently ${THINK_LEVEL_INFO[globalLevel ?? DEFAULT_THINK_LEVEL].label})`
+                  : `o4c's built-in default (${THINK_LEVEL_INFO[DEFAULT_THINK_LEVEL].label})`;
+              const what =
+                chosen === 'default'
+                  ? `Stored thinking level cleared (${scope}); new sessions follow ${follows}.`
+                  : `Thinking level for new sessions set to ${THINK_LEVEL_INFO[chosen].label} (${scope}).`;
+              // Said every time, because the one thing a user will check is the footer, and the
+              // footer is not going to move.
+              const note =
+                scope === 'global' && configStore.hasScope('local') && (await levelsIn('local'))[model] !== undefined
+                  ? ' This project has its own value, which still wins here.'
+                  : '';
+              pushBlock([
+                {
+                  kind: 'system',
+                  text: `${what}${note} This session stays on ${THINK_LEVEL_INFO[thinkLevelRef.current].label} - use /think to change it now.`,
+                },
+              ]);
+              void runLogger.log({ type: 'system', sub_type: 'info', command: name, level: chosen, scope });
+            }
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
+        }
+      } else if (
         commandName(input) === '/set-sessionview' ||
         commandName(input) === '/set-local-sessionview' ||
         commandName(input) === '/set-global-sessionview'
@@ -1143,6 +1329,10 @@ export function App({
             } else {
               const value: SessionView = chosen === 'default' ? globalValue : chosen;
               await configStore.set(scope, 'sessionView', value);
+              // Re-resolved rather than assumed to be `value`: setting the global value changes
+              // nothing here when this project has its own (the note below says exactly that), and
+              // the footer has to show whichever one wins.
+              setShownSessionView(parseSessionView(await configStore.get('sessionView')));
               let note = '';
               if (scope === 'global' && configStore.hasScope('local')) {
                 const localRaw = (await configStore.readScope('local')).sessionView;
@@ -1270,6 +1460,8 @@ export function App({
         let turnSaved = false;
         turnHadThinkRef.current = false;
         lastDeltaKindRef.current = null;
+        streamTailRef.current = '';
+        streamCommittedRef.current = { think: false, text: false };
         // Defensive - the finally block below always flushes and clears these at the end of every
         // turn, but starting clean here too means a stray leftover timer/buffer can never bleed a
         // late dispatch into a turn that didn't produce it.
@@ -1355,7 +1547,12 @@ export function App({
                   // own line, then starts a fresh buffer carrying this delta's own startNewLine.
                   if (kindChanged || !deltaBufferRef.current) {
                     flushDeltaBuffer();
-                    deltaBufferRef.current = { text, startNewLine: kindChanged };
+                    // In `full` the flushed-out kind's own unfinished line is committed too, so the
+                    // new kind starts on a line of its own rather than being appended to it.
+                    if (kindChanged && sessionViewRef.current === 'full') {
+                      flushStreamTail(kind === 'think' ? 'text' : 'think');
+                    }
+                    deltaBufferRef.current = { text, startNewLine: kindChanged, kind };
                   } else {
                     deltaBufferRef.current.text += text;
                   }
@@ -1398,7 +1595,10 @@ export function App({
                 setIsInThinkBlock(event.type === 'tool_result');
               }
 
-              if (isToolEvent && toolEventCount > MAX_VISIBLE_TOOL_EVENTS_PER_TURN) {
+              // Full view shows every tool event, exactly as the repaint does - the collapse is a
+              // compact-view economy, and applying it here regardless of the setting was half of
+              // why `full` did not look full while a turn was running.
+              if (isToolEvent && sessionViewRef.current !== 'full' && toolEventCount > MAX_VISIBLE_TOOL_EVENTS_PER_TURN) {
                 const collapsed = toolEventCount - MAX_VISIBLE_TOOL_EVENTS_PER_TURN;
                 const text = `[scan] ${collapsed} more tool call${collapsed === 1 ? '' : 's'} collapsed - full detail in ${runLogger.getFilePath() ?? 'the run log'}.`;
                 if (summaryLine) {
@@ -1411,17 +1611,61 @@ export function App({
                 return;
               }
 
+              // `full` commits everything as it happens, so a tool line has to be committed here,
+              // in the order it occurred - the end-of-turn commit the compact view uses would put
+              // every tool line *after* the reasoning and answer that have already been written to
+              // scrollback above it. The unfinished stream line is committed first for the same
+              // reason, and the delta kind is reset so the next round's reasoning starts a fresh
+              // "[think]" line instead of running on from the previous round's.
+              if ((event.type === 'tool_call' || event.type === 'tool_result') && sessionViewRef.current === 'full') {
+                const text = formatEvent(event, 'full');
+                if (!text) return;
+                flushStreamTail(lastDeltaKindRef.current);
+                lastDeltaKindRef.current = null;
+                dispatchTextWindow({ type: 'commit', lines: [{ kind: event.type, text }] });
+                return;
+              }
+
               // Already shown live via 'delta' events as they streamed in - re-appending the full,
               // final text here would duplicate it. Only skipped when `streamed` is actually true
               // though - a provider without onToken support (no real one lacks it, but a test
               // fake or a future one might) never emitted any 'delta' for this call, so this event
               // is the only place its content ever reaches the screen. The final answer is still
               // committed to scrollback separately below, exactly once ('think' entries never were).
-              if (event.type === 'think') turnHadThinkRef.current = true;
+              if (event.type === 'think') {
+                turnHadThinkRef.current = true;
+                // Committed to scrollback in the configured view, exactly as the final answer is
+                // below. Until 2026-10-09 thinking was the one thing that lived only in the
+                // transient live region: on screen while the model reasoned, gone the instant the
+                // turn ended, with the end-of-turn reload's repaint the only way back. So every
+                // turn that skipped that reload - a draft left in the input box, something queued,
+                // a failed turn, O4C_NO_RELOAD=1 - silently lost its reasoning from the screen no
+                // matter what /set-sessionview said, which is how this was reported.
+                // Not in `full` once the reasoning actually streamed: it was committed line by
+                // line as it arrived (commitStreamText), so pushing the whole block again here
+                // would print the entire think a second time under it.
+                if (event.text && !(sessionViewRef.current === 'full' && event.streamed && streamCommittedRef.current.think)) {
+                  responseLines.push({ kind: 'system', text: thinkLineText(event.text, sessionViewRef.current) });
+                }
+              }
               if ((event.type === 'think' || event.type === 'text') && event.streamed) return;
 
-              const text = formatEvent(event);
+              const text = formatEvent(event, sessionViewRef.current);
               if (!text) return;
+              // Same ordering rule as the tool lines above: in `full` these are committed where
+              // they happened rather than collected for the end of the turn.
+              if (
+                sessionViewRef.current === 'full' &&
+                (event.type === 'compaction' || event.type === 'prune' || event.type === 'warning')
+              ) {
+                flushStreamTail(lastDeltaKindRef.current);
+                lastDeltaKindRef.current = null;
+                dispatchTextWindow({
+                  type: 'commit',
+                  lines: [{ kind: event.type === 'warning' ? 'error' : 'system', text }],
+                });
+                return;
+              }
               dispatchTextWindow({ type: 'appendLive', text });
               if (event.type === 'tool_call' || event.type === 'tool_result') {
                 responseLines.push({ kind: event.type, text });
@@ -1438,7 +1682,11 @@ export function App({
               }
             },
           });
-          if (finalAnswer) responseLines.push({ kind: 'final', text: finalAnswer });
+          // Skipped in `full` when the answer streamed: every line of it is already in scrollback,
+          // committed as it arrived, so this would be a second copy of the whole thing.
+          if (finalAnswer && !(sessionViewRef.current === 'full' && streamCommittedRef.current.text)) {
+            responseLines.push({ kind: 'final', text: finalAnswer });
+          }
         } catch (err) {
           turnFailed = true;
           if (err instanceof AbortedError) {
@@ -1481,6 +1729,10 @@ export function App({
           }
           deltaBufferRef.current = null;
           if (!stale) {
+            // The last line of a stream rarely ends in a newline, so without this the final
+            // sentence of the answer (or of the reasoning, on a cancelled turn) would be the one
+            // thing still sitting in the live region when it is cleared below.
+            if (sessionViewRef.current === 'full') flushStreamTail(lastDeltaKindRef.current);
             if (responseLines.length > 0) pushBlock(responseLines);
             dispatchTextWindow({ type: 'clearLive' });
             setIsThinking(false);
@@ -1587,6 +1839,18 @@ export function App({
     thinkPicker?.resolve(undefined);
     setThinkPicker(null);
   }, [thinkPicker]);
+
+  const handleThinkScopeSelect = useCallback(
+    (choice: ThinkScopeChoice) => {
+      thinkScopePicker?.resolve(choice);
+      setThinkScopePicker(null);
+    },
+    [thinkScopePicker],
+  );
+  const handleThinkScopeCancel = useCallback(() => {
+    thinkScopePicker?.resolve(undefined);
+    setThinkScopePicker(null);
+  }, [thinkScopePicker]);
 
   const handleViewPickerSelect = useCallback(
     (choice: SessionViewChoice) => {
@@ -1892,6 +2156,7 @@ export function App({
     !resumePicker &&
     !modePicker &&
     !viewPicker &&
+    !thinkScopePicker &&
     !stopConfirm &&
     !serverWait &&
     familyMatches.length > 0;
@@ -1931,6 +2196,7 @@ export function App({
     !resumePicker &&
     !modePicker &&
     !viewPicker &&
+    !thinkScopePicker &&
     !stopConfirm &&
     !serverWait &&
     !familyOpen &&
@@ -1940,12 +2206,15 @@ export function App({
     <Box flexDirection="column">
       <Static items={textWindow.blocks as TextBlock[]}>
         {(block) => (
-          <Box key={block.id} flexDirection="column" marginBottom={1}>
+          /* A flow block is one chunk of a stream that is still being written (full view), so it
+             gets neither the trailing blank row nor the labelled-line gaps - both would break a
+             single think block or answer into visually separate pieces as it arrives. */
+          <Box key={block.id} flexDirection="column" marginBottom={block.flow ? 0 : 1}>
             {block.lines.map((line, i) => (
               <React.Fragment key={i}>
                 {/* A blank row before a labelled line ([think], [tool], ...) so it does not sit directly
                     under the line above - see lineSpacing.ts. */}
-                {i > 0 && needsGapBefore(block.lines[i - 1], line) && <Text> </Text>}
+                {!block.flow && i > 0 && needsGapBefore(block.lines[i - 1], line) && <Text> </Text>}
                 <LineText line={line} />
                 {/* A blank row after every tool_call/tool_result line, per direct instruction -
                     otherwise a turn with several tool calls renders as one dense, hard-to-scan
@@ -1967,7 +2236,7 @@ export function App({
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !viewPicker}
+        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker}
         suppressNav={paletteOpen || familyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
@@ -1984,8 +2253,8 @@ export function App({
           the session (model, branch, directory). Front-end plan item #8 put context
           max/current/%used on the Mode line; the hint line that used to sit last is now folded
           into it. */}
-      <StatusBar loop={loop} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} thinkLevel={shownThinkLevel} />
-      <UsageBar loop={loop} usage={usageStore} busy={isProcessing} />
+      <StatusBar loop={loop} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
+      <UsageBar loop={loop} usage={usageStore} busy={isProcessing} sessionView={shownSessionView} thinkLevel={shownThinkLevel} />
       <ProjectBar model={model} branch={gitBranch} project={projectLabelText} />
       {confirmDialog ? (
         <ConfirmDialog
@@ -2030,6 +2299,16 @@ export function App({
           caps={thinkCaps ?? DEFAULT_THINK_CAPS}
           onSelect={handleThinkPickerSelect}
           onCancel={handleThinkPickerCancel}
+          highlightColor={highlightColor}
+        />
+      ) : thinkScopePicker ? (
+        <ThinkScopePicker
+          scope={thinkScopePicker.scope}
+          storedLevel={thinkScopePicker.storedLevel}
+          globalLevel={thinkScopePicker.globalLevel}
+          caps={thinkCaps ?? DEFAULT_THINK_CAPS}
+          onSelect={handleThinkScopeSelect}
+          onCancel={handleThinkScopeCancel}
           highlightColor={highlightColor}
         />
       ) : viewPicker ? (

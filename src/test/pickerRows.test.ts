@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { COMMANDS } from '../ui/slashCommand.js';
 import { MODES } from '../ui/modePolicy.js';
 import { sessionViewRows } from '../ui/SessionViewPicker.js';
+import { thinkScopeRows } from '../ui/ThinkPicker.js';
 import { CONTINUATION_INDENT, LIST_CHROME_WIDTH, MARKER_WIDTH, wrapRow } from '../ui/SelectList.js';
 
 // The rule for every dropdown / slash-choice window (also written in CLAUDE.md): a row's description is 1-3
@@ -41,6 +42,17 @@ test('every session view row stays within 3 lines at 100 columns', () => {
   for (const scope of ['local', 'global'] as const) {
     for (const r of sessionViewRows(scope, 'compact')) {
       const row = r.label + ' — ' + r.description + ' (current)';
+      assert.ok(wrappedLines(row) <= MAX_LINES, scope + ' ' + r.choice + ' wraps to ' + wrappedLines(row) + ' lines');
+    }
+  }
+});
+
+test('every /set-think row stays within 3 lines at 100 columns', () => {
+  for (const scope of ['local', 'global'] as const) {
+    // The longest form of each row: the model-cannot-deliver note and the (current) marker can
+    // both be appended at once, and the default row names the level it falls through to.
+    for (const r of thinkScopeRows(scope, 'nothink')) {
+      const row = r.label + ' — ' + r.description + ' (this model: xhigh) (current)';
       assert.ok(wrappedLines(row) <= MAX_LINES, scope + ' ' + r.choice + ' wraps to ' + wrappedLines(row) + ' lines');
     }
   }

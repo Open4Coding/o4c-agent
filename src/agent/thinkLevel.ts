@@ -24,11 +24,21 @@ export type ThinkLevel = 'nothink' | 'low' | 'med' | 'high' | 'xhigh';
 export const THINK_LEVELS: readonly ThinkLevel[] = ['nothink', 'low', 'med', 'high', 'xhigh'];
 
 /**
- * `xhigh` maps to an unrestricted budget, which is exactly what the server already did before this
- * command existed - so defaulting here changes nothing about a run until the user asks for less.
- * A quieter default would be a silent behaviour change dressed up as a new feature.
+ * Changed from `xhigh` to `med` on 2026-10-09, by explicit decision, and it is a real behaviour
+ * change rather than a neutral one: `xhigh` was an unrestricted budget, exactly what the server
+ * did before this command existed, so until now a user who never ran `/think` saw no difference.
+ * From here, reasoning is capped at 2,048 tokens unless they ask for more.
+ *
+ * Worth it because of what the ladder measured (see `MEASURED`): on the same hard prompt, `med`
+ * finished in 107s against `xhigh`'s 376s, and reasoning was already 80% of wall clock on a real
+ * session. The cost is that a genuinely hard problem now gets a shaped think block instead of an
+ * unbounded one - `/think high` or `/think xhigh` is one command away, and the footer always says
+ * which level is live.
+ *
+ * Only a fallback: a level stored for this model (`thinkLevelByModel` in config) wins over it, so
+ * changing this moves the default for new models and fresh installs, not for a model already set.
  */
-export const DEFAULT_THINK_LEVEL: ThinkLevel = 'xhigh';
+export const DEFAULT_THINK_LEVEL: ThinkLevel = 'med';
 
 export function isThinkLevel(value: unknown): value is ThinkLevel {
   return typeof value === 'string' && (THINK_LEVELS as readonly string[]).includes(value);
@@ -74,11 +84,14 @@ export interface ThinkLevelInfo {
 }
 
 export const THINK_LEVEL_INFO: Record<ThinkLevel, ThinkLevelInfo> = {
-  nothink: { level: 'nothink', label: 'nothink', description: 'No reasoning at all - fastest, best for edits and simple questions.' },
-  low: { level: 'low', label: 'low', description: 'Brief reasoning, about 512 tokens - quick answers that still check themselves.' },
-  med: { level: 'med', label: 'med', description: 'Moderate reasoning, about 2,048 tokens - a sensible everyday middle.' },
+  // Not "fastest": measured 2026-10-09, nothink was 4.2x SLOWER than low on a hard prompt (166s
+  // vs 39s, three samples each), because the model works the problem out in the answer instead.
+  // See MEASURED. It is the quick option for edits and lookups, not for anything that needs thought.
+  nothink: { level: 'nothink', label: 'nothink', description: 'No reasoning block - quickest for edits and lookups, slow on hard problems.' },
+  low: { level: 'low', label: 'low', description: 'Brief reasoning, about 512 tokens - the fastest level on a problem that needs any.' },
+  med: { level: 'med', label: 'med', description: 'Moderate reasoning, about 2,048 tokens - the default, a sensible everyday middle.' },
   high: { level: 'high', label: 'high', description: 'Deep reasoning, about 8,192 tokens - for genuinely hard problems.' },
-  xhigh: { level: 'xhigh', label: 'xhigh', description: 'Unrestricted reasoning - the default, and the slowest.' },
+  xhigh: { level: 'xhigh', label: 'xhigh', description: 'Unrestricted reasoning, no budget at all - the slowest by a wide margin.' },
 };
 
 /**
@@ -278,9 +291,35 @@ export function anthropicThinkEffort(level: ThinkLevel): 'low' | 'medium' | 'hig
  * `thinking_budget`, `max_reasoning_tokens`, and both `chat_template_kwargs` spellings of either.
  * `thinking.budget_tokens` (Anthropic's spelling) is accepted and ignored. `reasoning_format:
  * 'none'` hides `reasoning_content` but leaks raw `<think>` into the answer.
+ *
+ * End-to-end ladder, 2026-10-09, same server, one constraint-puzzle prompt, request bodies built
+ * by `localThinkParams()` itself rather than by hand:
+ *
+ * ```
+ * level     reasoning   answer    wall     samples
+ * nothink          0   ~27,400c    166s    3   exactly zero reasoning every time
+ * low          1,420    2,663c      39s    3
+ * med          6,500   12,791c     107s    1
+ * high        27,926    1,715c     157s    1   ~6,800 of its 8,192 budget, never clipped
+ * xhigh       63,806    3,490c     376s    1
+ * ```
+ *
+ * Two things that fall out of this and are not obvious:
+ *
+ * 1. **Reasoning and answer trade against each other.** Reasoning off does not remove the work,
+ *    it relocates it into the visible answer - `nothink` wrote the LONGEST answers of any level.
+ * 2. **`nothink` is therefore not the fast option on a hard prompt: it was 4.2x SLOWER than
+ *    `low`** (166s vs 39s, three samples each). It is the fast option only where there was
+ *    nothing to reason about. The picker's wording says so because of this measurement.
+ *
+ * The budgets shape reasoning rather than truncating it - every level finished on `stop`, none on
+ * `length`, and the middle levels came in under their caps.
  */
 export const MEASURED = {
   budgetIsGraduated: true,
   zeroBudgetIsBroken: true,
   charsPerReasoningToken: 4.1,
+  /** `nothink` spends its tokens on the answer instead, so it is slower than `low` on anything
+   * that genuinely needs reasoning. Measured 166s vs 39s, three samples each. */
+  nothinkIsNotTheFastest: true,
 } as const;

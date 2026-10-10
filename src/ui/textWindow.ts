@@ -10,6 +10,11 @@ import type { Line } from './types.js';
 export interface TextBlock {
   readonly id: number;
   readonly lines: readonly Line[];
+  /** A chunk of streamed output committed mid-turn (`full` view only), rather than a whole event
+   * or turn. Rendered with no bottom margin and without the labelled-line gap rule, so the many
+   * chunks one continuous think block or answer arrives in read as the single piece of text they
+   * are instead of as a series of separate blocks. */
+  readonly flow?: boolean;
 }
 
 /**
@@ -48,8 +53,13 @@ export interface TextWindowState {
 }
 
 export type TextWindowAction =
-  | { type: 'commit'; lines: Line[] }
+  | { type: 'commit'; lines: Line[]; flow?: boolean }
   | { type: 'appendLive'; text: string }
+  /** Replaces the whole live region with the one partial line a stream has not finished yet
+   * (`full` view's progressive commit - see `commitStreamText` in App.tsx). Everything before it
+   * is already permanent scrollback, so the live region holds a single unfinished line rather
+   * than a rolling window of the turn, and nothing it drops was ever the only copy. */
+  | { type: 'setLiveTail'; text: string }
   /** Re-bounds the live region after a terminal resize. The caps are otherwise fixed at mount, so a
    * window that shrinks mid-session would let the live frame grow past the viewport. */
   | { type: 'setLiveCaps'; liveCapChars: number; liveCapRows?: number; liveCols?: number }
@@ -93,6 +103,42 @@ export function shouldFlushDelta(buffered: string, cols: number): boolean {
     if (++newlines >= DELTA_FLUSH_LINES) return true;
   }
   return false;
+}
+
+/**
+ * Hard bound on how long an unfinished streamed line may get before it is committed anyway. A
+ * model that writes a whole section as one unbroken paragraph would otherwise keep it out of
+ * scrollback until its first newline - exactly the rolling-window loss `full` view exists to end.
+ */
+export const STREAM_TAIL_CAP_CHARS = 2000;
+
+/**
+ * Splits streamed text into the finished lines that can be committed to scrollback now and the
+ * unfinished remainder that has to stay live until more arrives. A remainder past
+ * `STREAM_TAIL_CAP_CHARS` is broken at its last space (or hard, if the paragraph has no space in
+ * reach) and committed too, so no amount of newline-free output can sit uncommitted forever.
+ *
+ * Pure and exported for its own test - the caller (`commitStreamText` in App.tsx) is inside a
+ * component and would otherwise only be reachable through a full render.
+ */
+export function splitStreamLines(pending: string, cap: number = STREAM_TAIL_CAP_CHARS): { lines: string[]; tail: string } {
+  const lines: string[] = [];
+  let rest = pending;
+  for (let nl = rest.indexOf('\n'); nl !== -1; nl = rest.indexOf('\n')) {
+    lines.push(rest.slice(0, nl));
+    rest = rest.slice(nl + 1);
+  }
+  if (rest.length > cap) {
+    const space = rest.lastIndexOf(' ', cap);
+    if (space > 0) {
+      lines.push(rest.slice(0, space));
+      rest = rest.slice(space + 1);
+    } else {
+      lines.push(rest.slice(0, cap));
+      rest = rest.slice(cap);
+    }
+  }
+  return { lines, tail: rest };
 }
 
 function liveCharCount(live: readonly string[]): number {
@@ -212,9 +258,16 @@ export function textWindowReducer(state: TextWindowState, action: TextWindowActi
       if (action.lines.length === 0) return state;
       return {
         ...state,
-        blocks: [...state.blocks, { id: state.nextId, lines: action.lines }],
+        blocks: [...state.blocks, { id: state.nextId, lines: action.lines, ...(action.flow ? { flow: true } : {}) }],
         nextId: state.nextId + 1,
       };
+    }
+    case 'setLiveTail': {
+      if (action.text === '') return state.live.length === 0 && !state.deltaActive ? state : { ...state, live: [], deltaActive: false };
+      // Bounded like any other live content: one unfinished line can still be longer than the
+      // screen (a model writing a whole paragraph before its first newline), and the frame has to
+      // stay under the viewport either way.
+      return { ...state, live: boundLive([action.text], state, cap), deltaActive: false };
     }
     case 'setLiveCaps': {
       const next = { ...state, liveCapChars: action.liveCapChars, liveCapRows: action.liveCapRows, liveCols: action.liveCols };

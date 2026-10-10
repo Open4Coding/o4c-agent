@@ -125,6 +125,27 @@ export const COMMANDS: CommandInfo[] = [
     hidden: true,
     select: 'run',
   },
+  // The thinking level new sessions start at - a picklist, same local/global naming convention
+  // as the two families above. Distinct from /think, which changes the running session and leaves
+  // these alone.
+  {
+    name: '/set-think',
+    description: "Pick the thinking level new sessions start at for this project (doesn't change this one).",
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/set-local-think',
+    description: 'Same as /set-think - explicit alias for the same project-shared tier.',
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/set-global-think',
+    description: "Pick the thinking level new sessions start at on this machine (doesn't change this one).",
+    hidden: true,
+    select: 'run',
+  },
   {
     name: '/config',
     select: 'none',

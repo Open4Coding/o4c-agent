@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { formatEvent } from '../ui/formatEvent.js';
+import type { AgentEvent } from '../agent/loop.js';
 import {
   aiResponseEntry,
   aiThinkEntry,
@@ -149,4 +151,31 @@ test('compact is the default and is unchanged by the new option', () => {
   const entries = [userInputEntry('q'), aiThinkEntry('z'.repeat(9000)), aiResponseEntry('end')];
   assert.deepEqual(formatEntries(entries), formatEntries(entries, 'the run log', { view: 'compact' }));
   assert.ok(formatEntries(entries)[1].text.length < THINK_PREVIEW_CHARS + 20);
+});
+
+test('full view shows an event whole where compact shows a preview', () => {
+  // The live turn passes the session view through since 2026-10-09; before that every line was
+  // cut to a preview even with /set-sessionview full, while the repaint showed it whole.
+  const long = 'x'.repeat(5000) + 'TAIL';
+  const result: AgentEvent = { type: 'tool_result', toolOutput: long };
+
+  const compact = formatEvent(result) ?? '';
+  assert.ok(compact.length < 400, 'compact is a preview: ' + compact.length);
+  assert.equal(compact.includes('TAIL'), false);
+
+  const full = formatEvent(result, 'full') ?? '';
+  assert.ok(full.includes('TAIL'), 'full keeps the end of the output');
+  assert.equal(full, '[result] ' + long);
+
+  // A tool call's arguments carry whole files, so they are the other half of the same problem.
+  const call: AgentEvent = { type: 'tool_call', toolName: 'write_file', toolInput: { text: long } };
+  assert.equal((formatEvent(call) ?? '').includes('TAIL'), false);
+  assert.ok((formatEvent(call, 'full') ?? '').includes('TAIL'));
+});
+
+test('full view is still bounded, so one enormous result cannot flood the terminal', () => {
+  const huge = 'y'.repeat(FULL_ENTRY_CAP_CHARS + 5000);
+  const line = formatEvent({ type: 'tool_result', toolOutput: huge }, 'full') ?? '';
+  assert.ok(line.length < FULL_ENTRY_CAP_CHARS + 200, 'capped at the per-line limit');
+  assert.match(line, /\(\+5,000 more characters, full text in the session file\)/);
 });

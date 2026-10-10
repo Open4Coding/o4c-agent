@@ -25,8 +25,13 @@ test('the five levels are ordered weakest to strongest', () => {
   assert.ok(!isThinkLevel(undefined));
 });
 
-test('the default is unrestricted, so adding /think changes no existing behaviour', () => {
-  assert.equal(DEFAULT_THINK_LEVEL, 'xhigh');
+test('the default is a shaped budget, a deliberate change from the unrestricted original', () => {
+  // Was xhigh (unrestricted, i.e. what the server did before /think existed) until 2026-10-09.
+  // The point of pinning it is that moving it is a real behaviour change for every user who never
+  // runs /think, so it should take a failing test to do it by accident.
+  assert.equal(DEFAULT_THINK_LEVEL, 'med');
+  assert.equal(THINK_BUDGET_TOKENS[DEFAULT_THINK_LEVEL], 2_048);
+  // And xhigh still means unrestricted, for anyone who wants the old behaviour back.
   assert.equal(THINK_BUDGET_TOKENS.xhigh, -1);
   const params = localThinkParams('xhigh');
   assert.equal(params.reasoning_budget_tokens, -1, 'unrestricted is what the server already did');

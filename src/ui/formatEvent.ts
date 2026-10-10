@@ -2,6 +2,24 @@ import type { AgentEvent } from '../agent/loop.js';
 
 const PREVIEW_LENGTH = 200;
 
+/** How much of a session a reload or `/resume` repaints, and - since 2026-10-09 - how much of a
+ * live turn is shown as it happens. Declared here rather than imported from `formatEntries.ts`
+ * because that module imports this one, and the dependency has to run one way. */
+export type EventView = 'compact' | 'full';
+
+/** Full view's one safety limit per line: a multi-megabyte tool result must not flood the
+ * terminal even when the user has asked to see everything. */
+export const FULL_ENTRY_CAP_CHARS = 200_000;
+
+/** Full view's trim: everything, to that cap, with a pointer to where the rest lives. */
+export function capFull(text: string): string {
+  const trimmed = text.replace(/\s+$/, '');
+  if (trimmed.length <= FULL_ENTRY_CAP_CHARS) return trimmed;
+  const hidden = trimmed.length - FULL_ENTRY_CAP_CHARS;
+  return `${trimmed.slice(0, FULL_ENTRY_CAP_CHARS)}
+... (+${hidden.toLocaleString('en-US')} more characters, full text in the session file)`;
+}
+
 /** A tool call's arguments are cut to this many characters wherever they are displayed: a
  * `write_file` call carries the whole file, which is noise on screen and made committed blocks and
  * frames enormous. The full input stays in the session file and the run logs. */
@@ -18,27 +36,36 @@ function truncate(text: string): string {
 }
 
 /**
- * Formats an AgentEvent into a single display line, or null if it produces no output. Every
- * branch is capped to a short preview - full untruncated content goes to the run log
- * (`RunLogger`, wired in `App.tsx`) instead, so a verbose model narrating file contents inline,
- * or a tool returning a large result, can't flood the terminal on its own.
+ * Formats an AgentEvent into a single display line, or null if it produces no output.
+ *
+ * In `compact` every branch is capped to a short preview, and the full untruncated content goes
+ * to the run log (`RunLogger`, wired in `App.tsx`) instead, so a verbose model narrating file
+ * contents inline, or a tool returning a large result, can't flood the terminal on its own.
+ *
+ * In `full` the line is shown whole, to `FULL_ENTRY_CAP_CHARS`. That is the same rule the repaint
+ * (`formatEntries`) has always applied to a saved session, and until 2026-10-09 the live turn
+ * ignored it entirely: `/set-sessionview full` produced a full repaint but a truncated live
+ * screen, which is not what the setting says. Reported as "full means full, not compacted".
  */
-export function formatEvent(event: AgentEvent): string | null {
+export function formatEvent(event: AgentEvent, view: EventView = 'compact'): string | null {
+  const full = view === 'full';
+  const trim = (text: string): string => (full ? capFull(text) : truncate(text));
   if (event.type === 'text') {
-    return event.text ? truncate(event.text) : null;
+    return event.text ? trim(event.text) : null;
   }
   if (event.type === 'think') {
     // Per direct instruction: `[think]` label, no closing marker - the line just ends, same as
     // every other bracketed-label line here (`[tool]`, `[result]`).
-    return event.text ? `[think] ${truncate(event.text)}` : null;
+    return event.text ? `[think] ${trim(event.text)}` : null;
   }
   if (event.type === 'tool_call') {
     const json = JSON.stringify(event.toolInput ?? {});
-    const shown = json.length > TOOL_CALL_PREVIEW_CHARS ? `${json.slice(0, TOOL_CALL_PREVIEW_CHARS)}...` : json;
+    const shown =
+      full || json.length <= TOOL_CALL_PREVIEW_CHARS ? capFull(json) : `${json.slice(0, TOOL_CALL_PREVIEW_CHARS)}...`;
     return `[tool] ${event.toolName}(${shown})`;
   }
   if (event.type === 'tool_result') {
-    return `[result] ${truncate(event.toolOutput ?? '')}`;
+    return `[result] ${trim(event.toolOutput ?? '')}`;
   }
   if (event.type === 'compaction') {
     return event.text ? `[compact] ${event.text}` : null;
