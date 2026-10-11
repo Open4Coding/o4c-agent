@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { App } from '../ui/App.js';
@@ -481,6 +483,34 @@ test('the footer is three lines, in order, with the model and dir line last', as
     );
     assert.equal(/view:|Think:/.test(frameLines[status]), false, `settings left line 1: ${frameLines[status]}`);
     assert.match(frameLines[settings + 1], /^◆ .* \| dir: /, `model and dir line should be last, flush left: ${frameLines[settings + 1]}`);
+  });
+});
+
+const execFileAsync = promisify(execFile);
+
+// The branch has been in the footer since 2026-10-01 with no test behind it, and the dirty marker
+// added beside it 2026-10-11 is the half that is easy to get wrong on screen - so this covers both
+// ends of that bar at once, against a real repository rather than a stubbed reader.
+test('the footer names the branch, with a * when the tree has uncommitted changes', async () => {
+  await withTempDir(async (dir) => {
+    // `git init <path>` creates the directory itself, so there is nothing to mkdir first.
+    const projectRoot = join(dir, 'repo');
+    const id = ['-c', 'user.email=test@example.com', '-c', 'user.name=Test'];
+    await execFileAsync('git', ['init', '-q', '-b', 'main', projectRoot]);
+    await writeFile(join(projectRoot, 'tracked.txt'), 'first', 'utf-8');
+    await execFileAsync('git', [...id, 'add', 'tracked.txt'], { cwd: projectRoot });
+    await execFileAsync('git', [...id, 'commit', '-q', '-m', 'first'], { cwd: projectRoot });
+
+    const clean = await setup({ dir: join(dir, 'clean-sessions'), projectRoot });
+    // The branch arrives from an effect, so it is not in the first frame.
+    await waitFor(() => /main · dir: /.test(clean.lastFrame() ?? ''));
+    assert.equal(/main\*/.test(clean.lastFrame() ?? ''), false, 'a clean tree gets no marker');
+
+    // Now dirty the tree and mount a second app, rather than waiting for this one to refresh:
+    // the refresh is keyed on a turn finishing, and this test has no reason to run a turn.
+    await writeFile(join(projectRoot, 'tracked.txt'), 'changed', 'utf-8');
+    const dirty = await setup({ dir: join(dir, 'dirty-sessions'), projectRoot });
+    await waitFor(() => /main\*/.test(dirty.lastFrame() ?? ''));
   });
 });
 

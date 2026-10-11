@@ -18,7 +18,7 @@ import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice }
 const THINK_LEVEL_CONFIG_KEY = 'thinkLevelByModel';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
-import { projectLabel, readGitBranch, readMountPoint } from '../session/gitInfo.js';
+import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
   DEFAULT_THINK_CAPS,
   DEFAULT_THINK_LEVEL,
@@ -429,7 +429,12 @@ function UsageBar({
 /**
  * The footer's third line: which model, which branch, and which volume/project/path you are in.
  *
- *     ◆ qwen3.8-27b-Q4_K_M-imatFP16 | main · dir: D:/Open4Coding/o4c-agent
+ *     ◆ qwen3.8-27b-Q4_K_M-imatFP16 | main* · dir: D:/Open4Coding/o4c-agent
+ *
+ * The `*` after the branch means the working tree has uncommitted changes, the same single-character
+ * convention shell prompts use. It is absent both when the tree is clean and when git could not be
+ * asked, which is deliberate: a marker that appeared on uncertainty would be a lie half the time,
+ * whereas a missing marker only ever understates.
  *
  * These three belong together because they share a cadence: all of them hold still for a whole
  * session. That is why the model name lives here and not on the status line, which re-renders on
@@ -440,7 +445,17 @@ function UsageBar({
  * Renders without a branch when there is none, which is a normal case rather than an error: the
  * meta workspace and the scratch directories are not repositories.
  */
-function ProjectBar({ model, branch, project }: { model: string; branch?: string; project: string }) {
+function ProjectBar({
+  model,
+  branch,
+  dirty,
+  project,
+}: {
+  model: string;
+  branch?: string;
+  dirty?: boolean;
+  project: string;
+}) {
   return (
     <Text>
       <Text color={theme.accent}>◆ {formatModelName(model)}</Text>
@@ -448,6 +463,9 @@ function ProjectBar({ model, branch, project }: { model: string; branch?: string
       {branch && (
         <Text>
           <Text color={theme.accent}>{branch}</Text>
+          {/* `warn` rather than `accent`: the point of the marker is to catch the eye on a bar that
+              otherwise never changes, and uncommitted work is exactly a soft caution. */}
+          {dirty && <Text color={theme.warn}>*</Text>}
           <Text color={theme.border}> · </Text>
         </Text>
       )}
@@ -770,6 +788,10 @@ export function App({
   const thinkCaps = probedThinkCaps;
   // Read once on mount and refreshed when a turn finishes - never per render (see gitInfo.ts).
   const [gitBranch, setGitBranch] = useState<string | undefined>(undefined);
+  // Whether the tree has uncommitted changes, on the same cadence as the branch. `undefined` until
+  // the first read answers, and again whenever git could not be asked - see readGitDirty on why
+  // "do not know" has to be distinguishable from "clean".
+  const [gitDirty, setGitDirty] = useState<boolean | undefined>(undefined);
   // The volume the project sits on - `D:` here, a POSIX mount point elsewhere. Read once only: a
   // directory cannot change which device it is on while the process runs, so unlike the branch
   // this never needs refreshing.
@@ -898,8 +920,15 @@ export function App({
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const branch = await readGitBranch(projectRoot ?? process.cwd());
-      if (!cancelled) setGitBranch(branch);
+      const dir = projectRoot ?? process.cwd();
+      // Sequential, not Promise.all: the dirty read spawns git and the branch read does not, so
+      // starting both at once would only move the spawn earlier, and the branch is the half that
+      // has to be on screen - if the spawn hangs until its timeout the branch is already there.
+      const branch = await readGitBranch(dir);
+      if (cancelled) return;
+      setGitBranch(branch);
+      const dirty = branch === undefined ? undefined : await readGitDirty(dir);
+      if (!cancelled) setGitDirty(dirty);
     })();
     return () => {
       cancelled = true;
@@ -2280,7 +2309,7 @@ export function App({
           into it. */}
       <StatusBar loop={loop} usage={usageStore} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
       <UsageBar loop={loop} usage={usageStore} busy={isProcessing} sessionView={shownSessionView} thinkLevel={shownThinkLevel} />
-      <ProjectBar model={model} branch={gitBranch} project={projectLabelText} />
+      <ProjectBar model={model} branch={gitBranch} dirty={gitDirty} project={projectLabelText} />
       {confirmDialog ? (
         <ConfirmDialog
           key={confirmDialog.id}

@@ -1,5 +1,9 @@
+import { execFile } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * The footer's second line: which branch, and where you are within the project.
@@ -77,6 +81,58 @@ export async function readGitBranch(startDir: string | undefined): Promise<strin
     // Detached HEAD - a bare commit id. Seven characters is git's own short form.
     return /^[0-9a-f]{7,40}$/i.test(head) ? head.slice(0, 7) : undefined;
   } catch {
+    return undefined;
+  }
+}
+
+/** How long to wait for `git status` before giving up and showing no marker. A dirty flag is
+ * cosmetic, so a slow or wedged git (a lock held by another process, a network filesystem) must
+ * cost a bounded amount of time and then stop mattering. */
+const STATUS_TIMEOUT_MS = 2000;
+
+/** `git status --porcelain` prints one line per change, so a pathologically dirty tree could print
+ * more than this - which is itself the answer (there was output, so it is dirty), handled below
+ * rather than treated as a failure. */
+const STATUS_MAX_BUFFER = 2 * 1024 * 1024;
+
+/**
+ * Whether the working tree has uncommitted changes: `true` dirty, `false` clean, `undefined` when
+ * this is not a repository or git could not answer.
+ *
+ * This one DOES spawn a child process, unlike `readGitBranch` right above it, and the asymmetry is
+ * the point: a branch name is a file read, but "is anything uncommitted" means consulting the index
+ * against the working tree, which is git's job and cannot be faked from `.git` alone without
+ * reimplementing it badly. So the cost is paid where `readGitBranch` refuses to pay it - which is
+ * why callers must keep this on the same cadence as the branch (mount, then turn completion) and
+ * nowhere near a render path. The `findGitDir` guard means a non-repository costs a `stat` walk and
+ * no spawn at all, which matters because the meta workspace and the scratch directories are not
+ * repositories.
+ *
+ * Untracked files count as dirty. They are uncommitted work by any reading, and `--porcelain`
+ * already honours `.gitignore`, so build output and scratch directories do not pin the flag on.
+ *
+ * Never throws: every failure path returns `undefined`, i.e. show no marker, because a status bar
+ * must not be able to take down a turn.
+ */
+export async function readGitDirty(startDir: string | undefined): Promise<boolean | undefined> {
+  if (!startDir) return undefined;
+  try {
+    if (!(await findGitDir(startDir))) return undefined;
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
+      cwd: startDir,
+      timeout: STATUS_TIMEOUT_MS,
+      maxBuffer: STATUS_MAX_BUFFER,
+      // Without this a console window flashes on Windows on every refresh - once per turn, which
+      // would be impossible to miss.
+      windowsHide: true,
+    });
+    return stdout.trim().length > 0;
+  } catch (err) {
+    // Overflowing the buffer is not a failure to answer: there was more than 2 MB of porcelain
+    // output, so the tree is emphatically dirty. Anything else (git missing, a timeout, a lock)
+    // genuinely means "do not know".
+    const code = (err as { code?: unknown })?.code;
+    if (code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return true;
     return undefined;
   }
 }

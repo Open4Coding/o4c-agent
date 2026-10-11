@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, parse } from 'node:path';
-import { projectLabel, readGitBranch, readMountPoint } from '../session/gitInfo.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
+
+const execFileAsync = promisify(execFile);
 
 async function tempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'o4c-git-'));
@@ -151,6 +155,78 @@ test('an unresolvable path gives no volume instead of throwing', async () => {
   // A path that does not exist still has a knowable volume - the label is cosmetic either way.
   const gone = join(await tempDir(), 'does', 'not', 'exist');
   assert.doesNotReject(async () => readMountPoint(gone));
+});
+
+// readGitDirty spawns real git, so these use a real repository rather than a hand-built `.git`
+// directory - a fake one has no index for git to compare the working tree against, so it would be
+// answering about nothing. `-c user.*` is passed per command so the test neither depends on nor
+// touches whatever identity is configured on the machine.
+const GIT_ID = ['-c', 'user.email=test@example.com', '-c', 'user.name=Test'];
+
+async function initRepo(): Promise<string> {
+  const root = await tempDir();
+  await execFileAsync('git', ['init', '-q'], { cwd: root });
+  await writeFile(join(root, 'tracked.txt'), 'first', 'utf-8');
+  await execFileAsync('git', [...GIT_ID, 'add', 'tracked.txt'], { cwd: root });
+  await execFileAsync('git', [...GIT_ID, 'commit', '-q', '-m', 'first'], { cwd: root });
+  return root;
+}
+
+test('a freshly committed repository reads as clean', async () => {
+  assert.equal(await readGitDirty(await initRepo()), false);
+});
+
+test('an edit to a tracked file reads as dirty', async () => {
+  const root = await initRepo();
+  await writeFile(join(root, 'tracked.txt'), 'changed', 'utf-8');
+  assert.equal(await readGitDirty(root), true);
+});
+
+// Untracked counts: a file nobody has added yet is uncommitted work by any reading, and it is the
+// case most likely to be lost.
+test('a new untracked file reads as dirty', async () => {
+  const root = await initRepo();
+  await writeFile(join(root, 'brand-new.txt'), 'hello', 'utf-8');
+  assert.equal(await readGitDirty(root), true);
+});
+
+// The other side of counting untracked files: build output and scratch directories must not pin the
+// marker on permanently. `--porcelain` honours .gitignore, which is what makes that safe.
+test('an ignored file leaves the tree clean, so build output never pins the marker on', async () => {
+  const root = await initRepo();
+  await writeFile(join(root, '.gitignore'), 'junk/', 'utf-8');
+  await execFileAsync('git', [...GIT_ID, 'add', '.gitignore'], { cwd: root });
+  await execFileAsync('git', [...GIT_ID, 'commit', '-q', '-m', 'ignore junk'], { cwd: root });
+  await mkdir(join(root, 'junk'), { recursive: true });
+  await writeFile(join(root, 'junk', 'out.js'), 'noise', 'utf-8');
+  assert.equal(await readGitDirty(root), false);
+});
+
+test('the answer comes from a subdirectory too, matching how the branch is found', async () => {
+  const root = await initRepo();
+  const deep = join(root, 'src', 'ui');
+  await mkdir(deep, { recursive: true });
+  await writeFile(join(deep, 'extra.txt'), 'x', 'utf-8');
+  assert.equal(await readGitDirty(deep), true);
+});
+
+// The guard that keeps the spawn off the common path: the meta workspace and the scratch
+// directories are not repositories, and must cost a stat walk rather than a child process.
+test('outside a repository the answer is undefined, not false', async () => {
+  const root = await tempDir();
+  assert.equal(await readGitDirty(root), undefined);
+  assert.equal(await readGitDirty(undefined), undefined);
+});
+
+// undefined has to stay distinguishable from false all the way out. The footer draws the marker on
+// true alone, so "do not know" LOOKS like "clean" on screen - but it must not BE false in the type,
+// or a later caller that wants to say something about the difference cannot.
+test('a repository git cannot read gives undefined rather than throwing', async () => {
+  const root = await tempDir();
+  await mkdir(join(root, '.git'), { recursive: true });
+  await writeFile(join(root, '.git', 'HEAD'), 'ref: refs/heads/main', 'utf-8');
+  // Passes the findGitDir guard, but there is no index or object store, so git exits non-zero.
+  assert.equal(await readGitDirty(root), undefined);
 });
 
 test('cleanup', async () => {
