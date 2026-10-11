@@ -25,6 +25,15 @@ export const theme = {
    * match that green rather than pick a new one.
    */
   user: '#6AA167',
+  /**
+   * Tool calls and their results. Added 2026-10-11 at David's request ("can we do [tool] use as a
+   * dimmed down white?"). They used to draw in `border`, the bronze also used for `system`, which
+   * put the loudest-volume lines in the transcript - every call plus every result - in a saturated
+   * amber competing with `accent`. This is literally `text` dimmed: #FFF8DC scaled to 65%, so it
+   * reads as the theme's own white turned down rather than as a new hue, and recedes behind the
+   * response and the user's turn where it belongs.
+   */
+  tool: '#A6A18F',
 } as const;
 
 /**
@@ -36,8 +45,8 @@ export const theme = {
 export const lineStyle: Record<LineKind, { color: string; bold?: boolean }> = {
   system: { color: theme.border },
   user: { color: theme.user, bold: true },
-  tool_call: { color: theme.border },
-  tool_result: { color: theme.border },
+  tool_call: { color: theme.tool },
+  tool_result: { color: theme.tool },
   final: { color: theme.accent, bold: true },
   error: { color: theme.error },
   splash: { color: theme.primary, bold: true },

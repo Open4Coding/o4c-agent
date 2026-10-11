@@ -41,6 +41,21 @@ test('the kinds that were not meant to change kept their colors', () => {
   assert.equal(lineStyle.error.color, theme.error);
   assert.equal(lineStyle.splash.color, theme.primary);
   assert.equal(lineStyle.system.color, theme.border);
-  assert.equal(lineStyle.tool_call.color, theme.border);
-  assert.equal(lineStyle.tool_result.color, theme.border);
+});
+
+test('a tool call and its result are a dimmed white, not the bronze they used to share with system', () => {
+  assert.equal(lineStyle.tool_call.color, theme.tool);
+  assert.equal(lineStyle.tool_result.color, theme.tool);
+  assert.equal(theme.tool, '#A6A18F');
+  assert.notEqual(lineStyle.tool_call.color, theme.border);
+});
+
+// "Dimmed" is the whole point of the token, so it is worth asserting rather than trusting the hex:
+// it has to be darker than `text` (or it is not dimmed) and lighter than the background (or it is
+// not readable). Compared on a plain channel sum, which is enough to order two warm greys.
+test('the tool color sits between the background and the theme white', () => {
+  const sum = (hex: string): number =>
+    parseInt(hex.slice(1, 3), 16) + parseInt(hex.slice(3, 5), 16) + parseInt(hex.slice(5, 7), 16);
+  assert.ok(sum(theme.tool) < sum(theme.text), 'tool should be dimmer than text');
+  assert.ok(sum(theme.tool) > sum(theme.bg) + 150, 'tool should stay well clear of the background');
 });
