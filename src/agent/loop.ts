@@ -6,7 +6,6 @@ const INITIAL_TOKEN_RATIO = 1.5;
 const MIN_TOKEN_RATIO = 0.5;
 const MAX_TOKEN_RATIO = 3;
 
-const CUTOFF_CONTINUE_PROMPT ='Continue exactly where you stopped. Do not repeat anything already written.';
 import {
   aiCompactionEntry,
   aiPruneEntry,
@@ -884,11 +883,29 @@ export class AgentLoop {
     const cutoffChain: ContextEntry[] = [];
     let emptyTurnRetries = 0;
     let hadToolWork = false;
-    // Set after a cutoff with no tool call. Sent as a transient user turn on the next request only,
-    // never stored: a closed assistant turn plus a fresh generation prompt makes the model restate
-    // the cut-off text instead of continuing it (checked live against the server's chat template).
-    let continueAfterCutoff = false;
-    const hidePendingCutoffChain = (): void => {
+    // No continuation prompt after a cutoff: the request simply ends on the cut-off assistant
+    // message and the server picks the sentence up where it stopped. A transient user turn used to
+    // be appended here (CUTOFF_CONTINUE_PROMPT, 2026-10-07) on the belief that a trailing assistant
+    // message makes the model restate the cut-off text rather than continue it. Measured live
+    // 2026-10-11 and that belief was wrong - what had been observed was llama-server echoing the
+    // prefill back into `content` (the reply is prefix + continuation), which reads as a restatement
+    // but is a real continuation. Proof: a prefix ending in the nonsense word "zorblaxian" came back
+    // preserved and extended 4/4 runs, with no think block opened. The prompt was also measurably
+    // worse - 376-933 output tokens against 56-110, a 1482-3583 char think block against none, and
+    // with an unusual prefix (exactly what a mid-word cutoff produces) it spent the entire budget
+    // reasoning and returned empty content 4/4. See docs/plans/0003, "Trailing assistant: settled
+    // live". Do not re-add it without re-running that probe.
+    /**
+     * `currentRound` - the entries of the round being processed right now, already appended. The
+     * prune marker is placed BEFORE them rather than at the end, because `toWireMessages` sends it
+     * as a user-role note (deliberately - see contextEntry.ts, bug 8: as an assistant message the
+     * model read its own turn as finished and emitted EOS after one token). Appended last, that
+     * user note would sit after a cut-off assistant message and the request would no longer end on
+     * the text the server is supposed to continue, which is what makes a chained cutoff restart
+     * instead of continuing. Placing it first is also the truer order: the notice describes older
+     * material being dropped, not anything in the current round.
+     */
+    const hidePendingCutoffChain = (currentRound: readonly ContextEntry[] = []): void => {
       if (cutoffChain.length === 0) return;
       let tokensFreed = 0;
       for (const entry of cutoffChain) {
@@ -903,7 +920,9 @@ export class AgentLoop {
         tokensFreed,
         `superseded max_tokens-cutoff entr${cutoffChain.length === 1 ? 'y' : 'ies'}`,
       );
-      this.entries.push(pruneEntry);
+      const roundStart = currentRound.length > 0 ? this.entries.indexOf(currentRound[0]) : -1;
+      if (roundStart >= 0) this.entries.splice(roundStart, 0, pruneEntry);
+      else this.entries.push(pruneEntry);
       this.indexEntry(pruneEntry);
       onEntry(pruneEntry);
       onEvent({
@@ -966,9 +985,7 @@ export class AgentLoop {
         : undefined;
       const request: CompletionRequest = {
         systemPrompt: systemPromptForRequest,
-        messages: continueAfterCutoff
-          ? [...toWireMessages(this.entries), { role: 'user', content: CUTOFF_CONTINUE_PROMPT }]
-          : toWireMessages(this.entries),
+        messages: toWireMessages(this.entries),
         tools: toolDefs,
         signal: options.signal,
         maxTokens: dynamicMaxTokens,
@@ -1070,7 +1087,6 @@ export class AgentLoop {
       // the same maxIterations cap as every other round, so a model that never converges still
       // stops eventually rather than looping forever.
       const isMaxTokensCutoff = response.stopReason === 'max_tokens';
-      continueAfterCutoff = isMaxTokensCutoff && response.toolCalls.length === 0;
       // Backstop (2026-10-03): an empty completion that isn't a cutoff and isn't a tool call is
       // almost always the model emitting EOS straight away, not a real answer - the turn would
       // otherwise end silently with nothing done. Retry once with an explicit nudge, visibly, and
@@ -1111,7 +1127,7 @@ export class AgentLoop {
       // Either way, we're moving past whatever cutoff round was pending (if any) - a tool call or
       // a fresh cutoff both supersede it equally; only re-arm the chain when THIS round is itself
       // another cutoff that might in turn need hiding later.
-      hidePendingCutoffChain();
+      hidePendingCutoffChain(roundEntries);
       if (isMaxTokensCutoff) {
         cutoffChain.push(...roundEntries);
       }

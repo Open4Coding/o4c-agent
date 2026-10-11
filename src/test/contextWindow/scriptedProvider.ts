@@ -50,6 +50,8 @@ export interface ProviderConfig {
   /** Multiplier on the server-side token count versus chars / 4 (a tokenizer that disagrees). */
   drift: number;
   summarizer: SummarizerMode;
+  /** See `ScenarioSpec.knownGaps` - invariant names this scenario is expected to break for now. */
+  knownGaps?: readonly string[];
 }
 
 export interface ProviderStats {
@@ -92,6 +94,8 @@ export class ScriptedProvider implements LLMProvider {
   readonly name = 'scripted';
   readonly tags = new TagGen();
   readonly violations: Violation[] = [];
+  /** Hits on an invariant this scenario declared a known gap for - reported, but not a failure. */
+  readonly knownGapHits: Violation[] = [];
   readonly stats: ProviderStats = {
     requests: 0,
     summarizerCalls: 0,
@@ -108,6 +112,12 @@ export class ScriptedProvider implements LLMProvider {
   readonly resultQueue: number[] = [];
   private loop: AgentLoop | undefined;
   private readonly tagByEntry = new Map<string, string>();
+  /**
+   * True when the response this provider last produced was a max_tokens cutoff with no tool call,
+   * which makes the next request a continuation round. Set here rather than inferred from the
+   * request, because the provider is what decided the cutoff in the first place.
+   */
+  private lastWasCutoff = false;
 
   constructor(private readonly config: ProviderConfig) {}
 
@@ -122,7 +132,12 @@ export class ScriptedProvider implements LLMProvider {
   }
 
   violate(invariant: string, detail: string): void {
-    this.violations.push({ invariant, detail, step: this.stats.requests });
+    const record = { invariant, detail, step: this.stats.requests };
+    // A declared known gap is recorded and printed, but kept out of `violations` so it neither
+    // fails the scenario nor cuts the run short at the first hit (harness.ts breaks the turn loop
+    // as soon as `violations` is non-empty, which would hide everything after it).
+    if (this.config.knownGaps?.includes(invariant)) this.knownGapHits.push(record);
+    else this.violations.push(record);
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
@@ -155,7 +170,7 @@ export class ScriptedProvider implements LLMProvider {
     if (request.maxTokens === Math.min(32768, Math.floor(window / 4))) this.stats.capHits += 1;
 
     const findings = [
-      ...wireFindings(request.messages),
+      ...wireFindings(request.messages, this.lastWasCutoff),
       ...entryFindings(this.loop.getEntries(), this.loop.getVisibleTokenEstimate(), window),
       ...maxTokensFindings(request.maxTokens, window),
       ...windowFindings(prompt, request.maxTokens, window),
@@ -214,6 +229,10 @@ export class ScriptedProvider implements LLMProvider {
     const content = thinkText ? `<think>${thinkText}</think>${responseText}` : responseText;
 
     const stopReason: StopReason = cut ? 'max_tokens' : toolCalls.length > 0 ? 'tool_use' : 'end_turn';
+    // Read by checkRequest() on the NEXT request, which runs before the next produce() - see the
+    // field's own comment. A cutoff that still managed a tool call is not a continuation round:
+    // the loop moves on to the tool work instead of finishing the sentence.
+    this.lastWasCutoff = stopReason === 'max_tokens' && toolCalls.length === 0;
     const argOut = callsFit ? wantCallTokens : 0;
     request.onToken?.(content, 'text');
     return {

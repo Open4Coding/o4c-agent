@@ -30,6 +30,13 @@ export interface ScenarioSpec {
   preload?: (window: number) => { pairs: number; tokensEach: number };
   build: (window: number) => TurnSpec[];
   check?: (result: ScenarioResult) => void;
+  /**
+   * Invariants this scenario is known to break, by name, because of a defect that is tracked and
+   * not yet fixed. Listed here rather than deleted from `invariants.ts` so the invariant keeps
+   * guarding every other scenario, and so the gap stays visible in the scenario definition instead
+   * of silently absent. Each entry needs a comment saying which defect, and where it is tracked.
+   */
+  knownGaps?: string[];
 }
 
 export interface TurnResult {
@@ -51,6 +58,8 @@ export interface ScenarioResult {
   window: number;
   turns: TurnResult[];
   violations: Violation[];
+  /** Hits on an invariant `spec.knownGaps` declared - printed in the report, not a failure. */
+  knownGapHits: Violation[];
   events: AgentEvent[];
   timeline: TierEvent[];
   finalEntries: readonly ContextEntry[];
@@ -96,6 +105,7 @@ export async function runScenario(spec: ScenarioSpec, window: number): Promise<S
     window,
     drift: spec.drift ?? 1,
     summarizer: spec.summarizer ?? 'ok',
+    knownGaps: spec.knownGaps,
   });
   const systemPrompt = spec.systemPromptTokens
     ? plainText(spec.systemPromptTokens(window)) || DEFAULT_SYSTEM_PROMPT
@@ -160,6 +170,7 @@ export async function runScenario(spec: ScenarioSpec, window: number): Promise<S
     window,
     turns,
     violations: provider.violations,
+    knownGapHits: provider.knownGapHits,
     events,
     timeline,
     finalEntries: loop.getEntries(),
@@ -172,7 +183,8 @@ export async function runScenario(spec: ScenarioSpec, window: number): Promise<S
 }
 
 export function formatReport(r: ScenarioResult): string {
-  const status = r.violations.length === 0 ? 'PASS' : 'FAIL';
+  const status =
+    r.violations.length > 0 ? 'FAIL' : r.knownGapHits.length > 0 ? `PASS(gap:${r.knownGapHits.length})` : 'PASS';
   const last = r.turns[r.turns.length - 1];
   const stop = last ? (r.hardStops > 0 ? 'hard-stop' : last.outcome) : 'none';
   return [

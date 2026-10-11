@@ -29,7 +29,14 @@ export function promptTokens(
   return Math.ceil((chars / 4) * drift);
 }
 
-export function wireFindings(messages: readonly Message[]): Finding[] {
+/**
+ * `afterCutoff` - the previous response stopped at max_tokens with no tool call, so this request is
+ * a continuation round. Such a request SHOULD end on the cut-off assistant message: that is how the
+ * server is asked to finish the sentence (prefill continuation, confirmed live 2026-10-11 - see
+ * docs/plans/0003, "Trailing assistant: settled live"). Ending on an assistant message in any other
+ * round is still a violation, which is what this invariant exists to catch.
+ */
+export function wireFindings(messages: readonly Message[], afterCutoff = false): Finding[] {
   const out: Finding[] = [];
   let open = new Set<string>();
   messages.forEach((m, i) => {
@@ -53,8 +60,16 @@ export function wireFindings(messages: readonly Message[]): Finding[] {
     out.push({ invariant: 'call-has-result', detail: `request ends with unanswered call(s) ${[...open].join(', ')}` });
   }
   const last = messages[messages.length - 1];
-  if (last?.role === 'assistant') {
+  if (last?.role === 'assistant' && !afterCutoff) {
     out.push({ invariant: 'ends-on-user-or-tool', detail: 'request ends on an assistant message' });
+  }
+  // The mirror image: a continuation round that does NOT end on the cut-off assistant message has
+  // lost the text it was supposed to finish, so the model restarts instead of continuing.
+  if (last && last.role !== 'assistant' && afterCutoff) {
+    out.push({
+      invariant: 'cutoff-continues-from-assistant',
+      detail: `continuation round ends on a ${last.role} message, so the cut-off text is not there to continue`,
+    });
   }
   return out;
 }
