@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { App } from '../ui/App.js';
@@ -13,6 +13,7 @@ import { defaultTools } from '../tools/index.js';
 import { SessionStore } from '../session/sessionStore.js';
 import { RunLogger } from '../session/runLog.js';
 import { ConfigStore } from '../session/configStore.js';
+import { UsageStore } from '../session/usageStore.js';
 import {
   userInputEntry,
   aiResponseEntry,
@@ -382,6 +383,10 @@ async function setup(opts: {
   onServerRecovered?: (probe: ServerProbe) => void;
   serverPollMs?: number;
   os?: OsKey;
+  // The session's carried-over token counts and active time (0002 item 7). Omitted by every test
+  // that is not about them, exactly like an untrusted run, where the footer falls back to this
+  // process's own figures.
+  usageStore?: UsageStore;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
@@ -418,6 +423,7 @@ async function setup(opts: {
       onServerRecovered: opts.onServerRecovered,
       serverPollMs: opts.serverPollMs,
       os: opts.os,
+      usageStore: opts.usageStore,
     }),
   );
   liveInstances.push(instance);
@@ -486,6 +492,61 @@ test('before any response, the token line shows a zero rate in the same shape as
     // Nothing has been spent either, so both totals are 0. No trusted project in this harness,
     // so there is no lifetime total to show - only the session half, this process's own spend.
     assert.match(lastFrame() ?? '', /s-tks: 0\u2191\/0\u2193\/0 t\/s/);
+  });
+});
+
+/** A store standing in for one that has already lived through a reload or two: the session's
+ * counters are on disk, and this process has spent nothing of its own yet. Its clock is frozen, so
+ * `activeMs` is exactly what was stored rather than that plus however long the test took. */
+async function seededUsageStore(
+  dir: string,
+  session: { input: number; output: number; requests: number; activeMs: number },
+): Promise<UsageStore> {
+  const file = join(dir, 'usage.json');
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 3,
+      project: { input: session.input, output: session.output },
+      sessions: { seeded: session },
+    }),
+    'utf-8',
+  );
+  const store = new UsageStore(
+    file,
+    () => ({ input: 0, output: 0, requests: 0 }),
+    () => 0,
+  );
+  store.load('seeded');
+  return store;
+}
+
+test('the footer clock shows the session active time, not this process uptime', async () => {
+  await withTempDir(async (dir) => {
+    // 0002 item 7: o4c reloads itself into a fresh process after most turns, so a clock counting
+    // from mount restarted every turn or two and a long session read as a brand-new one. A fresh
+    // process could not produce this figure on its own, which is what makes the assertion mean
+    // something - the 69 minutes can only have come off the disk.
+    const usageStore = await seededUsageStore(dir, { input: 0, output: 0, requests: 0, activeMs: 69 * 60_000 });
+    const { lastFrame } = await setup({ dir, usageStore });
+    // Matched against the whole frame rather than the status line: at this harness's 100 columns
+    // the status line already wraps, and the clock is the segment that spills over.
+    assert.match(lastFrame() ?? '', /1h 9m/, `clock should carry the stored session time: ${lastFrame()}`);
+  });
+});
+
+test('/context reports the session counters rather than only this process', async () => {
+  await withTempDir(async (dir) => {
+    // Same reload, same reset: `loop.getUsage()` covers about one turn, so these three counters
+    // used to start over while the session they claim to describe carried on.
+    const usageStore = await seededUsageStore(dir, { input: 1_234, output: 56, requests: 7, activeMs: 0 });
+    const { stdin, frames } = await setup({ dir, usageStore });
+    await submit(stdin, '/context');
+    await waitFor(() => anyFrameIncludes(frames, 'Session usage'));
+    assert.ok(anyFrameIncludes(frames, 'Requests sent: 7'), 'requests should survive the reload');
+    assert.ok(anyFrameIncludes(frames, 'Input tokens:  1234'), 'prompt tokens should survive the reload');
+    assert.ok(anyFrameIncludes(frames, 'Output tokens: 56'), 'completion tokens should survive the reload');
+    assert.ok(anyFrameIncludes(frames, 'Total tokens:  1290'), 'and the total is of those two');
   });
 });
 

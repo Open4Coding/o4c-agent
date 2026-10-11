@@ -569,7 +569,7 @@ program
       const usageStore = usageFile
         ? new UsageStore(usageFile, () => {
             const used = loop.getUsage();
-            return { input: used.inputTokens, output: used.outputTokens };
+            return { input: used.inputTokens, output: used.outputTokens, requests: used.requestCount };
           })
         : undefined;
       usageStore?.load(opts.resume);

@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_TRACKED_SESSIONS, USAGE_FILE_VERSION, UsageStore, type TokenSpend } from '../session/usageStore.js';
+import {
+  MAX_TRACKED_SESSIONS,
+  USAGE_FILE_VERSION,
+  UsageStore,
+  type SessionSpend,
+  type TokenSpend,
+} from '../session/usageStore.js';
 import { usageFileFor } from '../session/projectContext.js';
 
 async function tempFile(): Promise<string> {
@@ -11,12 +17,26 @@ async function tempFile(): Promise<string> {
   return join(dir, 'usage.json');
 }
 
-/** A store whose spend is a pair the test moves, standing in for `loop.getUsage()`. */
-function storeWith(file: string, spend: TokenSpend): UsageStore {
-  return new UsageStore(file, () => spend);
+/** What a test moves to stand in for `loop.getUsage()`. `requests` is optional so the tests that
+ * are only about tokens read the way they did before v3 added it. */
+type Spend = TokenSpend & { requests?: number };
+
+/** A store on a frozen clock, advanced only by `clock.ms`: active time is then an exact number in
+ * every assertion rather than however long the test itself took to run. */
+function storeWith(file: string, spend: Spend, clock = { ms: 0 }): UsageStore {
+  return new UsageStore(
+    file,
+    () => ({ input: spend.input, output: spend.output, requests: spend.requests ?? 0 }),
+    () => clock.ms,
+  );
 }
 
-async function read(file: string): Promise<{ version: number; project: TokenSpend; sessions: Record<string, TokenSpend> }> {
+/** A session's record as `totals()` reports it, for the tests that only care about tokens. */
+function spentOnly(input: number, output: number): SessionSpend {
+  return { input, output, requests: 0, activeMs: 0 };
+}
+
+async function read(file: string): Promise<{ version: number; project: TokenSpend; sessions: Record<string, SessionSpend> }> {
   return JSON.parse(await readFile(file, 'utf-8'));
 }
 
@@ -36,13 +56,13 @@ test('prompt and completion are counted apart, not summed', () => {
   store.load(undefined);
   assert.deepEqual(store.totals(), {
     project: { input: 0, output: 0 },
-    session: { input: 0, output: 0 },
+    session: spentOnly(0, 0),
   });
   spend.input = 18_600_000;
   spend.output = 1_300_000;
   assert.deepEqual(store.totals(), {
     project: { input: 18_600_000, output: 1_300_000 },
-    session: { input: 18_600_000, output: 1_300_000 },
+    session: spentOnly(18_600_000, 1_300_000),
   });
 });
 
@@ -59,7 +79,7 @@ test('the project total accumulates across processes while the session total doe
   b.load(undefined);
   assert.deepEqual(b.totals(), {
     project: { input: 1_250, output: 240 },
-    session: { input: 250, output: 40 },
+    session: spentOnly(250, 40),
   });
   b.setSessionId('session-b');
   b.flush();
@@ -67,8 +87,8 @@ test('the project total accumulates across processes while the session total doe
   const stored = await read(file);
   assert.deepEqual(stored.project, { input: 1_250, output: 240 });
   assert.deepEqual(stored.sessions, {
-    'session-a': { input: 1_000, output: 200 },
-    'session-b': { input: 250, output: 40 },
+    'session-a': spentOnly(1_000, 200),
+    'session-b': spentOnly(250, 40),
   });
 });
 
@@ -83,8 +103,93 @@ test('a reloaded session picks its own subtotal back up', async () => {
   b.load('abc123'); // what `--resume abc123` passes in
   assert.deepEqual(b.totals(), {
     project: { input: 5_500, output: 1_200 },
-    session: { input: 5_500, output: 1_200 },
+    session: spentOnly(5_500, 1_200),
   });
+});
+
+test('the session clock survives the per-turn reload', async () => {
+  // 0002 item 7, and the whole reason active time is stored at all: the footer clock used to count
+  // from process start, so it restarted every turn or two and a long session read as a short one.
+  const file = await tempFile();
+  const first = { ms: 0 };
+  const a = storeWith(file, { input: 10, output: 2 }, first);
+  a.load(undefined);
+  a.setSessionId('s1');
+  first.ms = 90_000; // a turn and a half
+  assert.equal(a.totals().session.activeMs, 90_000);
+  a.flush();
+
+  // The next process starts its own clock wherever the machine's happens to be - the stored
+  // baseline is what carries the first 90 seconds over.
+  const second = { ms: 5_000_000 };
+  const b = storeWith(file, { input: 0, output: 0 }, second);
+  b.load('s1');
+  assert.equal(b.totals().session.activeMs, 90_000, 'picks the clock up where it was left');
+  second.ms += 30_000;
+  assert.equal(b.totals().session.activeMs, 120_000, 'and keeps running');
+  b.flush();
+  assert.equal((await read(file)).sessions.s1.activeMs, 120_000);
+});
+
+test('a resumed session does not count the hours it sat closed', async () => {
+  // The decision this encodes (David, 2026-10-10): the clock is time with the app open on this
+  // session, not wall time since the session was created. Resuming yesterday's session must not
+  // open on "14h 22m" of work nobody did.
+  const file = await tempFile();
+  const first = { ms: 0 };
+  const a = storeWith(file, { input: 5, output: 1 }, first);
+  a.load(undefined);
+  a.setSessionId('s');
+  first.ms = 60_000;
+  a.flush();
+
+  const aDayLater = { ms: 24 * 60 * 60 * 1000 };
+  const b = storeWith(file, { input: 0, output: 0 }, aDayLater);
+  b.load('s');
+  assert.equal(b.totals().session.activeMs, 60_000, 'the day it sat closed is not active time');
+});
+
+test('requests sent survive the reload too, so /context stops resetting', async () => {
+  const file = await tempFile();
+  const a = storeWith(file, { input: 100, output: 20, requests: 3 });
+  a.load(undefined);
+  a.setSessionId('s');
+  a.flush();
+
+  const b = storeWith(file, { input: 10, output: 4, requests: 1 });
+  b.load('s');
+  assert.equal(b.totals().session.requests, 4);
+  b.flush();
+  assert.equal((await read(file)).sessions.s.requests, 4);
+});
+
+test('time alone is worth a write, once there is a session to file it under', async () => {
+  // A turn can spend no tokens at all (`/context` itself does not call the model) and the session
+  // was still open for it.
+  const file = await tempFile();
+  const clock = { ms: 0 };
+  const store = storeWith(file, { input: 0, output: 0 }, clock);
+  store.load(undefined);
+  store.setSessionId('s');
+  clock.ms = 45_000;
+  store.flush();
+  const stored = await read(file);
+  assert.deepEqual(stored.project, { input: 0, output: 0 }, 'no tokens were spent, and none are claimed');
+  assert.deepEqual(stored.sessions.s, { input: 0, output: 0, requests: 0, activeMs: 45_000 });
+});
+
+test('a clock that steps backwards never produces a negative', async () => {
+  // Wall clocks move: NTP steps them and DST shifts them. `-3s of active time` would render as
+  // nonsense and persist as nonsense.
+  const file = await tempFile();
+  const clock = { ms: 1_000_000 };
+  const store = storeWith(file, { input: 1, output: 1 }, clock);
+  store.load(undefined);
+  store.setSessionId('s');
+  clock.ms = 900_000; // the clock stepped back 100 seconds
+  assert.equal(store.totals().session.activeMs, 0);
+  store.flush();
+  assert.equal((await read(file)).sessions.s.activeMs, 0);
 });
 
 test('flushing twice does not count this process twice', async () => {
@@ -112,6 +217,8 @@ test('two concurrent sessions in one project are additive, not last-writer-wins'
 });
 
 test('spending nothing leaves the file untouched', async () => {
+  // No tokens AND no session id - a process that never got as far as a first save has nowhere to
+  // file its seconds either, so it should not create a usage file just to say so.
   const file = await tempFile();
   const store = storeWith(file, { input: 0, output: 0 });
   store.load(undefined);
@@ -137,7 +244,7 @@ test('a v1 file keeps its lifetime figure instead of starting over', async () =>
   store.load('old');
   assert.deepEqual(store.totals(), {
     project: { input: 5_010, output: 2 },
-    session: { input: 1_210, output: 2 },
+    session: spentOnly(1_210, 2),
   });
   store.flush();
   const stored = await read(file);
@@ -145,20 +252,44 @@ test('a v1 file keeps its lifetime figure instead of starting over', async () =>
   assert.deepEqual(stored.project, { input: 5_010, output: 2 });
 });
 
+test('a v2 file starts the two new counters at zero rather than at NaN', async () => {
+  // v3 added activeMs and requests. An existing file has neither, which is not an error: the
+  // tokens carry over and the clock starts counting from this launch.
+  const file = await tempFile();
+  await writeFile(
+    file,
+    JSON.stringify({ version: 2, project: { input: 900, output: 90 }, sessions: { s: { input: 400, output: 40 } } }),
+    'utf-8',
+  );
+  const clock = { ms: 0 };
+  const store = storeWith(file, { input: 0, output: 0 }, clock);
+  store.load('s');
+  assert.deepEqual(store.totals().session, { input: 400, output: 40, requests: 0, activeMs: 0 });
+  clock.ms = 10_000;
+  store.flush();
+  const stored = await read(file);
+  assert.equal(stored.version, USAGE_FILE_VERSION);
+  assert.deepEqual(stored.sessions.s, { input: 400, output: 40, requests: 0, activeMs: 10_000 });
+});
+
 test('a corrupt or hand-edited file degrades to zero instead of NaN forever', async () => {
   const file = await tempFile();
   await writeFile(file, '{ this is not json', 'utf-8');
   const store = storeWith(file, { input: 10, output: 3 });
   store.load(undefined);
-  assert.deepEqual(store.totals(), { project: { input: 10, output: 3 }, session: { input: 10, output: 3 } });
+  assert.deepEqual(store.totals(), { project: { input: 10, output: 3 }, session: spentOnly(10, 3) });
   store.flush();
   assert.deepEqual((await read(file)).project, { input: 10, output: 3 });
 
   const bad = await tempFile();
-  await writeFile(bad, JSON.stringify({ version: 2, project: { input: 'lots', output: null }, sessions: { x: 'no' } }), 'utf-8');
+  await writeFile(
+    bad,
+    JSON.stringify({ version: 3, project: { input: 'lots', output: null }, sessions: { x: { input: 'no', activeMs: 'ages', requests: {} } } }),
+    'utf-8',
+  );
   const second = storeWith(bad, { input: 5, output: 1 });
   second.load('x');
-  assert.deepEqual(second.totals(), { project: { input: 5, output: 1 }, session: { input: 5, output: 1 } });
+  assert.deepEqual(second.totals(), { project: { input: 5, output: 1 }, session: spentOnly(5, 1) });
 });
 
 test('a file from a newer version is left alone rather than overwritten', async () => {
@@ -168,7 +299,7 @@ test('a file from a newer version is left alone rather than overwritten', async 
   const store = storeWith(file, { input: 100, output: 10 });
   store.load(undefined);
   // Reports only this process - it will not pretend to understand the stored shape.
-  assert.deepEqual(store.totals(), { project: { input: 100, output: 10 }, session: { input: 100, output: 10 } });
+  assert.deepEqual(store.totals(), { project: { input: 100, output: 10 }, session: spentOnly(100, 10) });
   store.flush();
   assert.deepEqual(JSON.parse(await readFile(file, 'utf-8')), future, 'not clobbered');
 });

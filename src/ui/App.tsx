@@ -252,12 +252,20 @@ function Spinner() {
  * (same reasoning as `getUsage()` elsewhere in this file). */
 function StatusBar({
   loop,
+  usage,
   contextWindow,
   liveText,
   mode,
   busy,
 }: {
   loop: AgentLoop;
+  /** Where the clock's elapsed time comes from, because this process is not the session: o4c
+   * reloads itself into a fresh process after most turns, so a clock counting from mount restarted
+   * every turn or two (0002 item 7). The store carries the session's summed active time across
+   * those reloads. Undefined without a trusted project (and in tests), which falls the clock back
+   * to this process's own uptime - the old behaviour, and the best available answer when there is
+   * nowhere to persist one. */
+  usage?: UsageStore;
   contextWindow?: number;
   /** The text currently streaming in (`textWindow.live`), not yet a committed `ContextEntry` -
    * real bug found via direct user report: without this, the bar sat frozen at its pre-turn value
@@ -286,7 +294,10 @@ function StatusBar({
   const liveTokens = Math.ceil(liveText.join('').length / 4);
   const tokens = loop.getVisibleTokenEstimate() + liveTokens;
   const fraction = contextWindow ? tokens / contextWindow : undefined;
-  const elapsed = busy ? formatElapsed(Date.now() - startRef.current) : formatElapsedCoarse(Date.now() - startRef.current);
+  // The session's active time, not this process's: read fresh on every render, like every other
+  // figure on this line, because it is a clock.
+  const elapsedMs = usage?.totals().session.activeMs ?? Date.now() - startRef.current;
+  const elapsed = busy ? formatElapsed(elapsedMs) : formatElapsedCoarse(elapsedMs);
   // Throughput used to sit here; it moved to the token line below, where it belongs with the other
   // two token figures rather than being the same number printed twice in two formats.
   return (
@@ -1040,8 +1051,18 @@ export function App({
       // /exit, /quit, and /clear are intercepted earlier, in handleSubmit, before they can ever
       // be queued behind a busy turn - they never reach here.
       if (input === '/context' || input === '/ctx') {
-        const usage = loop.getUsage();
-        const totalTokens = usage.inputTokens + usage.outputTokens;
+        // The session's figures, not this process's (0002 item 7): `loop.getUsage()` covers about
+        // one turn, because o4c reloads itself into a fresh process after most of them, so these
+        // three counters used to reset while the session they claimed to describe carried on.
+        // `UsageStore` carries them across the reload; without a trusted project there is nowhere
+        // to persist them, and this process's own count is the whole of what is known.
+        const thisProcess = loop.getUsage();
+        const usage = usageStore?.totals().session ?? {
+          input: thisProcess.inputTokens,
+          output: thisProcess.outputTokens,
+          requests: thisProcess.requestCount,
+        };
+        const totalTokens = usage.input + usage.output;
         const visible = loop.getVisibleTokenEstimate();
         // The fill graph - only when contextWindow is known (config.json's opt-in key, per
         // StatusBar's own reasoning: no per-model max-context registry exists yet, so this
@@ -1058,9 +1079,9 @@ export function App({
         const text = [
           'Session usage (local only, no LLM call):',
           ...graphLines,
-          `  Requests sent: ${usage.requestCount}`,
-          `  Input tokens:  ${usage.inputTokens}`,
-          `  Output tokens: ${usage.outputTokens}`,
+          `  Requests sent: ${usage.requests}`,
+          `  Input tokens:  ${usage.input}`,
+          `  Output tokens: ${usage.output}`,
           `  Total tokens:  ${totalTokens}`,
           `  Messages in history: ${loop.getMessages().length}`,
         ].join('\n');
@@ -2243,7 +2264,7 @@ export function App({
           the session (model, branch, directory). Front-end plan item #8 put context
           max/current/%used on the Mode line; the hint line that used to sit last is now folded
           into it. */}
-      <StatusBar loop={loop} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
+      <StatusBar loop={loop} usage={usageStore} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
       <UsageBar loop={loop} usage={usageStore} busy={isProcessing} sessionView={shownSessionView} thinkLevel={shownThinkLevel} />
       <ProjectBar model={model} branch={gitBranch} project={projectLabelText} />
       {confirmDialog ? (
