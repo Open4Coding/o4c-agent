@@ -2345,7 +2345,12 @@ test('/set-sessionview opens a picklist with default (global), compact and full;
   });
 });
 
-test('/set-local-sessionview choosing full writes only the project tier and says it applies at the next reload when reloads are off', async () => {
+// Asked for 2026-10-11: setting the view reloads the window every time, so the old
+// "It takes effect at the next reload or /resume" sentence has nothing left to say and is gone.
+// This case is the one that used to show it - reloads are off (`reloadAfterTurn` is undefined in
+// setup) and nothing has been submitted, so there is no session id. It must still reload, and with
+// no entries there is nothing to save, so the handoff carries no resume id.
+test('/set-local-sessionview choosing full writes only the project tier and reloads at once, with no "next reload" note', async () => {
   await withTempDir(async (dir) => {
     const configGlobalDir = join(dir, 'fake-global');
     const { stdin, frames, restartCalls } = await setup({ dir, projectRoot: dir, configGlobalDir });
@@ -2356,11 +2361,48 @@ test('/set-local-sessionview choosing full writes only the project tier and says
     await tick(100);
     stdin.write(ENTER);
     await waitFor(() => anyFrameIncludes(frames, 'Session view set to full (local).'));
-    assert.ok(anyFrameIncludes(frames, 'takes effect at the next reload or /resume'));
+    assert.equal(anyFrameIncludes(frames, 'takes effect at the next reload or /resume'), false);
     const store = new ConfigStore(dir, configGlobalDir);
     assert.equal((await store.readScope('local')).sessionView, 'full');
     assert.equal((await store.readScope('global')).sessionView, undefined);
-    assert.deepEqual(restartCalls, []); // reloads are off in this test
+    await waitFor(() => restartCalls.length > 0);
+    assert.deepEqual(restartCalls, [undefined]);
+  });
+});
+
+// The reload is not gated on `reloadAfterTurn` (off here): that flag governs the per-turn repaint,
+// not whether a restart is possible at all. And because a reload repaints from saved history, the
+// session has to be saved before the handoff or the conversation would be lost - so the restart
+// must carry a real resume id, not undefined.
+test('/set-sessionview reloads even with per-turn reloads off, carrying the saved session id', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const plain: LLMProvider = {
+      name: 'plain-reply-test',
+      async complete(): Promise<CompletionResponse> {
+        return { content: 'just chatting, no tools', toolCalls: [], stopReason: 'end_turn' };
+      },
+    };
+    const { stdin, frames, store, restartCalls } = await setup({
+      dir,
+      projectRoot: dir,
+      configGlobalDir,
+      provider: plain,
+    });
+    await submit(stdin, 'hello there');
+    await waitFor(() => anyFrameIncludes(frames, 'just chatting, no tools'));
+    await waitFor(async () => (await store.readManifest()).length > 0);
+    const id = (await store.readManifest())[0].id;
+
+    await openViewPicker(stdin, frames, '/set-local-sessionview');
+    stdin.write(DOWN);
+    await tick(100);
+    stdin.write(DOWN); // -> full
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => restartCalls.length > 0);
+    assert.deepEqual(restartCalls, [id]);
+    assert.equal(anyFrameIncludes(frames, 'takes effect at the next reload or /resume'), false);
   });
 });
 
@@ -2376,11 +2418,13 @@ test('the footer shows the view loaded from config at startup, the effective val
   });
 });
 
-test('the footer follows a /set-sessionview change, and ignores a global change the project overrides', async () => {
+// Split in two 2026-10-11: setting the view now reloads the window, so the two halves of this
+// check cannot share one app instance - the first set unmounts it before the second picker could
+// open. Each half gets its own instance, and the half that needs a project value already in place
+// seeds it through ConfigStore instead of setting it through the picker.
+test('the footer follows a /set-sessionview change', async () => {
   await withTempDir(async (dir) => {
     const configGlobalDir = join(dir, 'fake-global');
-    // Reloads are off in this harness, so nothing repaints and the footer is the only thing that
-    // can report the new setting - exactly the case where a stale label would mislead.
     const { stdin, frames, lastFrame } = await setup({ dir, projectRoot: dir, configGlobalDir });
     assert.match(lastFrame() ?? '', /view: compact \| Think: /);
 
@@ -2390,15 +2434,34 @@ test('the footer follows a /set-sessionview change, and ignores a global change 
     stdin.write(DOWN); // -> full
     await tick(100);
     stdin.write(ENTER);
-    await waitFor(() => (lastFrame() ?? '').includes('view: full'));
+    // Asserted over all frames, not lastFrame(): the reload exits right after this repaint, so the
+    // footer's new value has to be caught in the frame it was drawn in.
+    await waitFor(() => frames.some((f) => f.includes('view: full')));
+  });
+});
 
-    // Now set the GLOBAL value to compact: the project's `full` still wins, so the footer must
-    // keep saying full. The displayed value is re-resolved from the merged config for this reason.
+test('the footer ignores a global /set-sessionview change the project overrides', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    // The project value is seeded directly, so this instance only has to perform the global set.
+    await new ConfigStore(dir, configGlobalDir).set('local', 'sessionView', 'full');
+    // `sessionView` is the merged value cli.ts resolves at launch and passes in - the config write
+    // above is what the command handler re-reads, but the startup footer comes from this prop.
+    const { stdin, frames, lastFrame } = await setup({
+      dir,
+      projectRoot: dir,
+      configGlobalDir,
+      sessionView: 'full',
+    });
+    assert.match(lastFrame() ?? '', /view: full \| Think: /);
+
+    // Set the GLOBAL value to compact: the project's `full` still wins, so the footer must keep
+    // saying full. The displayed value is re-resolved from the merged config for this reason.
     await openViewPicker(stdin, frames, '/set-global-sessionview');
     stdin.write(ENTER); // the global list has no `default` row, so it opens on compact already
     await waitFor(() => anyFrameIncludes(frames, 'Session view set to compact (global).'));
     assert.ok(anyFrameIncludes(frames, 'This project has its own value (full), which still wins here.'));
-    assert.match(lastFrame() ?? '', /view: full \| Think: /);
+    assert.ok(frames.some((f) => /view: full \| Think: /.test(f)));
   });
 });
 

@@ -1338,19 +1338,47 @@ export function App({
                   note = ` This project has its own value (${parseSessionView(localRaw)}), which still wins here.`;
                 }
               }
-              const sessionId = currentSessionIdRef.current;
-              const repaintNow = Boolean(reloadAfterTurn && sessionId);
               pushBlock([
                 infoLine(
-                  `Session view set to ${value} (${scope}${chosen === 'default' ? ', copied from the global value' : ''}).${note}` +
-                    (repaintNow ? '' : ' It takes effect at the next reload or /resume.'),
+                  `Session view set to ${value} (${scope}${chosen === 'default' ? ', copied from the global value' : ''}).${note}`,
                 ),
               ]);
-              if (repaintNow) {
-                // Reload into the same session so the screen repaints in the new view right away - the
-                // same handoff the end-of-turn reload uses, keeping the mode.
-                restart(sessionId, modeRef.current);
+              // Reload every time now (David, 2026-10-11), so the new view is on screen at once and
+              // there is nothing left for an "it takes effect at the next reload or /resume" note to
+              // say - that wording is gone along with the condition that produced it.
+              //
+              // Deliberately NOT gated on `reloadAfterTurn`: that flag governs the per-turn repaint
+              // and is off in tests, but restart() works regardless of it (cli.ts hands the args to
+              // the supervisor when O4C_HANDOFF_FILE is set, and falls back to spawnRestart when it
+              // is not). The old gate also required an existing session id, which is why the note
+              // appeared at all - before the first autosave there is no id.
+              //
+              // Save first, for the same reason the per-turn reload does: a session that has never
+              // been saved has no id, and handing off without one would drop the conversation.
+              let resumeId = currentSessionIdRef.current;
+              const entriesToSave = loop.getEntries();
+              if (entriesToSave.length > 0) {
+                try {
+                  resumeId = await sessionStore.save(entriesToSave, resumeId, inputHistoryRef.current);
+                  currentSessionIdRef.current = resumeId;
+                  // A brand-new session gets its id here, and the usage store needs it before this
+                  // process exits or the session subtotal is filed under no id (see usageStore.ts).
+                  usageStore?.setSessionId(resumeId);
+                } catch (saveErr) {
+                  pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
+                }
+              }
+              if (resumeId || entriesToSave.length === 0) {
+                restart(resumeId, modeRef.current);
                 setTimeout(() => exit(), 0);
+              } else {
+                // Only reachable when the save above failed on a session that had no id yet:
+                // reloading would repaint from nothing and lose it, so the setting waits instead.
+                pushBlock([
+                  infoLine(
+                    'Not reloading, because this session could not be saved - the new view applies at the next reload or /resume.',
+                  ),
+                ]);
               }
             }
           } catch (err) {
@@ -1808,7 +1836,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir],
   );
 
   const handleModePickerSelect = useCallback(
