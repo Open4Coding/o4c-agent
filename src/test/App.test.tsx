@@ -992,8 +992,9 @@ test('the command palette respects arrow-key navigation instead of falling throu
   await withTempDir(async (dir) => {
     const { stdin, frames, lastFrame } = await setup({ dir });
 
-    // /c matches /clear, /config, /context, alphabetically (#6 added /config) - two Downs move
-    // off /clear, past /config, onto /context.
+    // /c matches /clear, /colorview, /config, /context, alphabetically (#6 added /config,
+    // /colorview arrived 2026-10-11) - three Downs move off /clear, past the two in between,
+    // onto /context.
     await type(stdin, '/c');
     await waitFor(() => anyFrameIncludes(frames, '/context'));
     // The palette's content becoming visible and its own useInput actually finishing
@@ -1001,6 +1002,8 @@ test('the command palette respects arrow-key navigation instead of falling throu
     // render" gap InputBox's own tests already account for) - a fixed buffer here, not another
     // waitFor, since there's no visible signal for "input-ready" to poll on.
     await tick(150);
+    stdin.write(DOWN);
+    await waitFor(() => (lastFrame() ?? '').includes('> /colorview'));
     stdin.write(DOWN);
     await waitFor(() => (lastFrame() ?? '').includes('> /config'));
     stdin.write(DOWN);

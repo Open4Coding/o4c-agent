@@ -61,7 +61,8 @@ import {
   liveRegionCapRows as sharedLiveRegionCapRows,
   liveRegionCapRowsFor,
 } from './frameBudget.js';
-import { theme } from './theme.js';
+import { theme, lineStyle } from './theme.js';
+import { colorViewLines } from './colorView.js';
 import {
   formatTokenCount,
   formatElapsed,
@@ -456,33 +457,12 @@ function ProjectBar({ model, branch, project }: { model: string; branch?: string
 }
 
 function LineText({ line }: { line: Line }) {
-  switch (line.kind) {
-    case 'user':
-      return (
-        <Text bold color={theme.accent}>
-          {line.text}
-        </Text>
-      );
-    case 'tool_call':
-    case 'tool_result':
-      return <Text color={theme.border}>{line.text}</Text>;
-    case 'final':
-      return (
-        <Text bold color={theme.accent}>
-          {line.text}
-        </Text>
-      );
-    case 'error':
-      return <Text color={theme.error}>{line.text}</Text>;
-    case 'splash':
-      return (
-        <Text bold color={theme.primary}>
-          {line.text}
-        </Text>
-      );
-    default:
-      return <Text color={theme.border}>{line.text}</Text>;
-  }
+  const style = lineStyle[line.kind];
+  return (
+    <Text bold={style.bold} color={line.color ?? style.color}>
+      {line.text}
+    </Text>
+  );
 }
 
 export function App({
@@ -1117,6 +1097,12 @@ export function App({
             pushBlock([infoLine(renderKeyboardCommandsHelp(undefined, parsed))]);
           }
         }
+      } else if (commandName(input) === '/colorview') {
+        // Local and display-only, like /keyboard and /context above - never reaches loop.run(),
+        // so a color chart is never sent to the model or added to history.
+        pushBlock([userLine(input)]);
+        pushBlock(colorViewLines());
+        void runLogger.log({ type: 'system', sub_type: 'info', command: '/colorview' });
       } else if (input === '/mode') {
         pushBlock([userLine(input)]);
         const chosen = await new Promise<Mode | undefined>((resolve) => {

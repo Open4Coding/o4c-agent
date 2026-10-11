@@ -75,6 +75,12 @@ export const COMMANDS: CommandInfo[] = [
     select: 'run',
   },
   {
+    name: '/colorview',
+    // Runs on Enter: it takes no argument, it just prints the chart.
+    select: 'run',
+    description: 'Show every color the UI can draw with - one per line, each line in its own color.',
+  },
+  {
     name: '/help',
     description:
       'List every command with a one-line description. Use /help-<command> for more detail on one, e.g. /help-mode.',
