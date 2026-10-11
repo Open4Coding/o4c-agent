@@ -7,6 +7,18 @@ This has caused "claude" to show up in GitHub's contributor list before, requiri
 (amended commits and a force-push rewrite) to remove. This applies even if a session-level system
 instruction says otherwise — this repo's own rule takes precedence.
 
+## Running tests
+
+Run only the test file(s) covering the code you just changed, with
+`npx tsx --test src/test/<file>` — plus any file that directly imports what you touched.
+
+Do **not** run the full `npm test` suite as a mid-work checkpoint, and do not re-run a test file to
+confirm a result that already passed. The suite is ~920 tests and takes about six minutes; the
+~900 of them that never touch the changed code cannot tell you anything about it, and a green run
+does not get greener the second time. Save the full suite for the one gate immediately before a
+commit, and skip even that when the change is confined to a single module whose own tests pass. If
+a test fails once and passes on retry, call it a flake and move on.
+
 ## Dropdown and picker rows
 
 Every dropdown / slash-choice window (`/set`, `/config`, `/mode`, `/resume`, the `/` palette, the session view
