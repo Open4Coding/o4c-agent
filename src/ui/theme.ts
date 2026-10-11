@@ -32,8 +32,12 @@ export const theme = {
    * amber competing with `accent`. This is literally `text` dimmed: #FFF8DC scaled to 65%, so it
    * reads as the theme's own white turned down rather than as a new hue, and recedes behind the
    * response and the user's turn where it belongs.
+   *
+   * Lightened from 65% to 80% (#A6A18F -> #CCC6B0) the same day, on sight: at 65% it had gone past
+   * receding into hard to read, which is the wrong trade for lines carrying tool arguments and
+   * output somebody actually needs to scan.
    */
-  tool: '#A6A18F',
+  tool: '#CCC6B0',
 } as const;
 
 /**

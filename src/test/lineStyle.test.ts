@@ -46,7 +46,7 @@ test('the kinds that were not meant to change kept their colors', () => {
 test('a tool call and its result are a dimmed white, not the bronze they used to share with system', () => {
   assert.equal(lineStyle.tool_call.color, theme.tool);
   assert.equal(lineStyle.tool_result.color, theme.tool);
-  assert.equal(theme.tool, '#A6A18F');
+  assert.equal(theme.tool, '#CCC6B0');
   assert.notEqual(lineStyle.tool_call.color, theme.border);
 });
 
