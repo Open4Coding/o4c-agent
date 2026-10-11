@@ -22,16 +22,28 @@
   message instead of running it immediately - each one is shown as "Queued #1: ...",
   "Queued #2: ...", and so on. They run automatically, one at a time in the order you sent
   them, as each turn finishes - submitting more than one while busy keeps all of them.
-- `/clear` — clears conversation history and starts fresh, without restarting the process.
-- `/debug` — **temporarily disabled.** It was meant to show the raw underlying conversation
-  data (every message, tool call, and tool result) with `Esc` to return to the normal session,
-  but hit a real lockup bug in the Escape transition back to the normal view that wasn't
-  resolved by the fix that was supposed to fix it - shelved rather than left reachable in a
-  broken state. Typing `/debug` now just prints a message saying it's disabled instead of
-  doing anything. The implementation is still in the code (`formatDebug.ts`, the `debugMode`
-  state and render branch in `App.tsx`), just not wired up to the command.
+- Type `/` on its own to open the command palette: a live, searchable list of every command,
+  always current because it is generated from the same registry the commands themselves use
+  (`src/ui/slashCommand.ts`). That palette, not this page, is the authoritative list.
+- `/help` lists every command with a one-line description; `/help-<command>` explains one in
+  detail (e.g. `/help-mode`).
+- `/clear` — clear the current session and start fresh; it stays resumable via `/resume`.
+- `/resume` — browse and resume one of the last saved sessions.
+- `/context` — local token usage for this session, with no LLM call.
+- `/mode` — switch between Manual, Auto, Accept Edits, Plan and Plan-Write.
+- `/think` — reasoning depth: nothink, low, med, high, xhigh.
+- `/keyboard` — keybindings for this OS; `/keyboard-windows|-mac|-linux` for another one.
+- `/set` and `/config` — browse the `/set-*` and `/config-*` settings commands. Each setting
+  exists in three tiers: bare (= this project), `-local-` (the same project tier, named
+  explicitly) and `-global-` (this machine). Current settings: session name, how many sessions
+  `/resume` keeps, compact vs full session view, the thinking level new sessions start at, and
+  the palette highlight color.
 - `/exit` or `/quit` — ends the session.
 - Ctrl+D (EOF on stdin) also ends the session cleanly.
+
+`/debug` no longer exists. It was shelved and then removed outright on 2026-09-11 (it had an
+unresolved lockup when returning from its view); if raw conversation data is ever needed again,
+the plan is an external-editor view rather than an in-TUI one.
 
 ## Running from a terminal
 
