@@ -154,6 +154,17 @@ export interface CumulativeUsage {
   requestCount: number;
 }
 
+/**
+ * The share of the context window at which this loop stops being passive: at or above it, the turn
+ * pauses before sending, force-compacts toward 25% headroom, and now says so (front-end checklist
+ * #13 - see `pauseAndCompactIfOverEighty`).
+ *
+ * Exported so the status bar can colour its own bar on the same number. The engine owns it, because
+ * the engine is what acts on it - a UI that drew its warning line somewhere else would be telling
+ * the user about a threshold that does not exist.
+ */
+export const CONTEXT_PRESSURE_RATIO = 0.8;
+
 export class AgentLoop {
   private entries: ContextEntry[] = [];
   /** id -> entry, kept in lockstep with `entries` (see `indexEntry()`/`deindexEntry()`) - O(1)
@@ -791,7 +802,7 @@ export class AgentLoop {
     // keeps regenerating content compaction can't shrink still stops retrying eventually rather
     // than looping forever. Falls through to hardStopMessage() above as the final backstop if even
     // this can't get below 80%.
-    const COMPACT_PAUSE_RATIO = 0.8;
+    const COMPACT_PAUSE_RATIO = CONTEXT_PRESSURE_RATIO;
     const COMPACT_TARGET_RATIO = 0.75;
     const MAX_FORCED_COMPACT_ATTEMPTS = 3;
     const pauseAndCompactIfOverEighty = async (): Promise<void> => {
@@ -800,6 +811,26 @@ export class AgentLoop {
       for (let attempt = 0; attempt < MAX_FORCED_COMPACT_ATTEMPTS; attempt++) {
         const before = this.hybridPromptTokenEstimate(options.modeInstruction);
         if (before < contextWindow * COMPACT_PAUSE_RATIO) return; // under 80% - nothing to do
+        // Front-end checklist #13: say so. This gate has paused and force-compacted silently since
+        // 2026-10-03, which left a compaction looking like routine housekeeping rather than the
+        // session telling you it is near the edge - the plan called an active warning "the actual
+        // preventive fix for the silent-hang incident". Only on the first attempt: the retries are
+        // one escalation, not three separate events.
+        //
+        // Naturally edge-triggered, with no state to keep: the gate only runs when usage is over
+        // the line, and a successful pass leaves it at ~75%, so the next turn is silent unless it
+        // climbs back over. A session that cannot be compacted below the line warns each turn,
+        // which is correct - it really is pausing and compacting each turn, and the nearly-full
+        // backstop below is about to speak up too.
+        if (attempt === 0) {
+          onEvent({
+            type: 'warning',
+            text:
+              `Context at ${Math.round((before / contextWindow) * 100)}% ` +
+              `(~${before.toLocaleString()} / ${contextWindow.toLocaleString()} tokens) - ` +
+              'compacting to make room before this send.',
+          });
+        }
         const forcedReserve = Math.floor(contextWindow * (1 - COMPACT_TARGET_RATIO));
         const forcedSettings: CompactionSettings = {
           ...(options.compactionSettings ?? compactionSettingsForWindow(contextWindow)),
@@ -881,6 +912,14 @@ export class AgentLoop {
     // they get hidden via hidePendingCutoffChain() below. Only the newest round's content is what
     // the model actually needs to continue from.
     const cutoffChain: ContextEntry[] = [];
+    /**
+     * The cut-off assistant entries the next request must END on, passed to `toWireMessages` so the
+     * server resumes the sentence. Kept as a positional guarantee at the wire level rather than by
+     * ordering the appends, because the end-of-round compaction pass runs after a cutoff like any
+     * other round and appends notices of its own - a prune goes out as a user message, a compaction
+     * summary joins the assistant group. Empty whenever the next request is not a continuation.
+     */
+    let continuationEntries: ContextEntry[] = [];
     let emptyTurnRetries = 0;
     let hadToolWork = false;
     // No continuation prompt after a cutoff: the request simply ends on the cut-off assistant
@@ -985,7 +1024,10 @@ export class AgentLoop {
         : undefined;
       const request: CompletionRequest = {
         systemPrompt: systemPromptForRequest,
-        messages: toWireMessages(this.entries),
+        messages: toWireMessages(
+          this.entries,
+          continuationEntries.map((e) => e.id),
+        ),
         tools: toolDefs,
         signal: options.signal,
         maxTokens: dynamicMaxTokens,
@@ -1131,6 +1173,11 @@ export class AgentLoop {
       if (isMaxTokensCutoff) {
         cutoffChain.push(...roundEntries);
       }
+      // Which entries the NEXT request has to end on, so the server resumes the cut-off sentence
+      // instead of starting over. Only a cutoff with no tool call is a continuation: with a tool
+      // call the loop runs the tools and the request properly ends on their results. Narrower than
+      // `cutoffChain`, which is about reclaiming tokens and takes any cutoff.
+      continuationEntries = isMaxTokensCutoff && response.toolCalls.length === 0 ? [...roundEntries] : [];
 
       for (const call of response.toolCalls) {
         checkAborted();

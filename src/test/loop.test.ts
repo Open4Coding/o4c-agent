@@ -408,6 +408,31 @@ test('a max_tokens cutoff with no tool call retries instead of ending the turn, 
   assert.equal(events.filter((e) => e.type === 'warning').length, 1, 'only the cut-off round should warn');
 });
 
+// Plan 0003 follow-up 3. llama-server echoes the prefill, so a continuation's content is
+// prefix + continuation (measured 2026-10-11). That full content is CORRECT here and must not be
+// trimmed: the entry written to history has to carry the whole assistant text, and in compact view
+// the single `final` line is built from the turn's return value. The on-screen duplication happens
+// further out, in `full` view where streamed deltas commit into scrollback as they arrive, and is
+// handled in the provider's display stream (prefillEcho.ts) - not here.
+test('a continuation keeps the whole echoed answer in history and in the return value', async () => {
+  const prefix = 'Here are three facts about the Moon:\n1. The Moon is about';
+  const whole = `${prefix} 384,400 km away. 2. It has no atmosphere.`;
+  const provider = new FakeProvider([
+    { content: prefix, toolCalls: [], stopReason: 'max_tokens' },
+    { content: whole, toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const result = await loop.run('three moon facts');
+
+  assert.equal(result, whole, 'the final answer must be the complete text, echo included');
+  const visible = loop
+    .getEntries()
+    .filter((e) => e.agent_visible !== false)
+    .map((e) => e.content);
+  assert.ok(visible.includes(whole), 'history must hold the complete assistant text');
+});
+
 test('a model that never converges past max_tokens still stops at maxIterations, not forever', async () => {
   const neverFinishes = Array.from({ length: 5 }, () => ({
     content: '<think>still going',
@@ -614,6 +639,83 @@ test('loadEntries() excludes agent_visible=false entries from getVisibleTokenEst
   loop.loadEntries([kept, summarizedAway]);
 
   assert.equal(loop.getVisibleTokenEstimate(), estimateTokens(kept));
+});
+
+// Front-end checklist #13. This gate has paused and force-compacted since 2026-10-03 without
+// saying a word, so a compaction read as routine housekeeping rather than as the session telling
+// you it was near the edge - and the plan called an active warning at this threshold "the actual
+// preventive fix for the silent-hang incident".
+test('crossing the context-pressure threshold warns, naming the percentage and the counts', async () => {
+  const provider = new FakeProvider(
+    Array.from({ length: 6 }, () => ({ content: 'ok', toolCalls: [], stopReason: 'end_turn' as const })),
+  );
+  const loop = new AgentLoop(provider, [], 'system');
+  // Calibrated by measurement, not arithmetic: 24,000 characters lands at 90% of a 10,000 window.
+  // Two things make chars/4 the wrong way to pick this number - the estimate covers the whole
+  // prompt (system instruction and safety delta included, see hybridPromptTokenEstimate), and the
+  // ordinary per-round compaction runs BEFORE this gate, so a smaller history gets trimmed under
+  // the line and never reaches it. Landing in the 80s rather than past 100% matters: this is the
+  // in-band case, where the gate speaks up but the nearly-full backstop has nothing to say yet.
+  loop.loadEntries([aiResponseEntry('x'.repeat(24_000))]);
+
+  const warnings: string[] = [];
+  await loop.run('go', {
+    contextWindow: 10_000,
+    onEvent: (e) => {
+      if (e.type === 'warning' && e.text) warnings.push(e.text);
+    },
+  });
+
+  const pressure = warnings.filter((w) => w.startsWith('Context at '));
+  assert.equal(pressure.length, 1, `expected exactly one pressure warning, got ${JSON.stringify(warnings)}`);
+  // The percentage and both counts, because "context is getting full" without numbers gives the
+  // user nothing to judge how much room is actually left.
+  // `\d+` rather than `\d\d` in the pattern: the estimate can legitimately exceed the window
+  // before compaction runs, and reporting a real 131% is more use than clamping it to a
+  // reassuring 100%. The band is then asserted separately, to pin this as the in-band case.
+  assert.match(pressure[0], /Context at \d+% \(~[\d,]+ \/ 10,000 tokens\)/);
+  const percent = Number(/Context at (\d+)%/.exec(pressure[0])![1]);
+  assert.ok(percent >= 80 && percent < 100, `expected an in-band percentage, got ${percent}`);
+  assert.match(pressure[0], /compacting to make room/);
+});
+
+// The retry loop runs up to three times; it is one escalation, not three events.
+test('the pressure warning fires once per send, however many compaction attempts it takes', async () => {
+  const provider = new FakeProvider(
+    Array.from({ length: 8 }, () => ({ content: 'ok', toolCalls: [], stopReason: 'end_turn' as const })),
+  );
+  const loop = new AgentLoop(provider, [], 'system');
+  // Deliberately one entry that compaction cannot shrink below the line, so the gate does its
+  // full retry dance rather than succeeding on the first pass.
+  loop.loadEntries([aiResponseEntry('y'.repeat(39_000))]);
+
+  const warnings: string[] = [];
+  await loop.run('go', {
+    contextWindow: 10_000,
+    onEvent: (e) => {
+      if (e.type === 'warning' && e.text?.startsWith('Context at ')) warnings.push(e.text);
+    },
+  });
+
+  assert.equal(warnings.length, 1, `one escalation, one warning: ${JSON.stringify(warnings)}`);
+});
+
+// The other half of being edge-triggered: ordinary usage must stay silent, or the warning becomes
+// noise and stops meaning anything.
+test('a turn well under the threshold says nothing about context pressure', async () => {
+  const provider = new FakeProvider([{ content: 'ok', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.loadEntries([aiResponseEntry('z'.repeat(4_000))]); // ~1,000 tokens of 229,376
+
+  const warnings: string[] = [];
+  await loop.run('go', {
+    contextWindow: 229_376,
+    onEvent: (e) => {
+      if (e.type === 'warning' && e.text) warnings.push(e.text);
+    },
+  });
+
+  assert.deepEqual(warnings, []);
 });
 
 test('request.maxTokens shrinks to the real remaining budget as the prompt grows, instead of staying a flat half-window value', async () => {

@@ -26,18 +26,26 @@ export const theme = {
    */
   user: '#6AA167',
   /**
-   * Tool calls and their results. Added 2026-10-11 at David's request ("can we do [tool] use as a
-   * dimmed down white?"). They used to draw in `border`, the bronze also used for `system`, which
-   * put the loudest-volume lines in the transcript - every call plus every result - in a saturated
-   * amber competing with `accent`. This is literally `text` dimmed: #FFF8DC scaled to 65%, so it
-   * reads as the theme's own white turned down rather than as a new hue, and recedes behind the
-   * response and the user's turn where it belongs.
-   *
-   * Lightened from 65% to 80% (#A6A18F -> #CCC6B0) the same day, on sight: at 65% it had gone past
-   * receding into hard to read, which is the wrong trade for lines carrying tool arguments and
-   * output somebody actually needs to scan.
+   * Tool OUTPUT - the `[result]` lines. Added 2026-10-11 at David's request ("can we do [tool] use
+   * as a dimmed down white?"). It used to draw in `border`, the bronze also used for `system`,
+   * which put the loudest-volume lines in the transcript in a saturated amber competing with
+   * `accent`. This is literally `text` dimmed: #FFF8DC scaled to 80%, so it reads as the theme's
+   * own white turned down rather than as a new hue. (Started at 65% and was lightened the same
+   * day, on sight: 65% had gone past receding into hard to read, which is the wrong trade for
+   * output somebody actually needs to scan.)
    */
   tool: '#CCC6B0',
+  /**
+   * The tool CALL line - `[read_file] {...}`. Split off from `tool` 2026-10-11, same day, on
+   * David's instruction: "I need [tool] to be bright white and the output to be the same color it
+   * is." Pure white rather than `text`'s cornsilk, because bright was the whole request and the
+   * warm white is a shade too close to the output it now has to stand apart from.
+   *
+   * The pairing is the point: the call is the thing you scan FOR when reading back a transcript,
+   * and its output is bulk you read only once you have found the call. So the call leads at full
+   * brightness and the output sits a step behind it, instead of both being one weight.
+   */
+  toolCall: '#FFFFFF',
 } as const;
 
 /**
@@ -46,10 +54,31 @@ export const theme = {
  * can read, since Ink emits no escape codes under the test renderer (`ink-testing-library`
  * frames come back as plain text, so a rendered frame cannot be asserted on for color).
  */
+/**
+ * The context bar's two colours, as a function a test can read rather than a pair of ternaries
+ * inline in the status line - same reasoning as `lineStyle` below: ink-testing-library strips
+ * colour from its frames, so a rendered frame cannot be asserted on for colour.
+ *
+ * `pressureRatio` is a parameter rather than a constant here because the threshold belongs to the
+ * engine (`CONTEXT_PRESSURE_RATIO` in agent/loop.ts) - the status line passes the engine's own
+ * number in, so the bar cannot end up changing colour at a threshold nothing acts on. Front-end
+ * checklist #13.
+ */
+export function contextBarStyle(
+  fraction: number,
+  pressureRatio: number,
+): { bar: string; percent: string } {
+  // At or above the line, where the loop starts pausing to compact before it will send.
+  if (fraction >= pressureRatio) return { bar: theme.error, percent: theme.error };
+  // Below it, the colours the bar has always had: the point is that 79% and 81% must not look
+  // identical, not that ordinary usage should look alarming.
+  return { bar: theme.warn, percent: theme.accent };
+}
+
 export const lineStyle: Record<LineKind, { color: string; bold?: boolean }> = {
   system: { color: theme.border },
   user: { color: theme.user, bold: true },
-  tool_call: { color: theme.tool },
+  tool_call: { color: theme.toolCall },
   tool_result: { color: theme.tool },
   final: { color: theme.accent, bold: true },
   error: { color: theme.error },

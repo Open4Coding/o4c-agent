@@ -62,7 +62,7 @@ import {
   liveRegionCapRows as sharedLiveRegionCapRows,
   liveRegionCapRowsFor,
 } from './frameBudget.js';
-import { theme, lineStyle } from './theme.js';
+import { theme, lineStyle, contextBarStyle } from './theme.js';
 import { colorViewLines } from './colorView.js';
 import {
   formatTokenCount,
@@ -75,7 +75,7 @@ import {
   renderProgressBar,
   progressBarFilledCells,
 } from './statusBar.js';
-import { AbortedError, type AgentLoop, type AgentEvent } from '../agent/loop.js';
+import { AbortedError, CONTEXT_PRESSURE_RATIO, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import { ConfigStore, scopeOwningEntry, type ConfigScope } from '../session/configStore.js';
@@ -323,10 +323,17 @@ function StatusBar({
       {fraction !== undefined && (
         <Text>
           {' ['}
-          <Text color={theme.warn}>{'█'.repeat(progressBarFilledCells(fraction))}</Text>
+          {/* Front-end checklist #13: red at exactly the share where the loop starts pausing to
+              compact, passing the ENGINE's threshold in rather than writing 0.8 again here - a bar
+              that changed colour at its own number would be reporting a threshold nothing acts on. */}
+          <Text color={contextBarStyle(fraction, CONTEXT_PRESSURE_RATIO).bar}>
+            {'█'.repeat(progressBarFilledCells(fraction))}
+          </Text>
           <Text color={theme.border}>{'░'.repeat(10 - progressBarFilledCells(fraction))}</Text>
           {'] '}
-          <Text color={theme.accent}>{Math.round(fraction * 100)}%</Text>
+          <Text color={contextBarStyle(fraction, CONTEXT_PRESSURE_RATIO).percent}>
+            {Math.round(fraction * 100)}%
+          </Text>
         </Text>
       )}
       <Text color={theme.border}> | </Text>
