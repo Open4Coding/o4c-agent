@@ -370,3 +370,48 @@ export function moveParagraph(value: string, cursor: number, direction: 'up' | '
   }
   return i <= 0 ? 0 : toCursor(value, { line: i, col: 0 });
 }
+
+/** Where the cursor should be laid out, and the text to lay out to get it there. */
+export interface CursorRenderTarget {
+  /** `value`, with one space inserted when the cursor sits somewhere with no glyph of its own. */
+  readonly text: string;
+  /** The cursor's index into `text` - the same index it had in `value`, by construction. */
+  readonly index: number;
+  /** Whether a space had to be inserted, i.e. the cursor is on a newline or past the end. */
+  readonly inserted: boolean;
+}
+
+/**
+ * The text the input box lays out in order to place its cursor, which is NOT always `value`.
+ *
+ * If the character at the cursor is a real newline - the cursor at the end of a non-final line, or
+ * on an otherwise-empty line, whose own "start" position IS its newline - then there is no glyph
+ * there to sit on. The fix is to insert one space immediately BEFORE that newline: an addition,
+ * never a replacement, so the newline is still there unconsumed and the line break still happens
+ * exactly where it always did. The cursor then lands on the row it logically belongs to.
+ *
+ * Two real bugs are frozen into this, both found by David on live runs and both of the same shape -
+ * the cursor appearing in the wrong row:
+ *  1. "go to the top line, and hit ctrl-j the cursor disappears" - nothing to sit on at all.
+ *  2. "if 3 lines are inserted ctrl-j x 3 at the beginning and you up two... the green box start
+ *     moving down again" - the first attempt looked FORWARD past every newline to the next real
+ *     character, which skipped straight over three consecutive empty lines and landed rows below
+ *     where the cursor actually was. Never skip past the newline.
+ *
+ * Lives here rather than in the component (where it was until 2026-10-12) so that both those
+ * regressions can be asserted directly on the position, instead of on escape codes painted into a
+ * frame. That mattered the moment the box stopped painting its own cursor cell and started
+ * positioning the terminal's real one, which a test harness cannot see at all - see checklist
+ * item 19.
+ *
+ * Only narrowly not layout-neutral: if a line's content fills EXACTLY `contentWidth` columns and
+ * the cursor sits at its very end, the extra character can push a space onto its own row for as
+ * long as the cursor stays there. Accepted as a rare cosmetic edge case rather than reintroducing
+ * either bug above.
+ */
+export function cursorRenderTarget(value: string, cursor: number): CursorRenderTarget {
+  const rawAt = value.slice(cursor, cursor + 1);
+  const isRealChar = rawAt !== '' && rawAt !== '\n';
+  if (isRealChar) return { text: value, index: cursor, inserted: false };
+  return { text: `${value.slice(0, cursor)} ${value.slice(cursor)}`, index: cursor, inserted: true };
+}

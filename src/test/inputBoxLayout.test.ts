@@ -9,7 +9,8 @@ import {
   rowEnd,
   movePageVisualRows,
   moveParagraph,
-  toLineCol,
+  cursorRenderTarget,
+  inputWindow,
 } from '../ui/inputBoxLayout.js';
 
 test('toLineCol/toCursor round-trip through every position of a multi-line value, including the boundary right at each newline', () => {
@@ -224,4 +225,84 @@ test('page movement past the end lands on the very start or end', () => {
   const text = 'one\ntwo\nthree';
   assert.equal(movePageVisualRows(text, 0, 40, '> ', 50, 'down'), text.length);
   assert.equal(movePageVisualRows(text, text.length, 40, '> ', 50, 'up'), 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Cursor placement, ported here 2026-10-12 from InputBox.test.tsx (checklist item 19).
+//
+// These four started life asserting reverse-video escape codes inside a rendered frame, because
+// the box painted its own cursor cell. It now positions the terminal's REAL cursor, which is an
+// escape appended outside the frame text and therefore invisible to ink-testing-library - so the
+// assertions moved down to the pure functions the bugs actually lived in. Each one is a live
+// regression David found by hand; the quotes are his.
+//
+// The pipeline under test is the real one: cursorRenderTarget decides what text to lay out, and
+// inputWindow reports which row and column the cursor lands on in it.
+function placeCursor(value: string, cursor: number, width = 96, prompt = '> ', capRows = 10) {
+  const target = cursorRenderTarget(value, cursor);
+  const view = inputWindow(target.text, target.index, width, prompt, capRows);
+  return { row: view.cursorRow, col: view.cursorCol, rows: view.rows, inserted: target.inserted };
+}
+
+test('a cursor on an ordinary character lays out the value unchanged', () => {
+  // The common case: nothing is inserted, so the text laid out IS the value.
+  const target = cursorRenderTarget('abc', 1);
+  assert.equal(target.text, 'abc');
+  assert.equal(target.index, 1);
+  assert.equal(target.inserted, false);
+});
+
+test('a cursor at the end of a non-final line stays on THAT line - "the cursor disappears" bug', () => {
+  // David: "go to the top line, and hit ctrl-j the cursor disappears, it re-appears when you down
+  // arrow to the text moved down." A real newline has no glyph to sit on, so a space is inserted
+  // BEFORE it - never replacing it, so "line one" still ends its own row.
+  const value = `line one\nline two`;
+  const atEndOfLineOne = 'line one'.length;
+  const { row, col, rows, inserted } = placeCursor(value, atEndOfLineOne);
+  assert.equal(inserted, true, 'a space must be inserted where the newline is');
+  assert.equal(row, 0, 'the cursor belongs on the line-one row');
+  // Right after "line one", on the prompt-offset row 0: prompt is 2 columns wide.
+  assert.equal(col, '> line one'.length);
+  assert.ok(rows[0].startsWith('> line one'), `row 0 is "${rows[0]}"`);
+  assert.ok(rows[1].includes('line two'), 'line two must still start a fresh row below');
+});
+
+test('a cursor on one of several consecutive empty lines stays on its own row - "the box start moving down" bug', () => {
+  // David's follow-up, which caught a real bug in the FIRST fix: "if 3 lines are inserted ctrl-j
+  // x 3 at the beginning and you up two... the green box start moving down again." Three newlines
+  // before "original" make three empty lines, each of which is immediately its own newline. The
+  // first fix looked forward past every newline to the next real character and so landed on
+  // "original", rows below where the cursor was. It must not skip.
+  const value = `\n\n\noriginal`;
+  // Second empty line = index 1 (after the first newline).
+  const { row, rows } = placeCursor(value, 1);
+  assert.equal(row, 1, 'the cursor is on the second empty line, not down on "original"');
+  assert.ok(!rows[1].includes('original'), `row 1 must not be "original": "${rows[1]}"`);
+  assert.ok(rows[3].includes('original'), 'original still sits on its own row below');
+});
+
+test('a cursor past the end of the value gets a glyph to sit on', () => {
+  // The other no-glyph case, and the one that happens constantly: typing at the end. There is no
+  // character at the cursor at all, so a space is inserted and the cursor sits on it.
+  const { row, col, inserted } = placeCursor('abc', 3);
+  assert.equal(inserted, true);
+  assert.equal(row, 0);
+  assert.equal(col, '> abc'.length);
+});
+
+test('inserting the space never consumes the newline, so line structure is identical', () => {
+  // The invariant behind both bugs above, stated directly: removing the inserted space must give
+  // back exactly the original value. An insertion, never a replacement.
+  for (const [value, cursor] of [
+    [`a\nb`, 1],
+    [`\n\nx`, 0],
+    [`\n\nx`, 1],
+    ['abc', 3],
+    [`trailing\n`, 8],
+  ] as Array<[string, number]>) {
+    const { text, index, inserted } = cursorRenderTarget(value, cursor);
+    assert.equal(inserted, true, `expected an insertion for ${JSON.stringify(value)} @ ${cursor}`);
+    assert.equal(text.slice(0, index) + text.slice(index + 1), value, 'removing the space must restore the value');
+    assert.equal(text[index], ' ', 'the inserted character is a space');
+  }
 });

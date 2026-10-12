@@ -476,17 +476,23 @@ test('editing works even when disabled=true, matching the type-ahead queueing de
   assert.deepEqual(submitted, ['queued message']);
 });
 
-test('the cursor stays visible while disabled=true, not just editable - real bug found via direct user report', async () => {
+test('typing while disabled=true still shows up on screen - real bug found via direct user report', async () => {
   // "when this is thinking, the cursor disappears, you give it a prompt there is no cursor" -
   // disabled=true (the mid-turn "thinking" state) still genuinely accepts keystrokes for queueing
-  // (the test above), so hiding the cursor made it look like typing wasn't going anywhere when it
-  // actually was. The cursor cell must still render even though the box is disabled.
+  // (the test above), so there must be visible evidence that typing is going somewhere.
+  //
+  // Rewritten 2026-10-12 (checklist item 19): this used to assert the painted cursor cell, which
+  // no longer exists - the box positions the terminal's real cursor, which lives in an escape
+  // outside the frame and cannot be seen from here at all. What IS still assertable, and is
+  // closer to what David actually reported, is that the character appears. The cursor itself not
+  // being gated on `disabled` is pinned by the code path instead: `setCursorPosition` keys off
+  // `active`, never `disabled` - see InputBox's own comment, and the frame-stability test below.
   const { stdin, lastFrame } = render(React.createElement(InputBox, { disabled: true, onSubmit: () => {} }));
   await tick();
 
   await type(stdin, 'x');
   const frame = lastFrame() ?? '';
-  assert.ok(frame.includes(CURSOR_ON), 'cursor must still be visible while disabled=true');
+  assert.ok(frame.includes('> x'), `typed text must render while disabled: ${JSON.stringify(frame)}`);
 });
 
 // The test harness's fake Stdout (ink-testing-library) always reports 100 columns, fixed - see
@@ -814,8 +820,23 @@ test('the cursor cell renders on the content row, not spliced into the border be
   // The border row must be untouched box-drawing characters only - no inverse-video escape
   // code and no bare space breaking up the run of dashes.
   assert.equal(/^╰─+╯$/.test(borderLine), true);
-  // The cursor's highlighted cell belongs on the content row, right after "> /".
-  assert.ok(contentLine.includes(`> /${CURSOR_ON} ${CURSOR_OFF}`));
+  // And the content itself is on the content row where it belongs.
+  // The cursor-cell half of this assertion went away with the painted cursor (item 19); the
+  // border-purity check above is the part that actually caught the phantom row, and it still does.
+  assert.ok(contentLine.includes('> /'), `content row is "${contentLine}"`);
+});
+
+test('no reverse-video codes are emitted anywhere - the painted cursor cell is really gone', async () => {
+  // A guard against the cell creeping back alongside the real cursor, which would render as a
+  // solid block with a blinking cursor sitting on it. Checklist item 19.
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
+  await tick();
+  await type(stdin, 'hello');
+  await press(stdin, LEFT);
+  await press(stdin, CTRL_J);
+  const frame = lastFrame() ?? '';
+  assert.equal(frame.includes(CURSOR_ON), false, `reverse video found: ${JSON.stringify(frame)}`);
+  assert.equal(frame.includes(CURSOR_OFF), false);
 });
 
 test('the cursor stays visible at the end of a non-final line, instead of vanishing on the invisible newline', async () => {
@@ -837,16 +858,16 @@ test('the cursor stays visible at the end of a non-final line, instead of vanish
   await press(stdin, END); // end of the current row - lands right before the '\n'
 
   const frame = lastFrame() ?? '';
-  // A highlighted *space* right after "line one" - inserted before the real '\n', not replacing
-  // it, so "line one" still ends its own row and "line two" still starts a fresh one below it.
+  // WHERE the cursor lands is now asserted on the pure functions, in inputBoxLayout.test.ts - the
+  // real cursor is an escape outside the frame and cannot be seen from here (item 19). What stays
+  // visible, and is the other half of the fix, is that inserting the space did not CONSUME the
+  // newline: "line one" still ends its own row and "line two" still starts a fresh one below it.
+  // Had the space replaced the newline, these two would share a row.
   const lines = frame.split('\n');
-  const lineOneRow = lines.find((l) => l.includes('line one'));
-  assert.ok(
-    lineOneRow?.includes(`line one${CURSOR_ON} ${CURSOR_OFF}`),
-    `cursor not shown at end of line one: "${lineOneRow}"`,
-  );
-  const lineTwoRow = lines.find((l) => l.includes('line two'));
-  assert.ok(lineTwoRow && !lineTwoRow.includes(CURSOR_ON), 'line two should not carry the highlight');
+  const lineOneIndex = lines.findIndex((l) => l.includes('line one'));
+  const lineTwoIndex = lines.findIndex((l) => l.includes('line two'));
+  assert.ok(lineOneIndex >= 0 && lineTwoIndex >= 0, `both lines must render: ${JSON.stringify(lines)}`);
+  assert.equal(lineTwoIndex, lineOneIndex + 1, 'line two must be on the very next row, not merged');
 });
 
 test('the cursor stays on its own (empty) line, not several rows away, when several newlines are inserted in a row', async () => {
@@ -873,21 +894,32 @@ test('the cursor stays on its own (empty) line, not several rows away, when seve
 
   const frame = lastFrame() ?? '';
   const lines = frame.split('\n');
-  // Exactly one content row carries the highlight, and it must not be "original"'s own row -
-  // the cursor is two rows above that, on an empty line with nothing else on it.
-  const highlighted = lines.filter((l) => l.includes(CURSOR_ON));
-  assert.equal(highlighted.length, 1, `expected exactly one highlighted row, got: ${JSON.stringify(lines)}`);
-  assert.ok(!highlighted[0].includes('original'), 'the highlight must not have jumped down to "original"');
+  // Which row the cursor sits on is asserted on the pure functions now (inputBoxLayout.test.ts),
+  // since the real cursor leaves no mark in the frame (item 19). The rendering half still worth
+  // pinning here: the three empty lines genuinely exist as three empty rows, with "original"
+  // below them. The first attempt at this fix collapsed them, which is how the cursor ended up
+  // rows away from where it belonged.
+  const originalIndex = lines.findIndex((l) => l.includes('original'));
+  assert.ok(originalIndex >= 3, `"original" should sit below three empty rows: ${JSON.stringify(lines)}`);
+  for (const row of lines.slice(originalIndex - 3, originalIndex)) {
+    assert.equal(row.replace(/[^a-zA-Z0-9]/g, ''), '', `expected an empty content row, got "${row}"`);
+  }
 });
 
-test('the cursor never blinks: an idle input box does not repaint, enabled or disabled, and the cursor stays visible', async () => {
+test('an idle input box does not repaint, enabled or disabled - the blink costs no frames', async () => {
+  // This is the invariant that made `useCursor` worth doing rather than a timer. The cursor DOES
+  // blink now, but the terminal blinks it: nothing here redraws, so an idle box at 80% of the
+  // screen is not rewriting ~90 rows twice a second. A timer-driven blink would fail this.
+  //
+  // The cursor-visible half of this test is gone (item 19) - the real cursor is an escape appended
+  // outside the frame, so there is nothing in `frames` to look for. Only a real terminal can
+  // confirm it is on screen.
   for (const disabled of [false, true]) {
     const { frames } = render(React.createElement(InputBox, { disabled }));
     await tick();
     const before = frames.length;
     await new Promise((resolve) => setTimeout(resolve, 1300)); // would have crossed two blink toggles
     assert.equal(frames.length, before, 'no repaints while idle (disabled=' + disabled + ')');
-    assert.ok(frames[frames.length - 1].includes(CURSOR_ON), 'the cursor is visible (disabled=' + disabled + ')');
   }
 });
 
@@ -1113,11 +1145,13 @@ test('the character under the cursor stays visible, not hidden by the highlight'
   await press(stdin, LEFT);
   await press(stdin, LEFT); // cursor now sits on 'b'
   const frame = lastFrame() ?? '';
-  assert.ok(
-    frame.includes(`${CURSOR_ON}b${CURSOR_OFF}`),
-    'the character under the cursor must be inside the highlight, not replaced by it',
-  );
-  assert.ok(!frame.includes('[48;2;'), 'no explicit background may be used for the cursor cell');
+  // The original complaint - "can we do a highlight of the cursor position in something that is a
+  // different color so you can see the letter below?" - is answered outright by the real cursor:
+  // there is no highlight to hide anything, so the character is simply drawn. What is left to
+  // assert is that it IS drawn, and that no cursor-specific colour survives anywhere.
+  assert.ok(frame.includes('> abc'), `the text must render in full: ${JSON.stringify(frame)}`);
+  assert.equal(frame.includes('[48;2;'), false, 'no explicit background may be used for the cursor');
+  assert.equal(frame.includes(CURSOR_ON), false, 'no reverse video may be used for the cursor');
 });
 
 test('a burst of keystrokes in one tick lands in the order it arrived', async () => {

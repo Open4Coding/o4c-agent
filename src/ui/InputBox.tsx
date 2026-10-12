@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput, useWindowSize } from 'ink';
+import { Box, Text, measureElement, useBoxMetrics, useCursor, useInput, useWindowSize } from 'ink';
+import type { DOMElement } from 'ink';
 import stringWidth from 'string-width';
 import {
+  cursorRenderTarget,
   inputWindow,
   movePageVisualRows,
   moveParagraph,
@@ -175,26 +177,16 @@ function contentWidth(columns: number | undefined): number {
   return Math.max(1, (columns ?? 80) - 4);
 }
 
-// Reverse video on, then off. SGR 7 swaps whatever foreground and background are active, so the
-// cursor cell renders as a solid block in the line's own color with the character under it drawn
-// in the terminal's background color - visible, rather than lost.
-//
-// That is the point of the change. The previous version set an explicit amber BACKGROUND and left
-// the foreground alone, but the whole line is already amber: the character under the cursor was
-// amber on amber, invisible everywhere except at the very end of the text, where the cursor sits
-// on a space and there is nothing to hide (David, 2026-10-05: "can we do a highlight of the cursor
-// position in something that is a different color so you can see the letter below?"). The explicit
-// background arrived with the cursor blink in 98271c8 and outlived it - the blink itself was
-// removed in 3a895d9 - so this is a leftover, not a deliberate choice.
-//
-// SGR 7/27 is also the only pair that composes safely here. The cell is spliced into one
-// already-colored string, so an explicit foreground would need the surrounding color re-emitted
-// after it, and `\x1B[39m` resets to the terminal's default rather than to the line's amber (or to
-// its gray while disabled). Reverse video needs no restore at all: 27 turns it off and leaves both
-// colors exactly as they were, so the cell is correct in both states. These are the same codes
-// Ink's own `inverse` prop emits.
-const CURSOR_ON = '\x1B[7m';
-const CURSOR_OFF = '\x1B[27m';
+// The input box paints no cursor of its own any more. It positions the terminal's REAL cursor
+// (`useCursor`, see the component body), so the terminal draws and blinks it at whatever rate the
+// user has configured, for zero extra repaints. What used to be here was a reverse-video cell -
+// SGR 7/27 spliced into the already-coloured row string - and that history is worth keeping
+// because it explains the shape of the code around it: an explicit amber BACKGROUND arrived with
+// the original blink (98271c8), outlived its removal (3a895d9), and left the character under the
+// cursor amber-on-amber and invisible, which David reported directly 2026-10-05. Reverse video
+// replaced it because it needed no colour restored afterwards. All of it is gone as of checklist
+// item 19 - but `cursorRenderTarget` in inputBoxLayout still exists for the same reason the cell
+// did: the cursor needs somewhere with a glyph to sit.
 
 /**
  * A bordered, auto-growing, genuinely multi-line-capable input box. `value` may contain real
@@ -322,6 +314,22 @@ export function InputBox({
   // was the better source anyway. Handlers and layout now measure against ONE value, where before
   // a handler could read a size the rendered window had not re-wrapped to yet.
   const { columns, rows } = useWindowSize();
+
+  // Checklist item 19: the terminal draws and blinks its OWN cursor, at the rate the user has
+  // configured, instead of this component painting a reverse-video cell. The cell it replaces cost
+  // nothing to draw, but a BLINKING one could only ever have been a timer flipping React state
+  // twice a second, repainting a box that is up to 80% of the screen - which is exactly the traffic
+  // behind the frame-erase bugs this arc spent weeks on. `useCursor` costs no repaints at all.
+  //
+  // Needs the position relative to Ink's output origin, not to this box, so the content element is
+  // measured rather than guessed: `measureElement` walks up the layout tree accumulating offsets,
+  // which is the same coordinate space Ink's own `buildCursorSuffix` works in. `useBoxMetrics` is
+  // here only for `hasMeasured` - its `top`/`left` are relative to the PARENT and so are no use -
+  // and because it re-renders this component when layout moves, which is what gets the cursor
+  // repositioned after a resize.
+  const contentRef = useRef<DOMElement | null>(null);
+  const { setCursorPosition } = useCursor();
+  const { hasMeasured } = useBoxMetrics(contentRef);
 
   // Submitted-input recall (up/down arrow), kept local to the input box - it only
   // needs the raw strings that were submitted, not anything about how they resolved. Seeded
@@ -625,55 +633,12 @@ export function InputBox({
     { isActive: active },
   );
 
-  // Regression fix (David: "go to the top line, and hit ctrl-j the cursor disappears"): if the
-  // character right at the cursor is a real newline (cursor at the end of a non-final line, or
-  // sitting on an empty line entirely - an empty line's own "start" position *is* its newline),
-  // highlighting *it* renders nothing visible - a `\n` has no glyph to invert, so the inverse-
-  // video SGR codes wrap an invisible character and the cursor appears to vanish. Confirmed
-  // directly: `frame.includes('\x1B[7m')` was false the moment the cursor landed there.
-  //
-  // First attempt (looking forward past the `\n` to highlight the next real character instead)
-  // was itself a real bug, caught by David's own follow-up test: David: "if 3 lines are inserted
-  // ctrl-j x 3 at the beginning and you up two... the green box start moving down again" - three
-  // Ctrl+J presses at position 0 creates three consecutive *empty* lines, each of which is
-  // itself immediately its own `\n` with nothing before it; "look forward past every `\n`" skips
-  // straight over all of them and highlights unrelated content several rows below where the
-  // cursor logically is - the exact "stray green box in the wrong row" shape as the very first
-  // bug this plan fixed (#2), just reintroduced a different way.
-  //
-  // Correct fix: insert one highlighted *space* immediately before the real `\n` - not a
-  // replacement for it, an *addition* - so the newline is still present, unconsumed, right after
-  // the highlight, and the line break still happens exactly where it always did. This puts the
-  // cursor's visible marker on whichever row it logically belongs to (the end of a content line,
-  // or an otherwise-empty line's own row) rather than jumping elsewhere. Only very narrowly not
-  // layout-neutral: if a line's content happens to fill *exactly* `contentWidth` columns and the
-  // cursor sits at its very end, this one extra character can push a highlighted space onto its
-  // own extra row for as long as the cursor stays there - accepted as a rare, cosmetic-only edge
-  // case rather than reintroducing either bug above.
-  const before = value.slice(0, cursor);
-  const rawAt = value.slice(cursor, cursor + 1);
-  const isRealChar = rawAt !== '' && rawAt !== '\n';
-  const at = isRealChar ? rawAt : ' ';
-  const after = isRealChar ? value.slice(cursor + 1) : value.slice(cursor);
-  // The exact text that gets laid out, with that added space already in it when the cursor sits on
-  // a newline or past the end. The window is measured against this rather than `value`, so the row
-  // the cursor lands on is the row it is actually drawn on - measuring one string and rendering a
-  // different one is how a cursor ends up highlighted in the wrong place.
-  const valueWithCursor = isRealChar ? value : `${before} ${after}`;
-  const cursorInValue = cursor;
-  // Inverse-video SGR codes applied directly to the string, then everything joined into ONE
-  // string before it ever reaches <Text> - not left as separate {prompt}{before}{cursorCell}
-  // {after} children (the previous shape, with the cursor cell as a nested <Text inverse>
-  // child). Confirmed by capturing Ink's actual raw output bytes (both as a real terminal
-  // frame and via ink-testing-library) that passing multiple sibling string/Text children to
-  // one <Text> - not just the nested-<Text> case, a plain extra string child reproduced it too
-  // - can push Ink's layout by one phantom row, splicing the cursor's cell into the Box's
-  // border row below instead of the content row. Concatenating first and giving <Text> a
-  // single string child measures correctly. `\x1B[7m`/`\x1B[27m` are exactly what Ink's own
-  // `inverse` prop emits, so this is visually identical to the original nested-<Text> version.
-  // Not gated on `disabled` either: this box stays genuinely live (queueing keystrokes) while a turn
-  // runs, so the cursor stays visible too.
-  const cursorCell = `${CURSOR_ON}${at}${CURSOR_OFF}`;
+  // Which text to lay out so the cursor lands on the right row, and where in it the cursor is.
+  // The two live regressions behind this - a cursor with no glyph to sit on, and a first fix that
+  // skipped past empty lines - are documented on `cursorRenderTarget` itself, along with why it
+  // lives in inputBoxLayout rather than here.
+  const { text: valueWithCursor, index: cursorInValue } = cursorRenderTarget(value, cursor);
+
 
   // The box draws at most `inputBoxCapRows` rows of text, windowed around the cursor, however long
   // the value is. A frame as tall as the viewport cannot be erased in place - writing it scrolls
@@ -692,13 +657,27 @@ export function InputBox({
   const view = inputWindow(valueWithCursor, cursorInValue, width, prompt, capRows);
   // The windowed rows are already wrapped to `width`, so `wrap="wrap"` has nothing left to do and
   // the rendered height is exactly what was budgeted - no surprise extra row.
-  const body = view.rows
-    .map((row, i) =>
-      i === view.cursorRow
-        ? row.slice(0, view.cursorCol) + cursorCell + row.slice(view.cursorCol + 1)
-        : row,
-    )
-    .join('\n');
+  const body = view.rows.join('\n');
+
+  // Measured DURING RENDER, deliberately, and this is the one subtle thing here. `useCursor` reads
+  // its position in the commit phase (`useInsertionEffect`), so setting it from a `useEffect` would
+  // apply one commit late - a cursor trailing a keystroke behind, which is exactly what you would
+  // notice while typing. Measuring here instead reads the PREVIOUS layout, which is identical
+  // whenever the box has not moved, i.e. all ordinary typing. It is one frame stale only on the
+  // frames where the layout actually changed, and `useBoxMetrics` above re-renders us on those.
+  //
+  // `undefined` hides the cursor, which is what we want in three cases: before the first layout
+  // pass (nothing measured, so any position would be a guess), and whenever a sibling overlay owns
+  // input - a picker or a confirm dialog draws its own selection, and a second cursor parked in a
+  // box that is not listening is worse than none. Unmounting hides it for free, since the hook's
+  // own cleanup clears the position.
+  const contentNode = contentRef.current;
+  if (active && hasMeasured && contentNode) {
+    const { x, y } = measureElement(contentNode);
+    setCursorPosition({ x: x + view.cursorCol, y: y + view.cursorRow });
+  } else {
+    setCursorPosition(undefined);
+  }
   const notices = [
     view.hiddenAbove > 0 ? `… ${view.hiddenAbove} more above` : undefined,
     view.hiddenBelow > 0 ? `… ${view.hiddenBelow} more below` : undefined,
@@ -711,9 +690,14 @@ export function InputBox({
           {notices[0]}
         </Text>
       )}
-      <Text wrap="wrap" color={disabled ? 'gray' : theme.accent}>
-        {body}
-      </Text>
+      {/* The ref goes on a Box because Ink refs attach to Box, not Text, and this is the element
+          whose own origin is the first content row - what the cursor offsets are relative to.
+          flexDirection column so it occupies exactly the rows its Text does and nothing shifts. */}
+      <Box ref={contentRef} flexDirection="column">
+        <Text wrap="wrap" color={disabled ? 'gray' : theme.accent}>
+          {body}
+        </Text>
+      </Box>
       {notices[1] !== undefined && (
         <Text wrap="truncate-end" color={theme.border}>
           {notices[1]}
