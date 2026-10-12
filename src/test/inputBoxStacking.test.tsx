@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import React from 'react';
 import { Box, Text, render } from 'ink';
-import { InputBox } from '../ui/InputBox.js';
+import { InputBox, PASTE_COLLAPSE_CHARS, PASTE_COLLAPSE_LINES } from '../ui/InputBox.js';
 import { expandedInputBoxCapRows, inputBoxCapRows } from '../ui/frameBudget.js';
 import { VirtualTerminal } from './virtualTerminal.js';
 
@@ -172,13 +172,46 @@ test('no rendered frame line is wider than the terminal', async () => {
 // ---------------------------------------------------------------------------
 
 /** Five logical lines of `chars` characters each: wraps into far more rows than any budget allows. */
+/**
+ * A value taller than the box window but UNDER both paste-collapse thresholds, so the box really
+ * has to window it instead of replacing it with a placeholder.
+ *
+ * Both halves matter, and the second was learned the hard way on 2026-10-12: these tests used to
+ * pass a 400-character-per-line budget, which is 5 lines and ~2,014 characters. When InputBox grew
+ * a SIZE threshold (checklist #12's guard half) that value started collapsing to a one-line
+ * placeholder - so the notices test failed outright, and the three stacking tests kept PASSING
+ * while no longer exercising a tall value at all. Exactly the silent hollowing-out this suite is
+ * supposed to catch, which is why the fixture is now pinned below.
+ *
+ * 5 lines keeps it under the line threshold; ~200 characters per line keeps the total under the
+ * size threshold while still wrapping to 3 screen rows per line at 96 columns - 15 rows against a
+ * box that caps at 12.
+ */
 function tallValue(chars: number): string {
   return Array.from({ length: 5 }, (_, i) => `${i} ` + 'word '.repeat(Math.ceil(chars / 5))).join('\n');
 }
 
+/** Fails loudly if a threshold change makes the fixture collapse, rather than letting the tests
+ * above quietly start measuring a placeholder. Asserted against the real exported constants. */
+function assertFixtureStaysWindowed(value: string): void {
+  const lines = value.split('\n').length;
+  assert.ok(
+    lines < PASTE_COLLAPSE_LINES,
+    `fixture collapses by lines (${lines} >= ${PASTE_COLLAPSE_LINES}) - these tests would measure a placeholder`,
+  );
+  assert.ok(
+    value.length < PASTE_COLLAPSE_CHARS,
+    `fixture collapses by size (${value.length} >= ${PASTE_COLLAPSE_CHARS}) - these tests would measure a placeholder`,
+  );
+}
+
+test('the tall-value fixture is genuinely windowed, not collapsed to a placeholder', () => {
+  assertFixtureStaysWindowed(tallValue(200));
+});
+
 for (const rows of [30, 60, 114]) {
   test(`a value taller than the box leaves exactly one box, and it fits, at ${rows} rows`, async () => {
-    const term = await drive(tallValue(400), { columns: 100, rows, moves: 6 });
+    const term = await drive(tallValue(200), { columns: 100, rows, moves: 6 });
     assert.equal(term.countRowsContaining(BOX_TOP_LEFT), 1, 'cursor movement must not stack copies');
     const screen = term.screen();
     assert.ok(screen.length < rows, `the frame used ${screen.length} of ${rows} rows, leaving no spare`);
@@ -197,7 +230,7 @@ for (const rows of [30, 60, 114]) {
 test('a narrow terminal re-wraps into more rows without breaking the bound', async () => {
   // The same text at 40 columns occupies roughly 2.5x the rows it did at 100 - the case a budget
   // computed only from the terminal HEIGHT would miss entirely.
-  const term = await drive(tallValue(400), { columns: 40, rows: 30, moves: 6 });
+  const term = await drive(tallValue(200), { columns: 40, rows: 30, moves: 6 });
   assert.equal(term.countRowsContaining(BOX_TOP_LEFT), 1, 'narrow wrapping must not stack copies');
   assert.ok(term.screen().length < 30, 'the frame must still fit the viewport when wrapping is heavy');
   for (const line of term.screen()) {
@@ -208,13 +241,13 @@ test('a narrow terminal re-wraps into more rows without breaking the bound', asy
 test('the hidden-text notices track where the cursor is, and appear only when text is cut off', async () => {
   // Straight after a paste the cursor sits at the END of the value, so the window shows the tail
   // and what is cut off is above it.
-  const atEnd = await drive(tallValue(400), { columns: 100, rows: 30, moves: 0 });
+  const atEnd = await drive(tallValue(200), { columns: 100, rows: 30, moves: 0 });
   assert.ok(
     atEnd.screen().some((l) => l.includes('more above')),
     'with the cursor at the end, the rows above it must be announced',
   );
   // Walking the cursor up far enough brings rows below the window into play.
-  const movedUp = await drive(tallValue(400), { columns: 100, rows: 30, moves: 10 });
+  const movedUp = await drive(tallValue(200), { columns: 100, rows: 30, moves: 10 });
   assert.ok(
     movedUp.screen().some((l) => l.includes('more below')),
     'once the cursor moves up, the rows below it must be announced',

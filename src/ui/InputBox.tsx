@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, measureElement, useBoxMetrics, useCursor, useInput, useWindowSize } from 'ink';
+import { Box, Text, measureElement, useBoxMetrics, useCursor, useInput, usePaste, useWindowSize } from 'ink';
 import type { DOMElement } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -14,7 +14,20 @@ import {
 import { expandedInputBoxCapRows, inputBoxCapRows } from './frameBudget.js';
 
 /** A paste this many lines or longer is shown as one placeholder line; ctrl-o expands it in place. */
-const PASTE_COLLAPSE_LINES = 6;
+export const PASTE_COLLAPSE_LINES = 6;
+/**
+ * A paste this many characters or longer is collapsed too, however few lines it has.
+ *
+ * The line threshold alone missed the case the original item was written about - "pasting a huge
+ * block (e.g. a stack trace)": one 50 KB line is one line, so it sailed past the check and sat in
+ * `value` whole, with nothing on screen to say how much had arrived.
+ *
+ * 1200 is not arbitrary. `MAX_INPUT_BOX_ROWS` is 12 and content is around 96 columns wide, so the
+ * box can show roughly 1,150 characters at its largest; past that `inputWindow` is already
+ * windowing the text out of sight. A placeholder that states the size is strictly more
+ * informative than a fragment of a wall of text.
+ */
+export const PASTE_COLLAPSE_CHARS = 1200;
 /** Quiet time after the last chunk of a paste before the buffered chunks are inserted. */
 const PASTE_SETTLE_MS = 60;
 /** Terminal tab stop, in columns. Every terminal this app targets advances a `\t` to the next
@@ -254,6 +267,12 @@ export function InputBox({
     const text = pendingPasteRef.current;
     if (!text) return;
     pendingPasteRef.current = '';
+    insertPastedText(text);
+  };
+
+  /** Collapse-and-insert at the cursor. The one place pasted text enters `value`, whether it came
+   * from bracketed paste or from the chunk-buffer fallback. */
+  const insertPastedText = (text: string): void => {
     const insert = collapseText(text);
     historyIndexRef.current = -1;
     edit(({ value: v, cursor: c }) => ({
@@ -262,9 +281,8 @@ export function InputBox({
     }));
   };
 
-  // The cursor is a solid highlighted cell and never blinks. A blink repainted the whole live frame twice a
-  // second (David could not see it blink in practice), while a solid cursor costs nothing and is always
-  // visible - including while a turn runs and this box only queues keystrokes, so typing never looks dead.
+  // (The cursor is the terminal's own now - see `useCursor` above. The note that used to sit here,
+  //  about a solid non-blinking cell, described the painted cursor retired in checklist item 19.)
 
   useEffect(() => {
     onChange?.(value);
@@ -350,9 +368,15 @@ export function InputBox({
   const collapseText = (rawText: string): string => {
     const text = sanitizeInputText(rawText);
     const lineCount = text.split('\n').length;
-    if (lineCount < PASTE_COLLAPSE_LINES) return text;
+    const byLines = lineCount >= PASTE_COLLAPSE_LINES;
+    const bySize = text.length >= PASTE_COLLAPSE_CHARS;
+    if (!byLines && !bySize) return text;
     for (const [existing, full] of pasteStore) if (full === text) return existing;
-    const placeholder =`[${lineCount} lines pasted #${++pasteCounter} - ctrl-O to view]`;
+    // Described by whichever threshold it crossed: "12 lines" reads naturally for a block of
+    // lines, and "1 lines" would be nonsense for the one-enormous-line case the size threshold
+    // exists to catch, where the character count is the only useful number anyway.
+    const what = byLines ? `${lineCount} lines` : `${text.length.toLocaleString()} chars`;
+    const placeholder = `[${what} pasted #${++pasteCounter} - ctrl-O to view]`;
     pasteStore.set(placeholder, text);
     return placeholder;
   };
@@ -360,6 +384,20 @@ export function InputBox({
   // up-arrow press yanks it back in at the current cursor position instead of browsing history,
   // so an accidental Ctrl-U is one keystroke to undo rather than gone for good.
   const killedRef = useRef<string>('');
+
+  // Bracketed paste, the real thing (front-end checklist #12 asked for exactly this: "build this on
+  // `usePaste`/bracketed-paste mode instead of detecting paste heuristically"). Ink enables
+  // `ESC[?2004h` while this hook is active and guarantees pasted text never reaches `useInput`, so
+  // one paste arrives as one string - no chunk buffering, no settle timer, no guessing from chunk
+  // length. Only possible since the Ink 8 upgrade (item 15); `usePaste` did not exist in 7.1.1.
+  //
+  // The chunk-buffer fallback below is deliberately KEPT rather than deleted. Bracketed paste is a
+  // terminal capability, not a guarantee: a terminal that ignores `ESC[?2004h` still delivers a
+  // paste as a burst of ordinary keystrokes, which arrives through `useInput` exactly as before.
+  // Same reasoning as the Kitty-keyboard handling elsewhere in this app - use the capability when
+  // it is there, keep the universal path working when it is not. When bracketed paste DOES work,
+  // the fallback simply never fires.
+  usePaste((text) => insertPastedText(text), { isActive: active });
 
   useInput(
     (input, key) => {

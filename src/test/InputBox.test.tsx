@@ -923,6 +923,54 @@ test('an idle input box does not repaint, enabled or disabled - the blink costs 
   }
 });
 
+// Front-end checklist #12's guard half. The line threshold alone missed the case the item was
+// actually written about - "pasting a huge block (e.g. a stack trace)" - because one enormous line
+// is still one line, so it sailed past the check and sat in `value` whole with nothing on screen
+// saying how much had arrived.
+test('a single enormous line is collapsed by SIZE, and says how many characters', async () => {
+  resetPasteStoreForTests();
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
+  await tick();
+  const oneHugeLine = 'x'.repeat(5000); // no newlines at all
+  stdin.write(oneHugeLine);
+  const frame = await frameWith(lastFrame, 'chars pasted #');
+  // Characters, not lines: "1 lines pasted" would be nonsense for this case, and the size is the
+  // only useful number in it.
+  assert.ok(frame.includes('5,000 chars pasted #'), `placeholder should state the size: ${frame}`);
+  assert.ok(frame.includes('ctrl-O to view'));
+  assert.equal(frame.includes('lines pasted #'), false, 'must not describe this as lines');
+});
+
+test('submitting a size-collapsed paste still sends the whole text', async () => {
+  // The guard is a DISPLAY measure. What Enter sends must be unchanged - a placeholder that
+  // actually truncated the value would silently lose the thing the user pasted.
+  resetPasteStoreForTests();
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }),
+  );
+  await tick();
+  const oneHugeLine = 'y'.repeat(3000);
+  stdin.write(oneHugeLine);
+  await frameWith(lastFrame, 'chars pasted #');
+  await press(stdin, ENTER);
+  assert.deepEqual(submitted, [oneHugeLine]);
+});
+
+test('text just under both thresholds is left alone, so ordinary typing never collapses', async () => {
+  // The other side of the guard: it must not fire on normal input. Four short lines is under the
+  // line threshold, and well under 1200 characters.
+  resetPasteStoreForTests();
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
+  await tick();
+  stdin.write(`one\ntwo\nthree\nfour`);
+  // Waited for by content rather than by a fixed delay - this file's own note at the top says to
+  // prefer `frameWith` for exactly this reason, and a fixed tick is what made the first draft of
+  // this test fail under load while passing alone.
+  const frame = await frameWith(lastFrame, 'four');
+  assert.equal(frame.includes('pasted #'), false, `should not collapse: ${frame}`);
+});
+
 test('a long pasted value keeps the rendered box within the terminal height and still shows the newest text', async () => {
   const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: () => {} }));
   const pasted = Array.from({ length: 300 }, (_, i) => `pasted line ${i}`).join('\n');
