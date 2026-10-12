@@ -20,9 +20,15 @@ import { readMountPoint } from '../session/gitInfo.js';
 
 const INK_SOURCE = 'node_modules/ink/build/ink.js';
 
+// Ink 8.0.0 renamed `isTty` to `isStdoutTty` and added `previousViewportRows`. Both changes are
+// silent for a caller that passes the old shape - the function just sees `undefined` - and that is
+// exactly what happened on the upgrade: the agreement test below went vacuous (every state
+// returned false on both platforms) and only its own vacuity guard noticed. Hence the
+// signature-pinning test right after this.
 type ClearArgs = {
-  isTty: boolean;
+  isStdoutTty: boolean;
   viewportRows: number;
+  previousViewportRows: number;
   previousOutputHeight: number;
   nextOutputHeight: number;
   isUnmounting: boolean;
@@ -45,6 +51,33 @@ function platformDecision(isWindowsConsole: boolean): (a: ClearArgs) => boolean 
   return make(isWindowsConsole);
 }
 
+test('the clear-decision function still takes exactly the arguments these tests pass it', () => {
+  // The lesson from the 8.0.0 upgrade: `isTty` -> `isStdoutTty` plus a new `previousViewportRows`
+  // meant this suite was handing the real function `undefined` for the field that gates everything,
+  // so it returned false for every state on both platforms and "the platforms agree" became true
+  // for the wrong reason. A missing key must break the build, not quietly empty the test.
+  const src = readFileSync(INK_SOURCE, 'utf8');
+  const start = src.indexOf('const shouldClearTerminalForFrame = ({');
+  assert.ok(start >= 0, `${INK_SOURCE} no longer destructures its argument - re-check these tests`);
+  const params = src
+    .slice(src.indexOf('{', start) + 1, src.indexOf('}', start))
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  assert.deepEqual(
+    [...params].sort(),
+    [
+      'isStdoutTty',
+      'isUnmounting',
+      'nextOutputHeight',
+      'previousOutputHeight',
+      'previousViewportRows',
+      'viewportRows',
+    ],
+    `Ink changed the shape of shouldClearTerminalForFrame's argument: ${params.join(', ')}`,
+  );
+});
+
 test('Ink reads process.platform exactly once, and only to compare against win32', () => {
   const src = readFileSync(INK_SOURCE, 'utf8');
   const reads = src.match(/process\.platform/g) ?? [];
@@ -62,7 +95,7 @@ test("the frame clip makes Ink's only platform branch unreachable: win32 and POS
   const win = platformDecision(true);
   const posix = platformDecision(false);
 
-  // Class A - steady state. patches/ink+7.1.1.patch clips any frame to `viewportRows - 1` before
+  // Class A - steady state. patches/ink+8.0.0.patch clips any frame to `viewportRows - 1` before
   // this decision is taken, so both the frame being written and the one before it are bounded.
   // Class B - the frame right after a SHRINKING resize, the one case where the previous height can
   // exceed the current viewport: it was clipped against the old, larger window.
@@ -71,19 +104,31 @@ test("the frame clip makes Ink's only platform branch unreachable: win32 and POS
   const divergent: string[] = [];
 
   for (let viewportRows = 3; viewportRows <= 60; viewportRows++) {
+    // Both a steady viewport and one that just shrank by 10 rows. 8.0.0 added a
+    // `isViewportShrinking && wasFullscreen` term, so the previous viewport is now part of the
+    // state space rather than something the decision ignores.
+    for (const previousViewportRows of [viewportRows, viewportRows + 10]) {
     for (let previousOutputHeight = 0; previousOutputHeight <= 200; previousOutputHeight++) {
       for (let nextOutputHeight = 0; nextOutputHeight <= viewportRows - 1; nextOutputHeight++) {
         for (const isUnmounting of [false, true]) {
-          const args = { isTty: true, viewportRows, previousOutputHeight, nextOutputHeight, isUnmounting };
+          const args = {
+            isStdoutTty: true,
+            viewportRows,
+            previousViewportRows,
+            previousOutputHeight,
+            nextOutputHeight,
+            isUnmounting,
+          };
           if (previousOutputHeight <= viewportRows - 1) steady++;
           else afterShrink++;
           if (win(args) !== posix(args) && divergent.length < 5) {
             divergent.push(
-              `viewport=${viewportRows} prev=${previousOutputHeight} next=${nextOutputHeight} unmount=${isUnmounting}`,
+              `viewport=${viewportRows} prevViewport=${previousViewportRows} prev=${previousOutputHeight} next=${nextOutputHeight} unmount=${isUnmounting}`,
             );
           }
         }
       }
+    }
     }
   }
 
@@ -102,7 +147,14 @@ test('without the clip the platforms really do disagree - so the test above is n
   for (let viewportRows = 3; viewportRows <= 60; viewportRows++) {
     for (let previousOutputHeight = 0; previousOutputHeight <= viewportRows + 4; previousOutputHeight++) {
       for (let nextOutputHeight = viewportRows; nextOutputHeight <= viewportRows + 20; nextOutputHeight++) {
-        const args = { isTty: true, viewportRows, previousOutputHeight, nextOutputHeight, isUnmounting: false };
+        const args = {
+          isStdoutTty: true,
+          viewportRows,
+          previousViewportRows: viewportRows,
+          previousOutputHeight,
+          nextOutputHeight,
+          isUnmounting: false,
+        };
         states++;
         if (win(args) !== posix(args)) divergent++;
       }

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput, useStdout, useWindowSize } from 'ink';
+import { Box, Text, useInput, useWindowSize } from 'ink';
 import stringWidth from 'string-width';
 import {
   inputWindow,
@@ -313,7 +313,15 @@ export function InputBox({
   // (confirmed in node_modules/ink/build/hooks/use-input.js) - this used to need a hand-rolled
   // stdin.read patch to see the real bytes directly, since Ink 5's public `key` object never
   // exposed them. That patch is gone; see key.home/key.end in the useInput callback below.
-  const { stdout } = useStdout();
+
+  // The live terminal size, declared up here rather than beside the layout below because the key
+  // handlers need it too - Page Up/Down and Home/End all measure against the current width.
+  //
+  // Read from `useWindowSize` rather than off the output stream, which is what the handlers used
+  // to do: Ink 8 types that stream as a plain `WritableStream` with no size on it, and the hook
+  // was the better source anyway. Handlers and layout now measure against ONE value, where before
+  // a handler could read a size the rendered window had not re-wrapped to yet.
+  const { columns, rows } = useWindowSize();
 
   // Submitted-input recall (up/down arrow), kept local to the input box - it only
   // needs the raw strings that were submitted, not anything about how they resolved. Seeded
@@ -407,15 +415,15 @@ export function InputBox({
       // Linux terminals never send it and tmux swallows it. Anything that only worked through the
       // alias would silently not exist on those terminals, so Ctrl+P/Ctrl+N carry the feature.
       if (key.pageUp || key.pageDown) {
-        const rows = expanded ? expandedInputBoxCapRows(stdout.rows) : inputBoxCapRows(stdout.rows);
+        const pageRows = expanded ? expandedInputBoxCapRows(rows) : inputBoxCapRows(rows);
         edit((b) => ({
           ...b,
           cursor: movePageVisualRows(
             b.value,
             b.cursor,
-            contentWidth(stdout.columns),
+            contentWidth(columns),
             prompt,
-            rows,
+            pageRows,
             key.pageUp ? 'up' : 'down',
           ),
         }));
@@ -436,7 +444,7 @@ export function InputBox({
         // row (line 0's own row 0) does up-arrow fall through to the kill-ring yank / history
         // recall below.
         {
-          const target = moveVisualRow(value, cursor, contentWidth(stdout.columns), prompt, 'up');
+          const target = moveVisualRow(value, cursor, contentWidth(columns), prompt, 'up');
           if (target !== undefined) {
             edit((b) => ({ ...b, cursor: target }));
             return;
@@ -469,7 +477,7 @@ export function InputBox({
         // Symmetric with up-arrow above: move down within the text first, only falling through
         // to history once already on the box's bottommost visual row (the last line's last row).
         {
-          const target = moveVisualRow(value, cursor, contentWidth(stdout.columns), prompt, 'down');
+          const target = moveVisualRow(value, cursor, contentWidth(columns), prompt, 'down');
           if (target !== undefined) {
             edit((b) => ({ ...b, cursor: target }));
             return;
@@ -525,11 +533,11 @@ export function InputBox({
       // pre-existing tests below exercise; the distinction only shows up once the line has
       // wrapped into multiple rows (see the dedicated wrapped-row test).
       if (key.home) {
-        edit((b) => ({ ...b, cursor: rowStart(b.value, b.cursor, contentWidth(stdout.columns), prompt) }));
+        edit((b) => ({ ...b, cursor: rowStart(b.value, b.cursor, contentWidth(columns), prompt) }));
         return;
       }
       if (key.end) {
-        edit((b) => ({ ...b, cursor: rowEnd(b.value, b.cursor, contentWidth(stdout.columns), prompt) }));
+        edit((b) => ({ ...b, cursor: rowEnd(b.value, b.cursor, contentWidth(columns), prompt) }));
         return;
       }
       // Ctrl-A/Ctrl-E: kept as the absolute whole-buffer start/end (the readline/bash
@@ -674,12 +682,11 @@ export function InputBox({
   // explains the windowing rules; `frameBudget` explains why this cap and the live region's share
   // one set of numbers.
   //
-  // `useWindowSize` rather than reading `stdout.rows`/`columns` at render: the terminal is
-  // resizable in both dimensions, and both matter here. A shorter window shrinks the budget; a
-  // narrower one re-wraps the same text into more rows, so the window has to be recomputed from
-  // the live size on every resize. This hook re-renders the component when either changes, instead
-  // of relying on App happening to re-render the tree from its own resize effect.
-  const { columns, rows } = useWindowSize();
+  // The terminal is resizable in both dimensions and both matter here: a shorter window shrinks
+  // the budget, a narrower one re-wraps the same text into more rows, so the window is recomputed
+  // from the live size on every resize. `useWindowSize` (declared at the top of the component, so
+  // the key handlers reach the same value) re-renders on either change, instead of relying on App
+  // happening to re-render the tree from its own resize effect.
   const width = contentWidth(columns);
   const capRows = expanded ? expandedInputBoxCapRows(rows) : inputBoxCapRows(rows);
   const view = inputWindow(valueWithCursor, cursorInValue, width, prompt, capRows);

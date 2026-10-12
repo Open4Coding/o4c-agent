@@ -1,0 +1,51 @@
+diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
+index 550cdf0..9f727eb 100644
+--- a/node_modules/ink/build/ink.js
++++ b/node_modules/ink/build/ink.js
+@@ -460,6 +460,21 @@ export default class Ink {
+         const viewportRows = isStdoutTty
+             ? getWindowSize(this.options.stdout).rows
+             : 24;
++        // PATCHED (o4c-agent): never write a live frame as tall as the window. A frame at or above the
++        // viewport height scrolls its own top rows into the terminal's scrollback on EVERY repaint, so a
++        // spinner/cursor tick stamps another copy of those rows into history (hundreds of duplicated
++        // lines were seen in scrollback). Clip it to the newest `viewportRows - 1` rows instead - the
++        // dropped top rows are exactly the ones that would have scrolled off. The clipped frame is then
++        // an ordinary below-viewport frame, so it also takes the cheap incremental repaint path.
++        // Still not upstream as of 8.0.0, which computes `isFullscreen` below but never slices.
++        if (isStdoutTty && outputHeight >= viewportRows) {
++            const keep = Math.max(1, viewportRows - 1);
++            const frameLines = output.split('\n');
++            if (frameLines.length > keep) {
++                output = frameLines.slice(-keep).join('\n');
++            }
++            outputHeight = Math.min(outputHeight, keep);
++        }
+         const isFullscreen = isStdoutTty && outputHeight >= viewportRows;
+         const outputToRender = isFullscreen ? output : output + '\n';
+         const previousViewportRows = this.lastTerminalHeight;
+@@ -506,12 +521,22 @@ export default class Ink {
+                             ansiEscapes.cursorTo(0) +
+                             ansiEscapes.eraseDown;
+                 }
+-                this.options.stdout.write(erasePrefix + staticOutput + outputToRender);
++                // PATCHED (o4c-agent): static and the frame go out as SEPARATE writes. A wrapper on
++                // stdout.write (o4c's resizeReflowFix) records each frame-sized chunk as "what is on
++                // screen" for its row math, and one combined chunk made it believe the whole committed
++                // block was the live frame - so the next small frame triggered a corrective erase up
++                // through the block. Upstream combines them, hence this patch.
++                this.options.stdout.write(erasePrefix + staticOutput);
++                this.options.stdout.write(outputToRender);
+             }
+             else {
+                 // The previous frame only covers the bottom of the viewport. Erase those rows relative to the cursor and let the new frame scroll whatever sits above them into scrollback naturally.
+                 this.log.clear();
+-                this.options.stdout.write(staticOutput + outputToRender);
++                // PATCHED (o4c-agent): separate writes, same reason as the branch above.
++                if (staticOutput !== '') {
++                    this.options.stdout.write(staticOutput);
++                }
++                this.options.stdout.write(outputToRender);
+             }
+             this.lastOutput = output;
+             this.lastOutputToRender = outputToRender;

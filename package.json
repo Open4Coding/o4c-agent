@@ -21,7 +21,7 @@
     "@anthropic-ai/sdk": "0.128.0",
     "commander": "12.1.0",
     "dotenv": "17.4.2",
-    "ink": "7.1.1",
+    "ink": "8.0.0",
     "react": "19.3.0",
     "string-width": "7.2.0"
   },
