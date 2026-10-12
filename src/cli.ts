@@ -20,6 +20,7 @@ import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor, usageFileFor } from './session/projectContext.js';
 import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
+import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
 
 /** `config.json` key caching each model's probed reasoning capabilities, so the startup check
@@ -164,6 +165,7 @@ async function runRepl(
   initialMode?: Mode,
   sessionView?: SessionView,
   serverHooks?: { status: ServerStatus; probe: () => Promise<ServerProbe>; onRecovered: (probe: ServerProbe) => void },
+  showTabHint?: boolean,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -225,6 +227,7 @@ async function runRepl(
       restart,
       initialMode,
       sessionView,
+      showTabHint,
       serverStatus: serverHooks?.status,
       probeServer: serverHooks?.probe,
       onServerRecovered: serverHooks?.onRecovered,
@@ -391,6 +394,19 @@ program
     // How much of a saved session the repaint shows (/set-sessionview, + -local-/-global-): re-read on
     // every launch and restart like the other config keys, so a change needs no handoff argument.
     const sessionView = parseSessionView(resolvedConfig.sessionView);
+    // Front-end checklist #11: make Tab-cycles-modes discoverable instead of leaving it to whoever
+    // reads "(/mode or Tab)" on the status line. The policy, including why `--resume` must not
+    // count as a run, is in tabHint.ts where it can be tested.
+    const tabHint = decideTabHint(resolvedConfig, Boolean(opts.resume));
+    const showTabHint = tabHint.show;
+    if (tabHint.recordRuns !== undefined) {
+      // Fire-and-forget, and global: which shortcuts somebody has been taught is a fact about the
+      // user, not about a project. A failed write means the tip shows once more, which is a far
+      // better failure than delaying startup on it.
+      void configStore
+        .set('global', TAB_HINT_RUNS_KEY, tabHint.recordRuns)
+        .catch(() => undefined);
+    }
     // Opt-in only, same "no CLI flag, config.json only" shape as localApiKey/contextWindow above -
     // extended thinking has a real token-cost impact (thinking tokens are billed as output), so
     // this is never turned on silently. Anthropic-only; harmless (just unread) for other providers.
@@ -626,6 +642,7 @@ program
               },
             }
           : undefined,
+        showTabHint,
       );
       return;
     }

@@ -378,6 +378,9 @@ async function setup(opts: {
   reloadAfterTurn?: boolean;
   initialMode?: Mode;
   sessionView?: SessionView;
+  // Front-end checklist #11's startup tip. Off for every test that is not about it, matching a
+  // user who has already been taught (cli.ts is what decides this in a real launch).
+  showTabHint?: boolean;
   // The local-server wait box (see ServerDownPicker): how the server answered at launch, how to re-check it, and
   // how fast to poll while waiting.
   serverStatus?: ServerStatus;
@@ -420,6 +423,7 @@ async function setup(opts: {
       reloadAfterTurn: opts.reloadAfterTurn,
       initialMode: opts.initialMode,
       sessionView: opts.sessionView,
+      showTabHint: opts.showTabHint,
       serverStatus: opts.serverStatus,
       probeServer: opts.probeServer,
       onServerRecovered: opts.onServerRecovered,
@@ -511,6 +515,62 @@ test('the footer names the branch, with a * when the tree has uncommitted change
     await writeFile(join(projectRoot, 'tracked.txt'), 'changed', 'utf-8');
     const dirty = await setup({ dir: join(dir, 'dirty-sessions'), projectRoot });
     await waitFor(() => /main\*/.test(dirty.lastFrame() ?? ''));
+  });
+});
+
+// Front-end checklist #11. cli.ts decides WHETHER to teach (tabHint.test.ts covers that policy);
+// these cover what the app does with the answer.
+test('the startup banner teaches Tab when asked to, naming the cycle it actually performs', async () => {
+  await withTempDir(async (dir) => {
+    const { lastFrame } = await setup({ dir, showTabHint: true });
+    const frame = lastFrame() ?? '';
+    assert.match(frame, /Tip: press Tab to cycle modes/);
+    // The listed cycle is derived from MODES, so this asserts the ends of the real order rather
+    // than a copy of it - a reordering must not be able to leave the tip quietly lying.
+    assert.match(frame, /Manual .* Plan-Write/);
+  });
+});
+
+test('the banner says nothing about Tab once the tip has retired', async () => {
+  await withTempDir(async (dir) => {
+    const { lastFrame } = await setup({ dir });
+    const frame = lastFrame() ?? '';
+    assert.equal(/Tip: press Tab/.test(frame), false);
+    // The always-live status line still mentions it - that is the hint the tip was added to stop
+    // relying on, not a second copy of the tip, and it must survive the tip retiring.
+    assert.match(frame, /\(\/mode or Tab\)/);
+  });
+});
+
+test('pressing Tab retires the tip for good, in the global scope', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, lastFrame } = await setup({ dir, configGlobalDir, showTabHint: true });
+    stdin.write(TAB);
+    await waitFor(() => (lastFrame() ?? '').includes('Mode set to Auto.'));
+    // Written to the global file, not a project one: knowing a keyboard shortcut is a fact about
+    // the user. Fire-and-forget in the handler, so the file lands a moment after the keypress.
+    await waitFor(async () => {
+      const raw = await readFile(join(configGlobalDir, 'config.json'), 'utf-8');
+      return JSON.parse(raw).tabUsed === true;
+    });
+  });
+});
+
+test('holding Tab does not queue a write per keypress, only the first one counts', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, lastFrame } = await setup({ dir, configGlobalDir, showTabHint: true });
+    for (let i = 0; i < 5; i++) stdin.write(TAB);
+    await waitFor(() => (lastFrame() ?? '').includes('Mode set to '));
+    await waitFor(async () => {
+      const raw = await readFile(join(configGlobalDir, 'config.json'), 'utf-8');
+      return JSON.parse(raw).tabUsed === true;
+    });
+    // Five presses, one key: the guard is a ref, so what this really checks is that the config
+    // file is still well-formed rather than a race of five concurrent read-modify-writes.
+    const raw = await readFile(join(configGlobalDir, 'config.json'), 'utf-8');
+    assert.deepEqual(Object.keys(JSON.parse(raw)), ['tabUsed']);
   });
 });
 

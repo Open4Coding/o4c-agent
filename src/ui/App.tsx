@@ -17,6 +17,7 @@ import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice }
  * clobbered by switching provider. */
 const THINK_LEVEL_CONFIG_KEY = 'thinkLevelByModel';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
+import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
@@ -132,6 +133,10 @@ export interface AppProps {
   /** How much of a saved session the repaint shows (`compact` or `full`) - read from config.json at
    * every launch/restart (`/set-sessionview`). Undefined means compact. */
   sessionView?: SessionView;
+  /** Whether to teach Tab-cycles-modes in the startup banner (front-end checklist #11). Decided in
+   * cli.ts, where the config read and the launch counting already live, so this stays a plain
+   * render flag: the app shows the tip when told to and records the moment Tab is first pressed. */
+  showTabHint?: boolean;
   /** How the local server answered at launch (`up` when unknown/not a local server). When it is `down` or
    * `loading` the app opens the "Server is down: wait or choose another model" box straight away. */
   serverStatus?: ServerStatus;
@@ -495,6 +500,7 @@ export function App({
   os = detectCurrentOs(),
   reloadAfterTurn,
   sessionView,
+  showTabHint,
   projectRoot,
   thinkCaps: probedThinkCaps,
   usageStore,
@@ -557,6 +563,20 @@ export function App({
         kind: 'system',
         text: 'Type your request, or / to see available commands.',
       },
+      // Front-end checklist #11: Tab cycles modes, and the status line's "(/mode or Tab)" was the
+      // only place that said so - which the plan's own wording calls out as relying on the user
+      // reading the status line. This teaches it where the eye already is on a fresh start.
+      //
+      // Two `system` lines rather than part of buildSplashText: the splash renders in bold
+      // primary, which is the wrong weight for a tip, and splash.ts stays a pure word-mark +
+      // startup-snapshot formatter. The cycle is derived from MODES so it cannot drift out of step
+      // with what Tab actually does.
+      ...(showTabHint
+        ? ([
+            { kind: 'system', text: 'Tip: press Tab to cycle modes, or /mode to pick one directly.' },
+            { kind: 'system', text: `     ${MODES.map((m) => m.label).join(' → ')}` },
+          ] as const)
+        : []),
     ]);
     if (!initialSession) return initialTextWindow([banner], liveRegionCapChars(), liveRegionCapRows(), liveRegionCols());
     const blocks: TextBlock[] = [
@@ -788,6 +808,9 @@ export function App({
   const thinkCaps = probedThinkCaps;
   // Read once on mount and refreshed when a turn finishes - never per render (see gitInfo.ts).
   const [gitBranch, setGitBranch] = useState<string | undefined>(undefined);
+  // Guards the one-time `tabUsed` write in the Tab handler below, so holding Tab down does not
+  // queue a config write per keypress.
+  const tabRecordedRef = useRef(false);
   // Whether the tree has uncommitted changes, on the same cadence as the branch. `undefined` until
   // the first read answers, and again whenever git could not be asked - see readGitDirty on why
   // "do not know" has to be distinguishable from "clean".
@@ -1050,6 +1073,14 @@ export function App({
         const next = MODES[(currentIndex + 1) % MODES.length].mode;
         setMode(next);
         pushBlock([{ kind: 'system', text: `Mode set to ${modeInfo(next).label}.` }]);
+        // The banner tip has done its job the moment Tab is actually used, so retire it for good
+        // (front-end checklist #11). Global scope: knowing this shortcut is a fact about the user,
+        // not about one project. Only written while the tip is still showing, and once per process
+        // - fire-and-forget, because failing to retire a tip must not interrupt a keystroke.
+        if (showTabHint && !tabRecordedRef.current) {
+          tabRecordedRef.current = true;
+          void configStore.set('global', TAB_USED_KEY, true).catch(() => undefined);
+        }
       }
     },
     { isActive: true },
