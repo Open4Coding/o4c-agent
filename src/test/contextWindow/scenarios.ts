@@ -127,13 +127,6 @@ export const SCENARIOS: ScenarioSpec[] = [
     drift: 1.5,
     build: (window) => longRunTurns(window, 8, 25, 22),
     check: checkTierOrder,
-    // Tracked defect (2026-10-11): micro-compaction's prune notice (the aiPruneEntry at loop.ts's
-    // maybeMicroCompact site) is appended at the end of `entries` while a max_tokens cutoff is
-    // pending. It goes on the wire as a user-role note, so the continuation request no longer ends
-    // on the cut-off assistant text and the model restarts instead of finishing the sentence. The
-    // cutoff chain's own notice was fixed by placing it before the current round; this one needs a
-    // general mechanism, not another ordering tweak. See docs/plans/0003, follow-up 5.
-    knownGaps: ['cutoff-continues-from-assistant'],
   },
   {
     name: 'cutoff-chain',
@@ -351,9 +344,6 @@ export const SCENARIOS: ScenarioSpec[] = [
     // actually *reached*, which no other scenario does.
     name: 'repeated-compaction-keeps-task-prompt',
     summarizer: 'ok',
-    // Same tracked defect as long-run-code-heavy: a prune notice appended after a pending cutoff's
-    // text, so the continuation request ends on a user-role note. See docs/plans/0003, follow-up 5.
-    knownGaps: ['cutoff-continues-from-assistant'],
     build: (window) => [
       {
         prompt: `TASK-MATRIX-SENTINEL cover all 30 subsystems in order. ${'detail '.repeat(40)}`,

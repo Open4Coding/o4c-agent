@@ -140,6 +140,42 @@ test('toWireMessages: redacted thinking data propagates onto the wire Message ev
   });
 });
 
+// Plan 0003 follow-up 5. A max_tokens continuation has to END on the cut-off assistant text or the
+// server starts a fresh answer instead of finishing the sentence. The end-of-round compaction pass
+// runs after a cutoff like any other round and appends notices of its own, so the guarantee is
+// positional at the wire level rather than a rule about append order.
+test('toWireMessages: trailingEntryIds put the cut-off text last, past a prune notice appended after it', () => {
+  const cut = aiResponseEntry('Here are three facts about the Moon:\n1. The Moon is about');
+  const entries = [userInputEntry('three moon facts'), cut, aiPruneEntry(2, 500, 'tool calls')];
+
+  // Without the option the prune lands last, as a user-role note - the bug this fixes.
+  const plain = toWireMessages(entries);
+  assert.equal(plain[plain.length - 1].role, 'user');
+
+  const hoisted = toWireMessages(entries, [cut.id]);
+  const last = hoisted[hoisted.length - 1];
+  assert.equal(last.role, 'assistant');
+  assert.equal(last.content, 'Here are three facts about the Moon:\n1. The Moon is about');
+  // The notice is kept, just no longer last - nothing is dropped to achieve the ordering.
+  assert.equal(hoisted.length, plain.length);
+  assert.ok(hoisted.some((m) => m.role === 'user' && m.content.includes('pruned from context')));
+});
+
+test('toWireMessages: a think/response cutoff pair hoists together, as one assistant message', () => {
+  const think = aiThinkEntry('weighing the options');
+  const resp = aiResponseEntry('so the answer is');
+  const entries = [userInputEntry('q'), think, resp, aiPruneEntry(1, 10, 'tool calls')];
+  const hoisted = toWireMessages(entries, [think.id, resp.id]);
+  const last = hoisted[hoisted.length - 1];
+  assert.equal(last.role, 'assistant');
+  assert.equal(last.content, 'weighing the options\n\nso the answer is');
+});
+
+test('toWireMessages: trailingEntryIds naming nothing present leaves the order untouched', () => {
+  const entries = [userInputEntry('hi'), aiResponseEntry('hello')];
+  assert.deepEqual(toWireMessages(entries, ['no-such-id']), toWireMessages(entries));
+});
+
 test('toWireMessages: no thinking fields at all when no think entry is present, unchanged shape from before', () => {
   const messages = toWireMessages([userInputEntry('hi'), aiResponseEntry('hello')]);
   assert.deepEqual(messages[1], { role: 'assistant', content: 'hello', toolCalls: undefined });

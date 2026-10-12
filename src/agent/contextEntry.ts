@@ -296,7 +296,31 @@ function formatCompactionForWire(content: string): string {
   return lines.join('\n');
 }
 
-export function toWireMessages(entries: readonly ContextEntry[]): Message[] {
+/**
+ * `trailingEntryIds` - entries that must come out as the FINAL wire message, whatever position they
+ * hold in `entries`. Used for a max_tokens continuation round: the request has to end on the
+ * cut-off assistant text for the server to resume the sentence (prefill continuation, confirmed
+ * live 2026-10-11 - see docs/plans/0003). Housekeeping appended afterwards would otherwise displace
+ * it - a prune notice goes on the wire as a *user* message (deliberately, see the prune branch
+ * below) and a compaction summary joins the assistant group, burying the cut-off text mid-message.
+ * Both come from the end-of-round compaction pass, which runs after a cutoff exactly as it runs
+ * after any other round, so this cannot be fixed by ordering the appends.
+ *
+ * Pass this ONLY for a cutoff with no tool call. A cutoff that still made a tool call is not a
+ * continuation - the loop runs the tools and the request ends on their results - and hoisting an
+ * assistant message past those results would break call/result pairing.
+ */
+export function toWireMessages(
+  entries: readonly ContextEntry[],
+  trailingEntryIds?: readonly string[],
+): Message[] {
+  if (trailingEntryIds && trailingEntryIds.length > 0) {
+    const trailing = new Set(trailingEntryIds);
+    const held = entries.filter((e) => trailing.has(e.id));
+    if (held.length > 0) {
+      return [...toWireMessages(entries.filter((e) => !trailing.has(e.id))), ...toWireMessages(held)];
+    }
+  }
   const messages: Message[] = [];
   const emittedCallIds = new Set<string>();
   let pending: {

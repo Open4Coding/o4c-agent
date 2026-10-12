@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
+import { createPrefillEchoFilter } from './prefillEcho.js';
 import {
   DEFAULT_THINK_CAPS,
   localThinkParams,
@@ -466,7 +467,15 @@ export class LocalProvider implements LLMProvider {
     // 0 or negative disables this the same way as connectTimeoutMs above - the raw body is passed
     // straight through, unwrapped, so there's no timer left running to ever fire at all.
     const idleBody = this.idleTimeoutMs > 0 ? withIdleTimeout(response.body, this.idleTimeoutMs) : response.body;
-    const { content, toolCalls, finishReason, usage } = await parseSseStream(idleBody, request.onToken);
+    // A request ending on an assistant message is a prefill continuation, and llama-server echoes
+    // that prefill back at the head of the stream. Suppressed from the DISPLAY stream only - the
+    // `content` returned below is still the full text, which is what history needs. See
+    // prefillEcho.ts and docs/plans/0003, "Trailing assistant: settled live".
+    const lastMessage = request.messages[request.messages.length - 1];
+    const prefill = lastMessage?.role === 'assistant' ? lastMessage.content : '';
+    const streamOnToken =
+      prefill && request.onToken ? createPrefillEchoFilter(prefill, request.onToken) : request.onToken;
+    const { content, toolCalls, finishReason, usage } = await parseSseStream(idleBody, streamOnToken);
     return {
       content,
       toolCalls,
