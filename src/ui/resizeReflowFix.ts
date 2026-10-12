@@ -15,6 +15,48 @@ const CLEAR_SCREEN = `${CSI}2J`;
  * on-screen frame. */
 const HOME_ERASE_DOWN = `${CSI}1;1H${CSI}J`;
 
+/** Show-cursor, the last thing in Ink's cursor suffix. */
+const SHOW_CURSOR = `${CSI}?25h`;
+
+const isDigits = (text: string): boolean =>
+  text.length > 0 && [...text].every((character) => character >= '0' && character <= '9');
+
+/**
+ * A chunk with any trailing cursor suffix removed.
+ *
+ * When a `useCursor()` position is active, Ink appends `buildCursorSuffix()` to the SAME write as
+ * the frame (`cursor-helpers.js`, pushed onto `log-update.js`'s own buffer): an optional
+ * `cursorUp(n)`, a `cursorTo(x)`, then show-cursor. That matters here because every frame check in
+ * this module keys off a trailing newline - a frame carrying the suffix ends in show-cursor
+ * instead, so without stripping it a frame stops being recognised as one, `lastFrame` goes stale,
+ * and the corrective erase is computed against the wrong height.
+ *
+ * The suffix is pure cursor movement and visibility and occupies no rows, so measuring and
+ * classifying the stripped chunk is measuring the frame itself. Trimmed by each sequence's own
+ * terminator rather than with a pattern, so there is nothing to keep in step with ansi-escapes'
+ * exact digit formatting.
+ *
+ * Checklist item 19 brought this on - nothing in this app set a cursor position before it.
+ */
+function withoutCursorSuffix(chunk: string): string {
+  if (!chunk.endsWith(SHOW_CURSOR)) return chunk;
+  let body = chunk.slice(0, -SHOW_CURSOR.length);
+  // `cursorTo(x)` is always part of a positioned cursor, so its absence means this is not a cursor
+  // suffix and NOTHING may be removed - a bare show-cursor is its own thing (Ink writes one when
+  // entering the alternate screen, for instance), and guessing would eat real frame bytes.
+  const trimTrailingMove = (text: string, terminator: string): string | undefined => {
+    if (!text.endsWith(terminator)) return undefined;
+    const start = text.lastIndexOf(CSI);
+    if (start < 0) return undefined;
+    return isDigits(text.slice(start + CSI.length, text.length - 1)) ? text.slice(0, start) : undefined;
+  };
+  const withoutColumn = trimTrailingMove(body, 'G');
+  if (withoutColumn === undefined) return chunk;
+  body = withoutColumn;
+  // `cursorUp(n)` precedes it only when the cursor is not already on the frame's last row.
+  return trimTrailingMove(body, 'A') ?? body;
+}
+
 /**
  * The bug this fixes, confirmed directly against Ink 5.2.1's source (log-update.js, ink.js):
  *
@@ -111,8 +153,10 @@ function displayWidth(line: string): number {
   return col;
 }
 
+export { withoutCursorSuffix };
+
 export function measureFrame(chunk: string, columns: number): { lines: number; rows: number } {
-  const lines = chunk.split('\n');
+  const lines = withoutCursorSuffix(chunk).split('\n');
   lines.pop(); // the trailing '\n' every frame ends with yields one empty tail element
   let rows = 0;
   for (const line of lines) rows += Math.max(1, Math.ceil(displayWidth(line) / columns));
@@ -290,7 +334,9 @@ export function installResizeReflowFix(
     const erases = chunk.startsWith(ERASE_LINE);
     if (erases) reconcile(chunk);
     forward(chunk, rest);
-    if (chunk.endsWith('\n')) {
+    // Classified on the stripped body, but RECORDED whole: `lastFrame` is re-emitted verbatim
+    // on a resize, so dropping the suffix here would hide the cursor after every resize.
+    if (withoutCursorSuffix(chunk).endsWith('\n')) {
       // A frame (live or static) - it's what's on screen now.
       lastFrame = chunk;
       frameOnScreen = true;
@@ -301,7 +347,9 @@ export function installResizeReflowFix(
   };
 
   const isFrame = (chunk: unknown): chunk is string =>
-    typeof chunk === 'string' && chunk.startsWith(ERASE_LINE) && chunk.endsWith('\n');
+    typeof chunk === 'string' &&
+    chunk.startsWith(ERASE_LINE) &&
+    withoutCursorSuffix(chunk).endsWith('\n');
 
   const settle = () => {
     settleTimer = undefined;

@@ -7,10 +7,44 @@ import {
   expectedUp,
   installResizeReflowFix,
   measureFrame,
+  withoutCursorSuffix,
   type ReflowFixableStream,
 } from '../ui/resizeReflowFix.js';
 
 const CSI = '\x1B[';
+
+// Checklist item 19 (useCursor): Ink appends this to the SAME write as the frame when a cursor
+// position is active, so a frame stops ending in a newline. Built the way `buildCursorSuffix` does
+// (`cursor-helpers.js`) rather than copied as a literal.
+function cursorSuffix(moveUp: number, column: number): string {
+  return (moveUp > 0 ? `${CSI}${moveUp}A` : '') + `${CSI}${column + 1}G` + `${CSI}?25h`;
+}
+
+test('a cursor suffix is stripped for measuring, whether or not a cursorUp rides with it', () => {
+  const frame = 'one\ntwo\nthree\n';
+  assert.equal(withoutCursorSuffix(frame + cursorSuffix(2, 7)), frame);
+  // At the bottom row there is no cursorUp at all, only cursorTo plus show-cursor.
+  assert.equal(withoutCursorSuffix(frame + cursorSuffix(0, 0)), frame);
+  // And a frame with no suffix must come back byte-identical.
+  assert.equal(withoutCursorSuffix(frame), frame);
+});
+
+test('stripping leaves a frame that genuinely ends in show-cursor-like text alone', () => {
+  // The guard that keeps this from eating real content: only the full movement+show sequence is a
+  // suffix. Anything else ending in those bytes is the frame's own text.
+  const notASuffix = `text${CSI}?25h` + 'x';
+  assert.equal(withoutCursorSuffix(notASuffix), notASuffix);
+  // Show-cursor with no movement before it is left where it is - it is not a positioned cursor.
+  assert.equal(withoutCursorSuffix(`plain${CSI}?25h`), `plain${CSI}?25h`);
+});
+
+test('row math is unchanged by a cursor suffix - it occupies no rows', () => {
+  const frame = 'aaa\nbbb\n';
+  const bare = measureFrame(frame, 80);
+  const withCursor = measureFrame(frame + cursorSuffix(1, 2), 80);
+  assert.deepEqual(withCursor, bare);
+  assert.equal(bare.lines, 2);
+});
 
 function tick(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
