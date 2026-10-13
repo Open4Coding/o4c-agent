@@ -76,10 +76,20 @@ export interface RunOptions {
   maxIterations?: number;
   onEvent?: (event: AgentEvent) => void;
   images?: string[];
-  /** Called before executing each tool call - lets the caller (App.tsx, via the mode system in
+  /**
+   * Called before executing each tool call - lets the caller (App.tsx, via the mode system in
    * src/ui/modePolicy.ts) allow or deny it. Omitted entirely, every tool call runs unconditionally
-   * (existing callers/tests keep working exactly as before). */
-  toolPolicy?: (tool: Tool, input: Record<string, unknown>) => Promise<'allow' | 'deny'>;
+   * (existing callers/tests keep working exactly as before).
+   *
+   * `deny` and `declined` are kept apart on purpose, because the model reads the difference and
+   * acts on it. `deny` means the MODE forbids this tool - a standing rule it should stop trying.
+   * `declined` means the user said no to this one call - the tool exists and asking again may well
+   * succeed. Both used to come back as `deny` and both reported "Blocked by the current mode",
+   * which was not cosmetic: on 2026-10-12 a declined `run_shell` in Manual mode had the model
+   * conclude "probably shell execution is disabled in this manual mode. I'll decide not to rely on
+   * this", and it abandoned shell for the rest of the turn over one refused command.
+   */
+  toolPolicy?: (tool: Tool, input: Record<string, unknown>) => Promise<'allow' | 'deny' | 'declined'>;
   /** Called once per `ContextEntry` the instant it's appended during this `run()` call - §7's
    * infinite-context plugin (not built yet) is the intended subscriber, persisting the exact
    * object it's handed with no translation step (§5.1). Omitted entirely, entries are still
@@ -1235,10 +1245,16 @@ export class AgentLoop {
         const tool = this.tools.find((t) => t.name === call.name);
         this.appendEntry(aiToolCallEntry(call, tool?.mutating), onEntry);
         let output: string;
+        let verdict: 'allow' | 'deny' | 'declined' = 'allow';
         if (!tool) {
           output = `Error: no tool registered with name "${call.name}"`;
-        } else if (options.toolPolicy && (await options.toolPolicy(tool, call.input)) === 'deny') {
-          output = `Blocked by the current mode: ${call.name} was not executed.`;
+        } else if (options.toolPolicy && (verdict = await options.toolPolicy(tool, call.input)) !== 'allow') {
+          // Worded to match what actually happened - see `toolPolicy`'s own comment on why the
+          // difference matters to the model rather than only to the reader.
+          output =
+            verdict === 'declined'
+              ? `You declined this ${call.name} call, so it was not executed. The tool is available and you may ask for it again.`
+              : `Blocked by the current mode: ${call.name} was not executed.`;
         } else {
           output = await tool.execute(call.input);
         }

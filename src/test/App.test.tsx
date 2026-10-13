@@ -2917,6 +2917,14 @@ test('Manual Mode (the default) prompts before write_file, and declining leaves 
     await tick(100);
 
     await assert.rejects(() => readFile(targetPath, 'utf-8'));
+
+    // NOT asserted here, deliberately: what the MODEL is told about the refusal. Tried 2026-10-12
+    // and the turn never gets that far in this harness - after the dialog resolves, the frame sits
+    // on "Thinking..." and no [result] or [response] line ever arrives, so there is nothing to read
+    // the message out of. That is a pre-existing gap in this test rather than a new one: the only
+    // assertion after the decline is "the file was not written", which is equally true of a turn
+    // that hangs, so it has never noticed. See NextUp item 32. The wording itself is covered
+    // directly on the loop (loop.test.ts, "a declined call tells the model it was declined").
   });
 });
 

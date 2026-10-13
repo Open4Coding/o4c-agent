@@ -985,12 +985,14 @@ export function App({
   // mode/plansDir variables directly) so a mode change takes effect on the very next tool call,
   // even mid-turn - see the comment on those refs above for why that distinction matters.
   const toolPolicy = useCallback(
-    async (tool: Tool, input: Record<string, unknown>): Promise<'allow' | 'deny'> => {
+    async (tool: Tool, input: Record<string, unknown>): Promise<'allow' | 'deny' | 'declined'> => {
       const access = classifyToolAccess(modeRef.current, tool, input, plansDirRef.current);
       if (access === 'allow') return 'allow';
       if (access === 'deny') return 'deny';
       const ok = await askConfirm(formatConfirmMessage(tool.name, input), tool, input);
-      return ok ? 'allow' : 'deny';
+      // `declined`, not `deny`: the mode permits this tool and only this call was refused. The loop
+      // tells the model which of the two happened, because it changes what the model does next.
+      return ok ? 'allow' : 'declined';
     },
     [askConfirm],
   );

@@ -210,6 +210,45 @@ test('toolPolicy denying a call skips execution and feeds back a blocked message
   assert.match(toolMessage?.content ?? '', /Blocked by the current mode/);
 });
 
+// Found 2026-10-12 from a real screenshot. A DECLINED confirmation used to be reported with the
+// same words as a mode denial, and the model drew the wrong conclusion from it: after one refused
+// run_shell in Manual mode it reasoned "probably shell execution is disabled in this manual mode.
+// I'll decide not to rely on this" and abandoned shell for the rest of the turn.
+test('a declined call tells the model it was declined, not that the mode forbids the tool', async () => {
+  const tool = makeFakeTool('write_file', 'should never see this', true);
+  const provider = new FakeProvider([
+    { content: '', toolCalls: [{ id: 't1', name: 'write_file', input: { path: 'x' } }], stopReason: 'tool_use' },
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  await loop.run('write something', { toolPolicy: async () => 'declined' });
+
+  assert.equal(tool.calls.length, 0, 'a declined call must not run');
+  const toolMessage = provider.receivedRequests[1].messages.find((m) => m.role === 'tool');
+  const text = toolMessage?.content ?? '';
+  assert.match(text, /You declined this write_file call/);
+  // The two things the model has to know, and the reason this wording exists at all: the tool is
+  // not gone, and the refusal was about this one call.
+  assert.match(text, /available and you may ask for it again/);
+  assert.equal(/Blocked by the current mode/.test(text), false, 'must not read as a mode denial');
+});
+
+test('a mode denial still reads as a mode denial, so the model stops trying', async () => {
+  const tool = makeFakeTool('write_file', 'should never see this', true);
+  const provider = new FakeProvider([
+    { content: '', toolCalls: [{ id: 't1', name: 'write_file', input: { path: 'x' } }], stopReason: 'tool_use' },
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [tool], 'system');
+
+  await loop.run('write something', { toolPolicy: async () => 'deny' });
+
+  const text = provider.receivedRequests[1].messages.find((m) => m.role === 'tool')?.content ?? '';
+  assert.match(text, /Blocked by the current mode/);
+  assert.equal(/You declined/.test(text), false);
+});
+
 test('an abort signaled from within toolPolicy (e.g. Escape on a confirm dialog) stops the whole turn before the next provider round, not just that one call', async () => {
   // Real bug found via hands-on testing, 2026-09-26: Escape on a tool confirmation dialog wasn't
   // wired to the AbortSignal at all, so declining one call this way let the model immediately try
