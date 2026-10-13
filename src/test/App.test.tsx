@@ -3032,6 +3032,68 @@ test('a big write_file approval dialog shows a short preview with the choices vi
   });
 });
 
+test('a busy turn does not schedule a React update behind every commit - NextUp item 34', async () => {
+  // Item 34, found 2026-10-13: React was logging "Maximum update depth exceeded" during the big
+  // write_file dialog test. Nothing failed - the warning is React's 50-nested-update bail-out, not
+  // an error - so no gate in this repo could see it, and it only showed up as a stray line in the
+  // test output.
+  //
+  // The cause was `useBoxMetrics(contentRef)` in InputBox, kept for item 19's cursor. It
+  // subscribes to Ink's ROOT layout commits, so it scheduled a state update after every commit
+  // anywhere in the app whether or not the box had moved: 61 of them in this one scenario. That is
+  // an extra render of the biggest box on screen behind every commit, which is exactly the repaint
+  // traffic `useCursor` was adopted to remove.
+  //
+  // This is the only way the repo can check that, since the cursor itself leaves no trace in
+  // `frames` (verified: ink-testing-library strips escapes, so there is nothing to assert on). The
+  // warning goes through `console.error`, so it is catchable - every other call is passed straight
+  // through, because swallowing real React errors to win a test would be a bad trade.
+  const warnings: string[] = [];
+  const realConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    const text = args.map((a) => (typeof a === 'string' ? a : String(a))).join(' ');
+    warnings.push(text);
+    if (!text.includes('Maximum update depth exceeded')) realConsoleError(...args);
+  };
+
+  let frameCount = 0;
+  try {
+    await withTempDir(async (dir) => {
+      // The same shape as the big-dialog test, which is what produced the warning: a 300-line
+      // write_file is a long burst of commits, and the guard trips at 50 nested updates.
+      const targetPath = join(dir, 'churn.txt');
+      const big = Array.from({ length: 300 }, (_, i) => 'const row' + i + ' = ' + i + ';').join('\n');
+      const { stdin, frames, lastFrame } = await setup({ dir, provider: new WriteFileProvider(targetPath, big) });
+      await submit(stdin, 'please write the big file');
+      await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
+      await tick(200);
+      stdin.write(DOWN);
+      await tick(100);
+      stdin.write(ENTER);
+      await waitFor(async () => {
+        try {
+          return (await readFile(targetPath, 'utf-8')) === big;
+        } catch {
+          return false;
+        }
+      }, 10000);
+      frameCount = frames.length;
+    });
+  } finally {
+    console.error = realConsoleError;
+  }
+
+  // Vacuity guard. The warning needs ~50 commits to appear at all, so a scenario that stopped
+  // producing a burst would pass this test while checking nothing. If this floor ever fails,
+  // the scenario shrank - raise the work, do not lower the number.
+  assert.ok(frameCount > 50, 'the scenario has to be a real burst of commits, got ' + frameCount + ' frames');
+  assert.deepEqual(
+    warnings.filter((w) => w.includes('Maximum update depth exceeded')),
+    [],
+    'React hit its nested-update bail-out, so something is scheduling state per commit again',
+  );
+});
+
 test('switching to Auto mid-turn (Tab) takes effect on the very next tool call, not just the next turn', async () => {
   // Real bug found via hands-on testing, 2026-09-26: in a long turn with several sequential tool
   // calls, switching to Auto partway through kept confirming every remaining call anyway, as if

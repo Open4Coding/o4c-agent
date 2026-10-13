@@ -52,21 +52,14 @@ const KITTY_SHIFT_ENTER = ESC + '[13;2u'; // modifier 2 = shift(1) + 1
 // did. Confirmed empirically: 10ms was flaky, 20ms was reliable in isolation; 30ms gives margin
 // for real test-runner contention.
 /**
- * Waits past InputBox's paste flush. PASTE_SETTLE_MS is 60ms, and React still has to commit after
- * it, so the old 120ms left almost no margin - under full-suite load several paste tests failed
- * intermittently while passing every time in isolation. Prefer `frameWith` where the test knows
- * what it is waiting for; this covers the sites that just need the flush to have happened.
- */
-function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 300));
-}
-
-/**
  * Waits until `needle` appears in the rendered frame, instead of assuming a fixed delay was long
  * enough. A paste is buffered and flushed PASTE_SETTLE_MS after its last chunk, and React then has
- * to commit; under full-suite load that routinely outlasts one `settle()`, which made several of
+ * to commit; under full-suite load that routinely outlasts any fixed wait, which made several of
  * these tests fail intermittently while passing every time in isolation. Returns the frame so the
  * caller asserts against the same one it waited on.
+
+ * This and `until` below are now the ONLY ways this file waits. The fixed 300ms `settle()` helper
+ * they replaced is gone, so there is nothing left here to reach for by habit.
  */
 async function frameWith(lastFrame: () => string | undefined, needle: string): Promise<string> {
   let frame = '';
@@ -79,6 +72,27 @@ async function frameWith(lastFrame: () => string | undefined, needle: string): P
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 30));
+}
+
+/**
+ * Polls `check` instead of sleeping a fixed span, for the waits `frameWith` cannot phrase - "the
+ * frame changed", "onSubmit has been called". Throws naming `what` rather than letting the
+ * assertion after it fail against a stale frame, which is far harder to read.
+ *
+ * Why this exists: the `settle()` helper these replaced was a fixed 300ms, and on full-suite runs
+ * that is sometimes not enough for a paste flush plus React's commit. What that produced was badly
+ * misleading -
+ * the keypress after the wait landed on a box that was still EMPTY, so "down-arrow clears the
+ * paste, up-arrow recalls it" became "down-arrow on nothing", and the test failed claiming the
+ * recalled entry had sent a placeholder when in truth there had never been a paste to recall.
+ * Same lesson as NextUp item 33 on the App tests: wait for the thing, not for a number.
+ */
+async function until(check: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    if (check()) return;
+    await tick();
+  }
+  throw new Error('timed out waiting for ' + what);
 }
 
 async function type(stdin: { write: (data: string) => void }, text: string): Promise<void> {
@@ -100,20 +114,29 @@ test('ctrl-O expands every collapsed paste in place, in order, and submit sends 
   );
   const first = Array.from({ length: 7 }, (_, i) => `first ${i}`).join('\n');
   const second = Array.from({ length: 7 }, (_, i) => `second ${i}`).join('\n');
+  // Each flush is waited for by its own placeholder number rather than by a fixed wait. This test
+  // was the last of the paste flakes - green alone every time, failing on full-suite runs - and a
+  // fixed 300ms wait was why: each paste is flushed PASTE_SETTLE_MS after its last chunk and React
+  // then has to commit, and under load that outlasts the wait. `pasted #1` / `#2` are exact
+  // (`pasteCounter` is reset per test by `resetPasteStoreForTests`), so there is no reason to guess
+  // at a duration here. Same lesson as NextUp item 33 on the App tests.
   stdin.write(first);
-  await settle();
+  await frameWith(lastFrame, 'pasted #1');
   stdin.write(second);
-  await settle();
-  assert.ok(lastFrame()?.includes('ctrl-O to view'), 'both pastes start out collapsed');
+  const collapsed = await frameWith(lastFrame, 'pasted #2');
+  assert.ok(collapsed.includes('ctrl-O to view'), 'both pastes start out collapsed');
+
   await press(stdin, CTRL_O);
-  await settle();
-  const frame = lastFrame() ?? '';
-  assert.ok(!frame.includes('ctrl-O to view'), 'no placeholder may survive the expansion');
   // The box is a window onto the text, so only the rows around the cursor are visible. The cursor
-  // lands at the end, so the tail of the second paste is what shows.
+  // lands at the end, so the tail of the second paste is what shows - which makes it the thing to
+  // wait on, and the proof the expansion happened.
+  const frame = await frameWith(lastFrame, 'second 6');
   assert.ok(frame.includes('second 6'), 'the end of the expanded text must be visible');
+  assert.ok(!frame.includes('ctrl-O to view'), 'no placeholder may survive the expansion');
   assert.ok(frame.includes('more above'), 'the rows scrolled out above must be announced');
-  await press(stdin, ENTER);
+
+  stdin.write(ENTER);
+  for (let i = 0; i < 60 && submitted.length === 0; i++) await tick();
   assert.equal(submitted[0], first + second, 'submit sends the full expanded text');
 });
 
@@ -379,12 +402,14 @@ test('Home/End move within the current wrapped row, not the whole buffer, once t
 
 test('Home then End on row 1 of a wrapped line round-trips to that row\'s start and end, not the buffer\'s', async () => {
   const submitted: string[] = [];
-  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   await tick();
 
   const wrapped = `${'A'.repeat(94)}BBBB`;
   stdin.write(wrapped);
-  await settle(); // cursor at the end (98), row 1
+  // Cursor at the end (98), row 1 - once the text is actually on screen, which is the part worth
+  // waiting for: every keypress below is positional, so acting on an empty box proves nothing.
+  await until(() => (lastFrame() ?? '').includes('BBBB'), 'the pasted row to render');
 
   await press(stdin, HOME); // row 1's home is index 94, the first 'B' - not index 0
   await type(stdin, 'Z'); // splits the B's: confirms Home actually moved the cursor
@@ -507,7 +532,7 @@ const WRAPPED_TWO_ROW_VALUE = `${'A'.repeat(94)}BBBB`;
 
 test('up arrow moves the cursor up one wrapped row, preserving column, before ever touching history', async () => {
   const submitted: string[] = [];
-  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   await tick();
 
   // One paste-shaped write, not 98 individual keystrokes - matches how InputBox actually
@@ -515,7 +540,7 @@ test('up arrow moves the cursor up one wrapped row, preserving column, before ev
   // fast. Cursor ends at the very end (index 98), which is row 1, column 4 (one past the last
   // "B") - column 4 on row 0 is the 3rd and 4th 'A' (columns 0-1 are the prompt itself).
   stdin.write(WRAPPED_TWO_ROW_VALUE);
-  await settle();
+  await until(() => (lastFrame() ?? '').includes('BBBB'), 'the pasted rows to render');
 
   await press(stdin, UP);
   // Landing on row 0 at column 4 means the cursor is now 2 characters into the 'A' run (column 4
@@ -588,11 +613,11 @@ test('a pasted chunk with embedded carriage returns is normalized to real newlin
   // just one `\n`, not two) - deliberately NOT collapsing runs of them, so a blank line in the
   // original content (a run of two bare `\r`s here) survives as a genuine blank line.
   const submitted: string[] = [];
-  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   await tick();
 
   stdin.write('line one\r\rline two\rline three');
-  await settle();
+  await until(() => (lastFrame() ?? '').includes('line three'), 'the paste to render');
   await press(stdin, ENTER);
 
   assert.deepEqual(submitted, ['line one\n\nline two\nline three']);
@@ -600,11 +625,11 @@ test('a pasted chunk with embedded carriage returns is normalized to real newlin
 
 test('a pasted chunk with Windows-style CRLF line endings does not double every line', async () => {
   const submitted: string[] = [];
-  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   await tick();
 
   stdin.write('line one\r\nline two\r\nline three');
-  await settle();
+  await until(() => (lastFrame() ?? '').includes('line three'), 'the paste to render');
   await press(stdin, ENTER);
 
   assert.deepEqual(submitted, ['line one\nline two\nline three']);
@@ -988,7 +1013,7 @@ test('a pasted block of six or more lines shows as one placeholder, and submit s
   const pasted = Array.from({ length: 8 }, (_, i) => `pasted line ${i}`).join('\n');
   stdin.write(pasted);
   // Polled rather than waited on a fixed time: the paste buffer flushes PASTE_SETTLE_MS after
-  // the last chunk and React then has to commit, which under full-suite load outlasts one settle().
+  // the last chunk and React then has to commit, which under full-suite load outlasts a fixed wait.
   let frame = '';
   for (let i = 0; i < 40 && !frame.includes('lines pasted #'); i++) {
     await tick();
@@ -1033,7 +1058,7 @@ test('clearing a collapsed paste with down-arrow then recalling it again does no
   const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   const pasted = Array.from({ length: 8 }, (_, i) => `cycle line ${i}`).join('\n');
   stdin.write(pasted);
-  await settle();
+  await frameWith(lastFrame, '8 lines pasted #');
   for (let i = 0; i < 3; i++) {
     await press(stdin, '\x1b[B');
     await press(stdin, '\x1b[A');
@@ -1045,10 +1070,13 @@ test('clearing a collapsed paste with down-arrow then recalling it again does no
 
 test('a collapsed paste cleared with down-arrow, then recalled after an Enter, still submits the full text', async () => {
   const submitted: string[] = [];
-  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
   const pasted = Array.from({ length: 8 }, (_, i) => `recall line ${i}`).join('\n');
   stdin.write(pasted);
-  await settle();
+  // This is the test that caught the fixed-wait problem on a full run: the down-arrow below
+  // sometimes hit an empty box, so there was no paste to clear and nothing to recall, and the
+  // failure read as "sent a placeholder" when nothing had been pasted at all.
+  await frameWith(lastFrame, '8 lines pasted #');
   await press(stdin, '\x1b[B');
   await press(stdin, '\r');
   await press(stdin, '\x1b[A');
@@ -1081,7 +1109,7 @@ test('a tab-indented paste never reaches the frame as a raw tab, and no frame li
   await tick();
   // Four lines, under PASTE_COLLAPSE_LINES, so this renders in the box instead of collapsing.
   stdin.write('\tone\n\t\ttwo\n\tthree\n\t\t\tfour');
-  await settle();
+  await until(() => (lastFrame() ?? '').includes('        one'), 'the tab-indented paste to render');
   const frame = lastFrame() ?? '';
   assert.ok(!frame.includes('\t'), 'no raw tab may reach the rendered frame');
   assert.ok(frame.includes('        one'), 'a leading tab expands to the first tab stop');
@@ -1102,7 +1130,7 @@ test('pasted ANSI escapes are stripped whole, not left behind as literal text', 
   // The rendered frame carries the cursor cell's own SGR pair, which can land mid-word and split
   // it, so these checks run against the frame with SGR codes removed. Polling rather than waiting a
   // fixed time: the paste buffer flushes PASTE_SETTLE_MS after the last chunk, and under full-suite
-  // load that plus React's commit can outlast a single settle().
+  // load that plus React's commit can outlast a single fixed wait.
   const sgr = new RegExp(`${ESC}\[[0-9;]*m`, 'g');
   const whole = (f: string) => ['before', 'RED', 'after'].every((part) => f.replace(sgr, '').includes(part));
   let frame = '';
@@ -1140,14 +1168,14 @@ test('PageUp and PageDown move by a window of rows, not by one row', async () =>
   await tick();
   // Five lines, under PASTE_COLLAPSE_LINES, so the box holds the text itself.
   stdin.write(Array.from({ length: 5 }, (_, i) => `line ${i} ` + 'word '.repeat(25)).join('\n'));
-  await settle();
+  await until(() => (lastFrame() ?? '').includes('line 4'), 'the paste to render');
   const atEnd = lastFrame() ?? '';
   await press(stdin, PAGE_UP);
-  await settle();
+  await until(() => lastFrame() !== atEnd, 'PageUp to move the view');
   assert.notEqual(lastFrame(), atEnd, 'PageUp must move the view');
   await press(stdin, PAGE_DOWN);
-  await settle();
-  await press(stdin, ENTER);
+  stdin.write(ENTER);
+  await until(() => submitted.length > 0, 'the box to submit');
   assert.ok(submitted[0]?.startsWith('line 0'), 'paging must not alter the text');
 });
 
@@ -1204,7 +1232,7 @@ test('the character under the cursor stays visible, not hidden by the highlight'
 
 test('a burst of keystrokes in one tick lands in the order it arrived', async () => {
   const submitted: string[] = [];
-  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
   await tick();
 
   // A terminal delivers fast typing - and a paste that Ink's parser splits - as several useInput
@@ -1213,7 +1241,7 @@ test('a burst of keystrokes in one tick lands in the order it arrived', async ()
   stdin.write('a');
   stdin.write('b');
   stdin.write('c');
-  await settle();
+  await until(() => (lastFrame() ?? '').includes('abc'), 'all three characters to land');
   await press(stdin, ENTER);
 
   assert.deepEqual(submitted, ['abc'], 'typing abc in one tick must not render cba');
@@ -1221,12 +1249,12 @@ test('a burst of keystrokes in one tick lands in the order it arrived', async ()
 
 test('a chunk and a keystroke in one tick keep their order', async () => {
   const submitted: string[] = [];
-  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
+  const { stdin, lastFrame } = render(React.createElement(InputBox, { onSubmit: (v: string) => submitted.push(v) }));
   await tick();
 
   stdin.write('hello');
   stdin.write('X');
-  await settle();
+  await until(() => (lastFrame() ?? '').includes('helloX'), 'both writes to land');
   await press(stdin, ENTER);
 
   assert.deepEqual(submitted, ['helloX'], 'the later keystroke must land after the chunk');

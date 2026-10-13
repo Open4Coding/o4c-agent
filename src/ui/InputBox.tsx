@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, measureElement, useBoxMetrics, useCursor, useInput, usePaste, useWindowSize } from 'ink';
+import { Box, Text, measureElement, useCursor, useInput, usePaste, useWindowSize } from 'ink';
 import type { DOMElement } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -341,13 +341,36 @@ export function InputBox({
   //
   // Needs the position relative to Ink's output origin, not to this box, so the content element is
   // measured rather than guessed: `measureElement` walks up the layout tree accumulating offsets,
-  // which is the same coordinate space Ink's own `buildCursorSuffix` works in. `useBoxMetrics` is
-  // here only for `hasMeasured` - its `top`/`left` are relative to the PARENT and so are no use -
-  // and because it re-renders this component when layout moves, which is what gets the cursor
-  // repositioned after a resize.
+  // which is the same coordinate space Ink's own `buildCursorSuffix` works in. (`useBoxMetrics`
+  // cannot stand in for it: its `top`/`left` are relative to the PARENT.)
   const contentRef = useRef<DOMElement | null>(null);
   const { setCursorPosition } = useCursor();
-  const { hasMeasured } = useBoxMetrics(contentRef);
+
+  // The origin this render measured, and a counter whose only job is to buy ONE corrective render
+  // when the box has actually moved - see the effect below and the measure block further down.
+  //
+  // This replaced `useBoxMetrics(contentRef)`, which did the same job by subscribing to Ink's root
+  // layout commits (NextUp item 34). That subscription fires after EVERY commit anywhere in the
+  // app and schedules a state update here unconditionally, change or no change: 61 of them in one
+  // short App test, which is what tripped React's "Maximum update depth exceeded" guard at its
+  // 50-nested-update limit. Nothing hung and no test failed, but it meant an extra render of the
+  // biggest box on screen behind every single commit - precisely the repaint traffic `useCursor`
+  // was adopted to get rid of. Comparing the measurement ourselves costs a render only when the
+  // number changed, and converges after exactly one.
+  const originRef = useRef<{ x: number; y: number } | undefined>(undefined);
+  const [, correctOrigin] = useState(0);
+  useEffect(() => {
+    // No dependency array on purpose: this has to run after every render, because what it checks
+    // is a layout result, which no prop or state value describes. The setState is guarded on a
+    // real change, so "runs every render" does not mean "re-renders every render".
+    const node = contentRef.current;
+    const fresh = node ? measureElement(node) : undefined;
+    const next = fresh && fresh.width > 0 ? fresh : undefined;
+    const used = originRef.current;
+    if (next?.x !== used?.x || next?.y !== used?.y) {
+      correctOrigin((n) => n + 1);
+    }
+  });
 
   // Submitted-input recall (up/down arrow), kept local to the input box - it only
   // needs the raw strings that were submitted, not anything about how they resolved. Seeded
@@ -702,7 +725,12 @@ export function InputBox({
   // apply one commit late - a cursor trailing a keystroke behind, which is exactly what you would
   // notice while typing. Measuring here instead reads the PREVIOUS layout, which is identical
   // whenever the box has not moved, i.e. all ordinary typing. It is one frame stale only on the
-  // frames where the layout actually changed, and `useBoxMetrics` above re-renders us on those.
+  // frames where the layout actually changed, and the effect above spends one render putting those
+  // right - so an idle box that just got pushed down by a tool result still ends up with its
+  // cursor in the right place, without waiting for the next keystroke.
+  //
+  // `width > 0` is the "has been laid out at all" test: `measureElement` answers zeros for a node
+  // with no computed layout, and 0,0 would park the cursor at the frame origin rather than nowhere.
   //
   // `undefined` hides the cursor, which is what we want in three cases: before the first layout
   // pass (nothing measured, so any position would be a guess), and whenever a sibling overlay owns
@@ -710,9 +738,11 @@ export function InputBox({
   // box that is not listening is worse than none. Unmounting hides it for free, since the hook's
   // own cleanup clears the position.
   const contentNode = contentRef.current;
-  if (active && hasMeasured && contentNode) {
-    const { x, y } = measureElement(contentNode);
-    setCursorPosition({ x: x + view.cursorCol, y: y + view.cursorRow });
+  const measured = contentNode ? measureElement(contentNode) : undefined;
+  const origin = measured && measured.width > 0 ? measured : undefined;
+  originRef.current = origin ? { x: origin.x, y: origin.y } : undefined;
+  if (active && origin) {
+    setCursorPosition({ x: origin.x + view.cursorCol, y: origin.y + view.cursorRow });
   } else {
     setCursorPosition(undefined);
   }
