@@ -272,6 +272,17 @@ const TAB = String.fromCharCode(9);
 // reliable in isolation; 30ms gives margin for real test-runner contention. Explicit tick(N)
 // call sites below with N<30 (e.g. between a DOWN and the ENTER that follows it) are bumped to
 // match for the same reason - they hit the identical settle-time issue.
+//
+// WHICH TO USE, tick or waitFor - the rule behind item 7 on the NextUp list. A POSITIVE assertion
+// ("this appeared", "the file was written", "the provider was called") must be reached with
+// `waitFor`, never by sleeping a fixed number of milliseconds: these tests drive real async chains
+// (provider -> toolPolicy -> tool execution -> turn finish -> repaint), every one of them passes in
+// isolation, and under the load of a 996-test run the slowest link crosses whatever tick was
+// guessed. That is exactly how it failed on 2026-10-13 - "Auto Mode runs write_file with no
+// confirmation prompt at all" died on ENOENT after a 100ms tick, having never failed alone.
+// A NEGATIVE assertion ("no dialog appeared", "nothing repainted", "the list stayed open") is the
+// opposite case: there is no condition to poll for, so a deliberate `tick(N)` IS the test, and N is
+// the window in which the thing had its chance to happen. Those are left alone on purpose.
 function tick(ms = 30): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -725,8 +736,7 @@ test('Escape while thinking cancels the turn and restores its prompt to the inpu
     // seeing a fresh turn start.
     const framesBeforeResubmit = frames.length;
     stdin.write(ENTER);
-    await tick(50);
-    assert.ok(frames.slice(framesBeforeResubmit).some((f) => f.includes('Thinking...')));
+    await waitFor(() => frames.slice(framesBeforeResubmit).some((f) => f.includes('Thinking...')));
   });
 });
 
@@ -794,8 +804,9 @@ test('Esc inside the check closes it as a No - a second Esc never stops the turn
 
     stdin.write(ESCAPE);
     await waitFor(() => !(lastFrame() ?? '').includes('Stop now?'));
-    await tick(200);
-    assert.ok((lastFrame() ?? '').includes('Thinking...'), 'still running after the second Esc');
+    // Still running after the second Esc. Waited for, not ticked for: the repaint that drops the
+    // "Stop now?" box and the one that brings "Thinking..." back are separate commits.
+    await waitFor(() => (lastFrame() ?? '').includes('Thinking...'));
     assert.equal(anyFrameIncludes(frames, 'Cancelled'), false);
   });
 });
@@ -1995,8 +2006,8 @@ test('/set opens its family dropdown; choosing a setting prefills the input box 
     // Typing the bare name is enough now - no '-' and no Enter needed to see the family.
     await type(stdin, '/set');
     await waitFor(() => (lastFrame() ?? '').includes('/set commands'));
-    await tick(60); // the palette unmounts and the family dropdown takes over input
-    assert.ok((lastFrame() ?? '').includes('/set-sessionname'));
+    // The palette unmounts and the family dropdown takes over input - two commits, not one.
+    await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname'));
 
     // Row 0 is the bare /set, which is `select: 'none'` - Enter on it deliberately does nothing
     // and leaves the list open, so the real choices are reached by arrowing down.
@@ -2066,8 +2077,8 @@ test('/config opens its family dropdown; choosing one prefills the input box ins
 
     await type(stdin, '/config');
     await waitFor(() => (lastFrame() ?? '').includes('/config commands'));
-    await tick(60); // the palette unmounts and the family dropdown takes over input
-    assert.ok((lastFrame() ?? '').includes('/config-highlightcolor'));
+    // The palette unmounts and the family dropdown takes over input - two commits, not one.
+    await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor'));
 
     stdin.write(DOWN); // past the inert bare /config row
     await tick(50);
@@ -2907,24 +2918,35 @@ test('a server that dies mid-session rolls the turn back, puts the message back,
 test('Manual Mode (the default) prompts before write_file, and declining leaves the file untouched', async () => {
   await withTempDir(async (dir) => {
     const targetPath = join(dir, 'manual-no.txt');
-    const { stdin, frames } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
 
     await submit(stdin, 'please write the file');
-    await waitFor(() => anyFrameIncludes(frames, 'Allow write_file'));
+    await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
 
-    assert.ok(anyFrameIncludes(frames, 'Allow write_file'));
+    // The settle tick is NOT decoration, and leaving it out cost a real investigation (NextUp
+    // item 32). ConfirmDialog subscribes to input from a useEffect, which runs after the commit
+    // that paints the dialog - and ink-testing-library's stdin is a plain EventEmitter, so a
+    // keystroke written before that subscription exists is dropped and gone, not queued. Written
+    // the moment the dialog appeared, the ENTER below vanished: the dialog stayed up, the turn
+    // never resolved, and the test still passed, because "the file was not written" is equally
+    // true of a turn that hangs. Hence the end-to-end assertion afterwards - a lost keystroke or
+    // a genuinely wedged decline path now fails loudly instead of looking like a pass.
+    await tick(200);
     stdin.write(ENTER); // ConfirmDialog defaults to "No"
-    await tick(100);
+
+    // What the MODEL is told, through App's real toolPolicy wiring: that IT declined, not that
+    // the mode forbids write_file. Those were the same message until 2026-10-12, and the model
+    // read the mode wording as "this tool is unavailable" and stopped using it for the rest of
+    // the turn. loop.test.ts covers the wording on the loop itself; this covers the whole path.
+    // Wrap-tolerant: the message is long enough that Ink breaks it across lines, and where it
+    // breaks depends on the frame width, so compare with whitespace collapsed.
+    const saidTo = (text: string) => frames.some((f) => f.replace(/\s+/g, ' ').includes(text));
+    await waitFor(() => saidTo('You declined this write_file call, so it was not executed.'));
+    await waitFor(() => saidTo('The tool is available and you may ask for it again.'));
+    // ...and the turn actually finishes rather than sitting on "Thinking...".
+    await waitFor(() => anyFrameIncludes(frames, '[response]'));
 
     await assert.rejects(() => readFile(targetPath, 'utf-8'));
-
-    // NOT asserted here, deliberately: what the MODEL is told about the refusal. Tried 2026-10-12
-    // and the turn never gets that far in this harness - after the dialog resolves, the frame sits
-    // on "Thinking..." and no [result] or [response] line ever arrives, so there is nothing to read
-    // the message out of. That is a pre-existing gap in this test rather than a new one: the only
-    // assertion after the decline is "the file was not written", which is equally true of a turn
-    // that hangs, so it has never noticed. See NextUp item 32. The wording itself is covered
-    // directly on the loop (loop.test.ts, "a declined call tells the model it was declined").
   });
 });
 
@@ -3171,7 +3193,7 @@ test('the current mode is actually told to the model, not just enforced at the t
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan'));
 
     await submit(stdin, 'hello');
-    await tick(100);
+    await waitFor(() => provider.lastSystemPrompt.includes('Current mode: Plan.'));
 
     assert.match(provider.lastSystemPrompt, /Current mode: Plan\./);
     assert.match(provider.lastSystemPrompt, /write_file and run_shell are both hard-disabled/);
@@ -3183,7 +3205,7 @@ test('the current mode is actually told to the model, not just enforced at the t
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
 
     await submit(stdin, 'hello again');
-    await tick(100);
+    await waitFor(() => provider.lastSystemPrompt.includes('Current mode: Plan-Write.'));
 
     assert.match(provider.lastSystemPrompt, /Current mode: Plan-Write\./);
     assert.ok(provider.lastSystemPrompt.includes(join(dir, '.o4c', 'plans')));
@@ -3204,9 +3226,19 @@ test('Auto Mode runs write_file with no confirmation prompt at all', async () =>
     await tick(50);
 
     await submit(stdin, 'please write the file');
-    await tick(100);
+    // Poll the real file. The write lands at the end of provider -> toolPolicy -> tool execution
+    // -> turn finish, and a fixed 100ms tick lost that race on the 2026-10-13 full-suite run
+    // (ENOENT on auto.txt) while passing in isolation every time - item 7.
+    await waitFor(async () => {
+      try {
+        return (await readFile(targetPath, 'utf-8')) === 'hello';
+      } catch {
+        return false;
+      }
+    });
 
-    assert.equal(await readFile(targetPath, 'utf-8'), 'hello');
+    // Negative, so a fixed wait is the right tool here and no poll is possible: by the time the
+    // file exists, a confirmation dialog would already have had to appear and be answered.
     assert.equal((lastFrame() ?? '').includes('Allow write_file'), false);
   });
 });
