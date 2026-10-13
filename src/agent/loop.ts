@@ -165,6 +165,15 @@ export interface CumulativeUsage {
  */
 export const CONTEXT_PRESSURE_RATIO = 0.8;
 
+/**
+ * How many times in a row a reply may be cut off at the output limit and continued before the turn
+ * gives up. Five is deliberately generous - at a 8,192-token ceiling that is ~40,000 tokens of
+ * continued output in one turn, far more than any real answer needs - because this is the backstop,
+ * not the main guard. The main guard is the identical-reply check beside it, which catches the
+ * livelock the moment it starts instead of after five wasted rounds.
+ */
+export const MAX_CUTOFF_CONTINUATIONS = 5;
+
 export class AgentLoop {
   private entries: ContextEntry[] = [];
   /** id -> entry, kept in lockstep with `entries` (see `indexEntry()`/`deindexEntry()`) - O(1)
@@ -922,6 +931,9 @@ export class AgentLoop {
     let continuationEntries: ContextEntry[] = [];
     let emptyTurnRetries = 0;
     let hadToolWork = false;
+    /** Consecutive max_tokens cutoffs continued so far this turn, and the text of the last one. */
+    let cutoffContinuations = 0;
+    let lastCutoffText = '';
     // No continuation prompt after a cutoff: the request simply ends on the cut-off assistant
     // message and the server picks the sentence up where it stopped. A transient user turn used to
     // be appended here (CUTOFF_CONTINUE_PROMPT, 2026-10-07) on the belief that a trailing assistant
@@ -1173,6 +1185,44 @@ export class AgentLoop {
       if (isMaxTokensCutoff) {
         cutoffChain.push(...roundEntries);
       }
+      // A continuation that is not continuing has to stop, or the turn livelocks. Found on a real
+      // run 2026-10-12: with the per-reply ceiling at 4,096 tokens the model regenerated the SAME
+      // 10,011 characters every round - cut off at the same point, hidden by
+      // hidePendingCutoffChain, pruned for the same ~2,503 tokens, and retried - forever. Context
+      // parked at 11-12K because prune freed exactly what the retry added, and nothing bounded the
+      // loop: maxIterations is the only other backstop and it is usually generous.
+      //
+      // Why it happens: llama-server echoes the prefill back, and those echoed tokens come out of
+      // the SAME output budget. Once the cut-off text is long enough to fill the ceiling on its
+      // own, re-emitting it consumes the whole allowance and the reply stops in exactly the same
+      // place. Smaller windows make it certain, since the ceiling is window/4, but any window can
+      // reach it with a long enough reply.
+      //
+      // Two guards, because they fail differently. An identical reply is proof of no progress and
+      // stops at once - it cannot false-positive, which matters because a provider that does NOT
+      // echo (Anthropic returns the continuation alone) legitimately sends shorter text each round,
+      // so "did it get longer" would be wrong there. The cap is the provider-agnostic backstop for
+      // a model that repeats itself inexactly.
+      if (isMaxTokensCutoff && response.toolCalls.length === 0) {
+        const repeatedItself = responseText === lastCutoffText && responseText.trim() !== '';
+        cutoffContinuations += 1;
+        lastCutoffText = responseText;
+        if (repeatedItself || cutoffContinuations > MAX_CUTOFF_CONTINUATIONS) {
+          onEvent({
+            type: 'warning',
+            text: repeatedItself
+              ? 'The model repeated its last reply instead of continuing past the output limit, so this turn stopped rather than retrying forever. Ask for a smaller step, or use /think low to leave more of the reply budget for output.'
+              : `Stopped after ${MAX_CUTOFF_CONTINUATIONS} continuations of a reply that kept hitting the output limit. Ask for a smaller step, or use /think low to leave more of the reply budget for output.`,
+          });
+          return responseText;
+        }
+      } else {
+        // Any round that is not a bare cutoff means real progress - reset, so a later cutoff gets
+        // the full allowance again rather than inheriting a streak from earlier in the turn.
+        cutoffContinuations = 0;
+        lastCutoffText = '';
+      }
+
       // Which entries the NEXT request has to end on, so the server resumes the cut-off sentence
       // instead of starting over. Only a cutoff with no tool call is a continuation: with a tool
       // call the loop runs the tools and the request properly ends on their results. Narrower than

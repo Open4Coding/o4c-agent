@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { MAX_CUTOFF_CONTINUATIONS } from '../../agent/loop.js';
 import type { ScenarioResult, ScenarioSpec, TurnSpec } from './harness.js';
 import type { ScriptRound, SummarizerMode } from './scriptedProvider.js';
 
@@ -137,8 +138,20 @@ export const SCENARIOS: ScenarioSpec[] = [
       },
     ],
     check: (r) => {
-      assert.equal(r.requests, 13, 'every cutoff should auto-continue into the next request');
-      assert.equal(r.prunes, 11, 'each cutoff round should hide the one before it');
+      // Twelve cutoffs are offered; the loop must NOT take them all. Changed 2026-10-12 after a
+      // real run livelocked here: the model regenerated the same reply every round and the turn
+      // never ended, because nothing bounded the chain. This scenario used to assert all 13
+      // requests happened, which is exactly the behaviour that turned out to be the bug.
+      //
+      // So: one initial request plus MAX_CUTOFF_CONTINUATIONS continuations, then it gives up. The
+      // prune count is one less than the request count, because the first cutoff has no earlier
+      // round to hide and the giving-up round never becomes someone else's predecessor.
+      assert.equal(
+        r.requests,
+        MAX_CUTOFF_CONTINUATIONS + 1,
+        'a cutoff chain must stop at the continuation cap, not run as long as the model offers',
+      );
+      assert.equal(r.prunes, MAX_CUTOFF_CONTINUATIONS, 'each cutoff round should still hide the one before it');
     },
   },
   {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentLoop, AbortedError, MaxIterationsError } from '../agent/loop.js';
+import { AgentLoop, AbortedError, MaxIterationsError, MAX_CUTOFF_CONTINUATIONS } from '../agent/loop.js';
 import { aiResponseEntry, estimateTokens, userInputEntry } from '../agent/contextEntry.js';
 import { FakeProvider } from './fakeProvider.js';
 import { makeFakeTool } from './fakeTool.js';
@@ -645,6 +645,106 @@ test('loadEntries() excludes agent_visible=false entries from getVisibleTokenEst
 // saying a word, so a compaction read as routine housekeeping rather than as the session telling
 // you it was near the edge - and the plan called an active warning at this threshold "the actual
 // preventive fix for the silent-hang incident".
+// The livelock found on a real run, 2026-10-12. With the per-reply ceiling at 4,096 tokens the
+// model regenerated the SAME 10,011 characters every round - cut off at the same point, pruned for
+// the same ~2,503 tokens, retried - and the turn never ended. Reproduced here with a provider that
+// returns identical cut-off content forever, which is exactly what the run log showed.
+const REPEATED = 'I need to clarify how quotes work in the lexer. '.repeat(40);
+
+test('a reply that repeats itself instead of continuing stops the turn, rather than looping forever', async () => {
+  const provider = new FakeProvider(
+    Array.from({ length: 50 }, () => ({ content: REPEATED, toolCalls: [], stopReason: 'max_tokens' as const })),
+  );
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const warnings: string[] = [];
+  const result = await loop.run('go', {
+    contextWindow: 16_384,
+    onEvent: (e) => {
+      if (e.type === 'warning' && e.text) warnings.push(e.text);
+    },
+  });
+
+  // Two provider calls: the first cutoff, then the continuation that comes back identical.
+  assert.equal(provider.callCount, 2, `expected to stop on the first repeat, made ${provider.callCount} calls`);
+  assert.ok(
+    warnings.some((w) => w.includes('repeated its last reply')),
+    `expected a repeat warning, got ${JSON.stringify(warnings)}`,
+  );
+  // What it produced is still returned - the user keeps the partial answer rather than losing it.
+  assert.equal(result, REPEATED);
+});
+
+test('continuations that keep making progress are capped rather than allowed to run forever', async () => {
+  // Each reply is longer than the last, so the identical-reply guard never fires and only the
+  // backstop can stop this. A provider that does not echo would look like this too.
+  const provider = new FakeProvider(
+    Array.from({ length: 50 }, (_, i) => ({
+      content: `chunk ${i} ` + 'x'.repeat(100 + i * 10),
+      toolCalls: [],
+      stopReason: 'max_tokens' as const,
+    })),
+  );
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const warnings: string[] = [];
+  await loop.run('go', {
+    contextWindow: 229_376,
+    onEvent: (e) => {
+      if (e.type === 'warning' && e.text) warnings.push(e.text);
+    },
+  });
+
+  // The first call plus MAX_CUTOFF_CONTINUATIONS continuations, then it gives up.
+  assert.equal(provider.callCount, MAX_CUTOFF_CONTINUATIONS + 1, `made ${provider.callCount} calls`);
+  assert.ok(
+    warnings.some((w) => w.includes(`Stopped after ${MAX_CUTOFF_CONTINUATIONS} continuations`)),
+    `expected the cap warning, got ${JSON.stringify(warnings)}`,
+  );
+});
+
+// The guards must not get in the way of the thing they guard. A cutoff that genuinely continues,
+// then finishes, has to go through untouched.
+test('a cutoff that continues and then finishes is not interrupted by either guard', async () => {
+  const provider = new FakeProvider([
+    { content: 'first half of the answer', toolCalls: [], stopReason: 'max_tokens' },
+    { content: 'first half of the answer, and now the second half', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+
+  const warnings: string[] = [];
+  const result = await loop.run('go', {
+    contextWindow: 229_376,
+    onEvent: (e) => {
+      if (e.type === 'warning' && e.text) warnings.push(e.text);
+    },
+  });
+
+  assert.equal(result, 'first half of the answer, and now the second half');
+  // The ordinary "cut off at the output limit - continuing" notice is expected and predates this;
+  // what must NOT appear is either guard firing on a continuation that was working fine.
+  assert.equal(
+    warnings.some((w) => w.includes('repeated its last reply') || w.includes('Stopped after')),
+    false,
+    `no guard should fire here, got ${JSON.stringify(warnings)}`,
+  );
+});
+
+// Tool work resets the streak: a turn that does real work between cutoffs is not accumulating
+// toward the cap, or a long session would eventually trip it for no reason.
+test('real work between cutoffs resets the continuation streak', async () => {
+  const cut = { content: 'cut off here', toolCalls: [], stopReason: 'max_tokens' as const };
+  const provider = new FakeProvider([
+    cut,
+    { content: 'different text now', toolCalls: [], stopReason: 'max_tokens' as const },
+    { content: 'done', toolCalls: [], stopReason: 'end_turn' as const },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  const result = await loop.run('go', { contextWindow: 229_376 });
+  assert.equal(result, 'done');
+  assert.equal(provider.callCount, 3);
+});
+
 test('crossing the context-pressure threshold warns, naming the percentage and the counts', async () => {
   const provider = new FakeProvider(
     Array.from({ length: 6 }, () => ({ content: 'ok', toolCalls: [], stopReason: 'end_turn' as const })),
