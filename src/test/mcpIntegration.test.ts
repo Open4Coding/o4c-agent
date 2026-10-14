@@ -1,11 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseServers, type McpServerConfig } from '../mcp/serverConfig.js';
 import { McpHost } from '../mcp/host.js';
 import { connectServer } from '../mcp/client.js';
 import { classifyToolAccess } from '../ui/modePolicy.js';
+import { AgentLoop, type AgentEvent } from '../agent/loop.js';
+import { startMcpSession } from '../mcp/startup.js';
+import { FakeProvider } from './fakeProvider.js';
 
 /**
  * End-to-end against a REAL MCP server over the real stdio transport - the SDK handshake,
@@ -18,13 +23,17 @@ import { classifyToolAccess } from '../ui/modePolicy.js';
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcpFixtureServer.mjs');
 
-function fixtureServer(mode: string, grants: Record<string, boolean> = {}): McpServerConfig {
+function fixtureServer(
+  mode: string,
+  grants: Record<string, boolean> = {},
+  env: Record<string, string> = {},
+): McpServerConfig {
   const { servers, problems } = parseServers({
     fixture: {
       transport: 'stdio',
       command: process.execPath, // this exact node, not whatever "node" resolves to on PATH
       args: [FIXTURE],
-      env: { O4C_FIXTURE_MODE: mode },
+      env: { O4C_FIXTURE_MODE: mode, ...env },
       grants,
     },
   });
@@ -167,4 +176,84 @@ test('a dead server does not stop a healthy one spawned beside it', async () => 
   } finally {
     await host.shutdown();
   }
+});
+
+// ---------------------------------------------------------------------------
+// The whole path, start to finish: config -> spawn -> handshake -> proxy -> loop -> turn.
+// ---------------------------------------------------------------------------
+
+test('a configured server ends up as a tool the model is offered and can run', async () => {
+  // Everything cli.ts does, minus the terminal: `startMcpSession` with the config loader stubbed
+  // (the only seam - the host, the spawn and the SDK are all real), appending into a real
+  // AgentLoop, with a scripted provider standing in for the model.
+  const loop = new AgentLoop(
+    new FakeProvider([
+      { content: 'asking the server', toolCalls: [{ id: 't1', name: 'mcp__fixture__echo', input: { text: 'hello' } }], stopReason: 'tool_use' },
+      { content: 'it said hello', toolCalls: [], stopReason: 'end_turn' },
+    ]),
+    [],
+    'system',
+  );
+  const mcp = startMcpSession({
+    projectRoot: undefined,
+    addTools: (tools) => loop.addTools(tools),
+    load: async () => ({ servers: [fixtureServer('ok')], problems: [] }),
+  });
+  loop.registerPendingTools(mcp.ready);
+
+  try {
+    const events: AgentEvent[] = [];
+    assert.equal(await loop.run('say hello to the server', { onEvent: (e) => events.push(e) }), 'it said hello');
+
+    const result = events.find((e) => e.type === 'tool_result');
+    assert.equal(result?.toolOutput, 'echo: hello', JSON.stringify(events.map((e) => e.type)));
+    assert.deepEqual(events.filter((e) => e.type === 'warning'), [], 'a working server says nothing');
+  } finally {
+    await mcp.shutdown();
+  }
+});
+
+test('the server o4c spawned is really gone after shutdown, not just closed', async () => {
+  // `close()` resolving is not the claim worth making - the claim is that no process is left
+  // behind, because o4c reloads itself into a fresh process after most turns and anything leaked
+  // here is leaked once per turn for the life of the session.
+  const pidFile = join(await mkdtemp(join(tmpdir(), 'o4c-mcp-pid-')), 'pid');
+  const host = await McpHost.start([fixtureServer('ok', {}, { O4C_FIXTURE_PIDFILE: pidFile })]);
+  assert.equal(host.status()[0].state, 'ready');
+
+  const pid = Number(await readFile(pidFile, 'utf8'));
+  assert.ok(pid > 0, `the fixture must have recorded its pid, got ${pid}`);
+  assert.doesNotThrow(() => process.kill(pid, 0), 'it is running while the host holds it');
+
+  await host.shutdown();
+  await assert.rejects(
+    async () => process.kill(pid, 0),
+    /ESRCH/,
+    'the subprocess must be gone once shutdown returns',
+  );
+});
+
+test('killAllNow reaps a real subprocess synchronously, for the exit backstop', async () => {
+  // `process.on('exit')` permits no asynchronous work at all, so this is the only cleanup the
+  // restart paths' own `process.exit()` calls can reach.
+  const pidFile = join(await mkdtemp(join(tmpdir(), 'o4c-mcp-kill-')), 'pid');
+  const host = await McpHost.start([fixtureServer('ok', {}, { O4C_FIXTURE_PIDFILE: pidFile })]);
+  const pid = Number(await readFile(pidFile, 'utf8'));
+  assert.doesNotThrow(() => process.kill(pid, 0));
+
+  host.killAllNow();
+  // SIGKILL is delivered synchronously but the process table entry clears a moment later, so this
+  // polls rather than asserting instantly - bounded, and it fails by timing out if it never dies.
+  const deadline = Date.now() + 5_000;
+  let alive = true;
+  while (alive && Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } catch {
+      alive = false;
+    }
+  }
+  assert.equal(alive, false, 'killAllNow must actually terminate the child');
+  await host.shutdown();
 });

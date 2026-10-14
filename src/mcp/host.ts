@@ -1,6 +1,6 @@
 import type { Tool } from '../tools/types.js';
 import { lifecycleOf, reachOf, type McpReach, type McpServerConfig } from './serverConfig.js';
-import { connectServer, type ConnectedServer } from './client.js';
+import { closeGraceTimer, connectServer, MCP_CLOSE_GRACE_MS, type ConnectedServer } from './client.js';
 import { proxyTools } from './toolProxy.js';
 
 /**
@@ -122,12 +122,35 @@ export class McpHost {
    * at exit - which is the reason it has to be cheap and silent.
    */
   async shutdown(): Promise<void> {
+    const closing = this.connections;
+    this.connections = [];
+    this.proxied = [];
     // `allSettled`, not `all`: `all` rejects on the FIRST failure, which would abandon every
     // connection after it and leak exactly the subprocesses this is here to reap. `connectServer`
     // happens to swallow its own close errors, but shutdown must not depend on that - a transport
     // that throws on close is the normal consequence of a server having already died.
-    await Promise.allSettled(this.connections.map((c) => c.close()));
-    this.connections = [];
-    this.proxied = [];
+    //
+    // Bounded as a whole on top of each connection's own bound, then killed: a server that will
+    // not close must not hold up the reload the user is waiting on. `killNow()` is synchronous and
+    // idempotent, so running it across everything afterwards costs nothing for the connections
+    // that closed properly.
+    await Promise.race([
+      Promise.allSettled(closing.map((c) => c.close())),
+      closeGraceTimer(MCP_CLOSE_GRACE_MS * 2),
+    ]);
+    for (const connection of closing) connection.killNow();
+  }
+
+  /**
+   * Kills every spawned server **synchronously**, for `process.on('exit')`.
+   *
+   * That hook permits no asynchronous work, so `shutdown()` cannot run there - and it is the only
+   * hook that catches every way this app leaves, the `process.exit()` calls on the restart paths
+   * included (`cli.ts` installs the same backstop for `UsageStore`, for the same reason). Without
+   * it a reload chain would orphan one subprocess per server per turn: a child is not killed by
+   * its parent exiting, on either platform.
+   */
+  killAllNow(): void {
+    for (const connection of this.connections) connection.killNow();
   }
 }

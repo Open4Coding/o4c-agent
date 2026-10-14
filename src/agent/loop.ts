@@ -243,6 +243,51 @@ export class AgentLoop {
     private systemPrompt: string,
   ) {}
 
+  /**
+   * Work that must finish before the first turn is sent, and the notices it wants shown.
+   *
+   * Set by `registerPendingTools`; cleared the first time `run()` waits on it.
+   */
+  private pendingTools?: Promise<readonly string[]>;
+
+  /**
+   * Adds tools after construction.
+   *
+   * The one caller is the MCP host (`src/mcp/`), whose servers are connected in the background so
+   * that a slow or broken one cannot delay the first frame. Appending rather than replacing on
+   * purpose: the built-ins are already here and are not the host's business.
+   *
+   * Nothing caches the tool list, so this is safe at any time - `run()` builds `toolDefs` per turn
+   * and `overheadTokenEstimate` recomputes per check. What it must NOT do is land in the middle of
+   * a turn, since that turn's request has already told the model which tools exist; hence
+   * `registerPendingTools` below, which makes the first turn wait instead.
+   */
+  addTools(tools: readonly Tool[]): void {
+    this.tools.push(...tools);
+  }
+
+  /**
+   * Registers asynchronous tool discovery that the first turn must wait for.
+   *
+   * Without this, a session whose MCP servers are still connecting would send its first request
+   * with only the built-in tools and the user would be told, convincingly, that the tool they
+   * configured does not exist. Waiting at the top of `run()` rather than before `render()` is what
+   * lets startup stay instant: the cost lands only if the user types faster than the servers
+   * connect, and only once.
+   *
+   * The resolved strings are surfaced as `warning` events on that first turn - the existing
+   * channel for "something is wrong and it must not just scroll away" (App.tsx keeps a permanent
+   * record of these). Deliberately not printed to the terminal: by then Ink owns the screen, and
+   * writing around it is the exact class of bug `stderr: 'pipe'` exists to prevent in `client.ts`.
+   */
+  registerPendingTools(ready: Promise<readonly string[]>): void {
+    // A rejection here must never reach the turn. The MCP layer already reports per-server
+    // failures as status rather than throwing, so this is the belt on top of those braces.
+    this.pendingTools = ready.catch((error: unknown) => [
+      `Tool discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+    ]);
+  }
+
   private indexEntry(entry: ContextEntry): void {
     this.entriesById.set(entry.id, entry);
     if (entry.agent_visible !== false) {
@@ -380,8 +425,9 @@ export class AgentLoop {
    * full JSON schema, identical on every single call, none of which was in the estimate. The
    * trigger therefore fired later than the true request size, eating into `reserveTokens`' own
    * margin - the one thing it exists to protect. Computed fresh on every check rather than cached:
-   * `tools` never changes after construction, but `modeInstruction` is per-request and can differ
-   * turn to turn.
+   * `modeInstruction` is per-request and can differ turn to turn, and `tools` itself can grow once
+   * after construction (see `addTools` - MCP servers connect in the background), so a value cached
+   * at construction would under-count every turn after they arrive.
    */
   private overheadTokenEstimate(modeInstruction?: string): number {
     const systemPromptForRequest = modeInstruction ? `${this.systemPrompt}\n\n${modeInstruction}` : this.systemPrompt;
@@ -773,6 +819,16 @@ export class AgentLoop {
     const onEvent = options.onEvent ?? (() => {});
     const onEntry = options.onEntry ?? (() => {});
     const onProviderCall = options.onProviderCall ?? (() => {});
+
+    // Before anything else, including the compaction check: tools discovered asynchronously
+    // (MCP servers) have to be in `this.tools` before `toolDefs` is built below, or this turn
+    // would advertise a tool list the session is about to stop having. See
+    // `registerPendingTools`. Cleared first so a turn that throws does not re-wait on the next.
+    if (this.pendingTools) {
+      const pending = this.pendingTools;
+      this.pendingTools = undefined;
+      for (const notice of await pending) onEvent({ type: 'warning', text: notice });
+    }
 
     // Checked before this turn's own user message is appended, so the check reflects exactly
     // what's already in history from prior turns - a completed compaction here is committed

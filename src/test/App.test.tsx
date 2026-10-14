@@ -339,6 +339,46 @@ async function waitFor(
   }
 }
 
+/**
+ * One row of a jsonl log, as loosely typed as `JSON.parse` itself returns.
+ *
+ * These assertions reach into arbitrary nested payloads (`row.request.messages`), which a
+ * `Record<string, unknown>` would turn into a cast at every site for no safety the assertions do
+ * not already give - the log format is exactly what the test is checking.
+ */
+type LoggedRow = Record<string, any>;
+
+/**
+ * Waits for a jsonl log file to hold complete rows, and returns them parsed.
+ *
+ * These logs are appended by fire-and-forget writes that the UI never awaits, so a read can land
+ * between the bytes of a line and leave the last one as half a JSON object. Parsing inside the
+ * predicate makes that "not ready yet" - `waitFor` treats a throw as a retry - instead of a
+ * `SyntaxError: Unexpected end of JSON input` thrown after the wait, pointing at JSON.parse
+ * rather than at anything the test is about.
+ *
+ * Found in a full run (2026-10-14): "/help lists every command" died exactly that way, having
+ * never failed when run alone. Same family as the fixed-`tick()` flakes - the condition being
+ * waited for was "some lines exist", when what the test needed was "the lines are complete".
+ */
+async function waitForLogRows(
+  path: string,
+  done: (rows: LoggedRow[]) => boolean,
+  timeoutMs?: number,
+): Promise<LoggedRow[]> {
+  let rows: LoggedRow[] = [];
+  await waitFor(async () => {
+    const raw = await readFile(path, 'utf-8');
+    rows = raw
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as LoggedRow);
+    return done(rows);
+  }, timeoutMs);
+  return rows;
+}
+
 // Ink's Static component commits content as a one-time append rather than redrawing it in every
 // subsequent frame - the mock stdout's lastFrame() can legitimately miss earlier-committed static
 // blocks if a later live-only re-render happened after. Checking across every captured frame is
@@ -880,21 +920,14 @@ test('a turn with many tool calls collapses the display past the cap, but logs e
     // Poll for all 32 lines to actually be on disk, not just read once - runLogger.log() is
     // fire-and-forget (App.tsx never awaits it), so the UI showing "done scanning" only means
     // the last event's *render* committed, not that its log write has necessarily landed yet.
-    let lines: string[] = [];
-    await waitFor(async () => {
-      const raw = await readFile(logPath as string, 'utf-8');
-      lines = raw.trim().split('\n');
-      return lines.length >= 32;
-    });
+    const parsed = await waitForLogRows(logPath as string, (rows) => rows.length >= 32);
     // 15 rounds x (tool_call + tool_result) = 30, plus 1 final "text" event carrying the
     // answer = 31 raw AgentEvents, all of them logged regardless of what got collapsed on
     // screen - the cap only affects what's displayed, never what's logged. Plus 1 more: the
     // [scan] collapse itself is now also a distinct, findable log entry (not just implicit in
     // the raw event count), logged once per turn, not once per collapsed event.
-    assert.equal(lines.length, 32);
-    assert.ok(lines.every((l) => JSON.parse(l).ts));
-
-    const parsed = lines.map((l) => JSON.parse(l));
+    assert.equal(parsed.length, 32);
+    assert.ok(parsed.every((e) => e.ts));
     const scanEntry = parsed.find((e) => e.tag === 'scan-collapse');
     assert.ok(scanEntry);
     assert.equal(scanEntry.type, 'system');
@@ -926,13 +959,9 @@ test('a real turn writes a separate <timestamp>.FULLCONTEXT.jsonl with the full 
     assert.notEqual(fullPath, plainPath);
     assert.ok((fullPath as string).endsWith('.FULLCONTEXT.jsonl'));
 
-    let lines: string[] = [];
-    await waitFor(async () => {
-      const raw = await readFile(fullPath as string, 'utf-8');
-      lines = raw.trim().split('\n').filter(Boolean);
-      return lines.some((l) => JSON.parse(l).type === 'provider_call');
-    });
-    const parsed = lines.map((l) => JSON.parse(l));
+    const parsed = await waitForLogRows(fullPath as string, (rows) =>
+      rows.some((row) => row.type === 'provider_call'),
+    );
 
     const providerCalls = parsed.filter((e) => e.type === 'provider_call');
     assert.ok(providerCalls.length > 0);
@@ -988,12 +1017,8 @@ test('a <think> block is logged as its own event, kept out of the final answer, 
     await waitFor(() => Boolean(runLogger.getFilePath())); // the log file is created lazily by a fire-and-forget write
     const logPath = runLogger.getFilePath();
     assert.ok(logPath);
-    let lines: string[] = [];
-    await waitFor(async () => {
-      lines = (await readFile(logPath as string, 'utf-8')).trim().split('\n');
-      return lines.length >= 4;
-    });
-    const events = lines.map((l) => JSON.parse(l).event);
+    const rows = await waitForLogRows(logPath as string, (logged) => logged.length >= 4);
+    const events = rows.map((row) => row.event);
     assert.ok(events.some((e) => e.type === 'think' && e.text === 'let me check the file first'));
     assert.ok(events.some((e) => e.type === 'text' && e.text === 'The answer is 4.'));
   });
@@ -1452,12 +1477,7 @@ test('/help lists every command with its description, and logs itself under [inf
     await waitFor(() => Boolean(runLogger.getFilePath())); // the log file is created lazily by a fire-and-forget write
     const logPath = runLogger.getFilePath();
     assert.ok(logPath);
-    let lines: string[] = [];
-    await waitFor(async () => {
-      lines = (await readFile(logPath as string, 'utf-8')).trim().split('\n');
-      return lines.length >= 1;
-    });
-    const parsed = lines.map((l) => JSON.parse(l));
+    const parsed = await waitForLogRows(logPath as string, (rows) => rows.length >= 1);
     assert.ok(parsed.some((e) => e.type === 'system' && e.sub_type === 'info' && e.command === '/help'));
   });
 });

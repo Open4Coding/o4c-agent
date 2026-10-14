@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentLoop, AbortedError, MaxIterationsError, MAX_CUTOFF_CONTINUATIONS } from '../agent/loop.js';
+import { AgentLoop, AbortedError, MaxIterationsError, MAX_CUTOFF_CONTINUATIONS, type AgentEvent } from '../agent/loop.js';
 import { aiResponseEntry, estimateTokens, userInputEntry } from '../agent/contextEntry.js';
 import { FakeProvider } from './fakeProvider.js';
 import { makeFakeTool } from './fakeTool.js';
@@ -1157,4 +1157,81 @@ test('an ordinary prompt is never touched, and no spill file is written for it',
   const input = loop.getEntries().find((e) => e.type === 'user' && e.sub_type === 'input');
   assert.equal(input?.content, prompt, 'byte-identical, no marker');
   assert.deepEqual(await readdir(dir), [], 'nothing spilled for a normal prompt');
+});
+
+// ---------------------------------------------------------------------------
+// Tools that arrive after construction (MCP servers connect in the background - see src/mcp/).
+// ---------------------------------------------------------------------------
+
+test('addTools makes a tool both callable and advertised', async () => {
+  const provider = new FakeProvider([
+    { content: 'using it', toolCalls: [{ id: 't1', name: 'mcp__blender__render', input: {} }], stopReason: 'tool_use' },
+    { content: 'done', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  const late = makeFakeTool('mcp__blender__render', 'rendered 1 frame');
+
+  loop.addTools([late]);
+  assert.equal(await loop.run('render something'), 'done');
+
+  assert.deepEqual(provider.receivedRequests[0].tools?.map((t) => t.name), ['mcp__blender__render']);
+  assert.equal(late.calls.length, 1, 'and it actually ran');
+});
+
+test('the first turn waits for pending tool discovery before it is sent', async () => {
+  // The bug this prevents, which would otherwise be the normal experience of a configured MCP
+  // server: startup does not block on a slow server, so without this the first request goes out
+  // carrying only the built-ins and the model tells the user - convincingly - that the tool they
+  // configured does not exist.
+  const provider = new FakeProvider([{ content: 'ok', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [makeFakeTool('read_file', 'contents')], 'system');
+
+  let settle!: (notices: readonly string[]) => void;
+  loop.registerPendingTools(new Promise<readonly string[]>((resolve) => { settle = resolve; }));
+
+  const turn = loop.run('use the mcp tool');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The assertion that makes this test real rather than decorative: with the wait removed, the
+  // request has already gone out by here.
+  assert.equal(provider.callCount, 0, 'the turn must not be sent while tools are still arriving');
+
+  loop.addTools([makeFakeTool('mcp__blender__render', 'rendered')]);
+  settle([]);
+  await turn;
+
+  assert.deepEqual(
+    provider.receivedRequests[0].tools?.map((t) => t.name),
+    ['read_file', 'mcp__blender__render'],
+    'the very first request carries both',
+  );
+});
+
+test('discovery notices are surfaced as warnings, once, on the first turn only', async () => {
+  const provider = new FakeProvider([
+    { content: 'first', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'second', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.registerPendingTools(Promise.resolve(['MCP server "blender" could not be started']));
+
+  const first: AgentEvent[] = [];
+  await loop.run('hello', { onEvent: (event) => first.push(event) });
+  const warnings = first.filter((e) => e.type === 'warning');
+  assert.equal(warnings.length, 1, JSON.stringify(first.map((e) => e.type)));
+  assert.ok(warnings[0].text?.includes('blender'), JSON.stringify(warnings[0]));
+
+  const second: AgentEvent[] = [];
+  await loop.run('again', { onEvent: (event) => second.push(event) });
+  assert.deepEqual(second.filter((e) => e.type === 'warning'), [], 'not repeated every turn');
+});
+
+test('a rejected tool discovery is a warning, not a failed turn', async () => {
+  const provider = new FakeProvider([{ content: 'still works', toolCalls: [], stopReason: 'end_turn' }]);
+  const loop = new AgentLoop(provider, [], 'system');
+  loop.registerPendingTools(Promise.reject(new Error('the whole mcp layer fell over')));
+
+  const events: AgentEvent[] = [];
+  assert.equal(await loop.run('hello', { onEvent: (event) => events.push(event) }), 'still works');
+  const warning = events.find((e) => e.type === 'warning');
+  assert.ok(warning?.text?.includes('fell over'), JSON.stringify(events));
 });

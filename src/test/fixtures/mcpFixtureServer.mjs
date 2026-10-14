@@ -17,12 +17,23 @@
 //   callfail - connects and lists fine, then throws on every tool call
 //   legacy   - returns MCP's old { toolResult } shape instead of { content }
 //   silent   - connects at the transport level but never answers, to exercise the timeout
+//
+// O4C_FIXTURE_PIDFILE, when set, gets this process's pid written to it before anything else -
+// which is how a test can check that the subprocess o4c spawned is really gone afterwards, rather
+// than only that close() resolved. That distinction is the whole point of the reaping code: o4c
+// reloads itself into a fresh process after most turns, so a server that outlives its host would
+// leak one process per turn.
 
+import { writeFileSync } from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 const MODE = process.env.O4C_FIXTURE_MODE ?? 'ok';
+
+if (process.env.O4C_FIXTURE_PIDFILE) {
+  writeFileSync(process.env.O4C_FIXTURE_PIDFILE, String(process.pid));
+}
 
 if (MODE === 'crash') {
   process.stderr.write('fixture: refusing to start (Error: missing API key)\n');

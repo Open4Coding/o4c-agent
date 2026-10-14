@@ -20,6 +20,7 @@ import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor, usageFileFor } from './session/projectContext.js';
 import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
+import { startMcpSession, type McpSession } from './mcp/startup.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
 
@@ -166,6 +167,7 @@ async function runRepl(
   sessionView?: SessionView,
   serverHooks?: { status: ServerStatus; probe: () => Promise<ServerProbe>; onRecovered: (probe: ServerProbe) => void },
   showTabHint?: boolean,
+  mcp?: McpSession,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -271,6 +273,12 @@ async function runRepl(
   // Explicitly, before the restart paths below call process.exit(): the 'exit' backstop would
   // still catch it, but this keeps the ordinary way out off the emergency path.
   usageStore?.flush();
+  // Same reasoning for MCP, and the same backstop (`process.on('exit')` in the action below) - but
+  // worth attempting properly here, because this also runs on the **per-turn reload**, not only at
+  // exit. A SIGKILL per turn would give a stdio server no chance to finish what it was writing,
+  // and the first real plugin is an infinite-context store with a database open. Bounded inside
+  // `shutdown()` so it cannot make a reload feel slow.
+  await mcp?.shutdown();
   if (pendingRestart) {
     const handoffFile = process.env.O4C_HANDOFF_FILE;
     if (handoffFile) {
@@ -563,6 +571,28 @@ program
 
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
 
+    // MCP servers. Here, between the two branches below, because the REPL and one-shot mode need
+    // exactly the same thing: the same tools appended to the same loop, and the same cleanup.
+    //
+    // Not awaited - `startMcpSession` returns immediately and the tools land when they land (see
+    // its own comment for why startup must not wait, and `AgentLoop.registerPendingTools` for
+    // what stops the first turn running without them). `trusted ? projectRoot : undefined` is the
+    // same rule `ConfigStore` above gets, and matters more here: an MCP entry in an untrusted
+    // repo's `.o4c/` is not a preference, it is a command line this process would spawn.
+    const mcp = startMcpSession({
+      projectRoot: trusted ? projectRoot : undefined,
+      // No setting behind this yet - see docs/plans item 21 step 6, which wires secure mode to a
+      // real config value and amends PATH_FORWARD §1a. Until then every configured server is
+      // allowed, which is today's behaviour for everything else o4c talks to.
+      addTools: (tools) => loop.addTools(tools),
+    });
+    loop.registerPendingTools(mcp.ready);
+    // The backstop that catches every way this process leaves, the restart paths' own
+    // `process.exit()` calls included - the same reasoning (and the same hook) as UsageStore's
+    // flush in runRepl. Synchronous because 'exit' permits nothing else; the graceful close is
+    // attempted first, below, on the paths that can await.
+    process.on('exit', () => mcp.killAllNow());
+
     // Installed before either branch below (interactive REPL or one-shot) so both are covered -
     // this is a process-wide concern, not specific to the TUI. See gcWatchdog.ts's own doc comment
     // for why this exists. console.error rather than anything TUI-specific: needs to work
@@ -643,6 +673,7 @@ program
             }
           : undefined,
         showTabHint,
+        mcp,
       );
       return;
     }
@@ -658,6 +689,11 @@ program
     } catch (err) {
       printError(err);
       process.exitCode = 1;
+    } finally {
+      // One-shot mode ends by falling off the end of the action, with no process.exit() of its
+      // own, so without this a spawned server could keep the event loop alive after the answer
+      // has already been printed - the same class of hang the explicit exit in runRepl exists for.
+      await mcp.shutdown();
     }
   });
 

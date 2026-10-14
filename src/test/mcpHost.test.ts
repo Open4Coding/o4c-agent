@@ -17,7 +17,7 @@ const STDIO = { transport: 'stdio', command: 'node', args: ['s.js'] };
 function fakeConnection(
   config: McpServerConfig,
   tools: McpToolDescriptor[],
-  opts: { onCall?: () => Promise<{ content?: unknown }>; closed?: string[] } = {},
+  opts: { onCall?: () => Promise<{ content?: unknown }>; closed?: string[]; killed?: string[] } = {},
 ): ConnectedServer {
   return {
     config,
@@ -26,6 +26,9 @@ function fakeConnection(
     stderrTail: () => '',
     close: async () => {
       opts.closed?.push(config.id);
+    },
+    killNow: () => {
+      opts.killed?.push(config.id);
     },
   };
 }
