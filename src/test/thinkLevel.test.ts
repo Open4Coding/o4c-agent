@@ -50,7 +50,9 @@ test('nothink switches thinking off and never sends a budget', () => {
   // one of three samples. enable_thinking:false was verified clean.
   const params = localThinkParams('nothink');
   assert.deepEqual(params, { chat_template_kwargs: { enable_thinking: false } });
-  assert.equal(params.reasoning_budget_tokens, undefined);
+  // The key must be ABSENT, not merely undefined - `in` says that, and says it without a cast
+  // (the nothink branch's return type has no such property to read).
+  assert.equal('reasoning_budget_tokens' in params, false);
 });
 
 test('no level can ever emit the broken zero budget', () => {

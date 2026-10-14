@@ -29,7 +29,10 @@ export const PASTE_COLLAPSE_LINES = 6;
  */
 export const PASTE_COLLAPSE_CHARS = 1200;
 /** Quiet time after the last chunk of a paste before the buffered chunks are inserted. */
-const PASTE_SETTLE_MS = 60;
+// Exported for the tests only: `inputBoxStacking.test.tsx` has to wait out this debounce before
+// it can know a paste has finished rendering, and a hard-coded copy of the number there would go
+// stale the moment this one changed (NextUp item 36).
+export const PASTE_SETTLE_MS = 60;
 /** Terminal tab stop, in columns. Every terminal this app targets advances a `\t` to the next
  * multiple of 8; expanding to the same stops reproduces exactly what the terminal would have
  * drawn, so what's stored and what's shown have identical width. */

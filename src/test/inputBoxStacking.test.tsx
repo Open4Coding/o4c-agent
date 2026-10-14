@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import React from 'react';
 import { Box, Text, render } from 'ink';
-import { InputBox, PASTE_COLLAPSE_CHARS, PASTE_COLLAPSE_LINES } from '../ui/InputBox.js';
+import { InputBox, PASTE_COLLAPSE_CHARS, PASTE_COLLAPSE_LINES, PASTE_SETTLE_MS } from '../ui/InputBox.js';
 import { expandedInputBoxCapRows, inputBoxCapRows } from '../ui/frameBudget.js';
 import { VirtualTerminal } from './virtualTerminal.js';
 
@@ -106,7 +106,55 @@ class FakeStdin extends EventEmitter {
   }
 }
 
-const settle = (ms = 150): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const POLL_MS = 15;
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, POLL_MS));
+
+/**
+ * Polls until nothing new has been written for `quietMs`. Requires nothing to arrive first, so
+ * this is "Ink has stopped writing", not "Ink has written something".
+ */
+async function idle(stdout: FakeTty, quietMs = 0): Promise<void> {
+  const needed = Math.ceil(quietMs / POLL_MS) + 1;
+  let quietPolls = 0;
+  for (let i = 0; i < 400 && quietPolls < needed; i++) {
+    const n = stdout.chunks.length;
+    await tick();
+    quietPolls = stdout.chunks.length === n ? quietPolls + 1 : 0;
+  }
+}
+
+/**
+ * Waits for the next write and then for the output to go quiet for `quietMs`. Returns false if
+ * nothing was written within `maxPolls` - which is a real outcome here, not a failure, see the
+ * up-arrow loop in `drive`.
+ *
+ * This and `idle` replaced a fixed `settle(ms)` (NextUp item 36). A guessed duration is wrong in
+ * both directions: too short on a loaded machine, which is the flake, and always too long on an
+ * idle one, which is pure wall clock. Quiescence is also the only honest condition for this file -
+ * unlike the frame-text tests, what it asserts on is the MODELLED TERMINAL after every chunk has
+ * been replayed, so what it needs is "Ink has finished writing", not "some string is on screen".
+ *
+ * `quietMs` is why this is not simply "wait for the next chunk". A paste writes TWICE: the
+ * arriving chunk repaints immediately, and the collapse/flush repaints again PASTE_SETTLE_MS
+ * later, with a genuine lull between them. Without it this returned in that lull and the ctrl-O
+ * test failed with "ctrl-O must actually grow the box" - it had expanded a box the paste had not
+ * finished filling. So the paste step waits out the debounce, by the exported constant rather than
+ * a copy of the number. Each poll is its own timer, so a stalled machine stretches every wait here
+ * instead of defeating it.
+ *
+ * One render can also write more than one chunk - our Ink patch splits the static and frame
+ * writes - which the no-growth check handles: another chunk resets the wait.
+ */
+async function repainted(stdout: FakeTty, before: number, quietMs = 0, maxPolls = 60): Promise<boolean> {
+  for (let i = 0; i < maxPolls; i++) {
+    await tick();
+    if (stdout.chunks.length > before) {
+      await idle(stdout, quietMs);
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Renders a real `InputBox` into a modelled terminal, types `text`, then presses up-arrow
@@ -125,18 +173,33 @@ async function drive(
     patchConsole: false,
     exitOnCtrlC: false,
   });
-  await settle();
+  assert.ok(await repainted(stdout, 0), 'the box must paint a first frame');
+  const beforePaste = stdout.chunks.length;
   stdin.write(text);
-  await settle();
+  // Past the debounce, so this cannot return between the arrival repaint and the flush repaint.
+  assert.ok(await repainted(stdout, beforePaste, PASTE_SETTLE_MS), 'the paste must flush and repaint');
   if (expand) {
+    const beforeExpand = stdout.chunks.length;
     stdin.write(String.fromCharCode(15)); // Ctrl+O
-    await settle();
+    assert.ok(await repainted(stdout, beforeExpand), 'ctrl-O must repaint');
   }
+  // Each up-arrow is waited for on its own, because every repaint it causes is part of what the
+  // assertions count - sending the next keypress before the last one rendered would quietly
+  // weaken the test. But a move that cannot move is a REAL outcome, not a timeout: once the cursor
+  // reaches the top row, a further up-arrow falls through to history recall, finds no history, and
+  // changes no state, so Ink writes nothing at all. Requiring a repaint per move failed here for
+  // exactly that reason. Hence: tolerate the silent ones, and guard the sequence as a whole below
+  // so it can never degrade into doing nothing.
+  let repaints = 0;
   for (let i = 0; i < moves; i++) {
-    stdin.write(`${CSI}A`); // up-arrow: moves the cursor within the text, repainting each time
-    await settle(60);
+    const beforeMove = stdout.chunks.length;
+    stdin.write(`${CSI}A`);
+    if (await repainted(stdout, beforeMove, 0, 8)) repaints++;
   }
-  await settle();
+  if (moves > 0) {
+    assert.ok(repaints > 0, 'the up-arrows must have repainted at least once, or this proves nothing');
+  }
+  await idle(stdout, PASTE_SETTLE_MS); // nothing still in flight when the screen is read
   unmount();
   const term = new VirtualTerminal({ columns, rows });
   for (const chunk of stdout.chunks) term.write(chunk);

@@ -648,16 +648,27 @@ test('a long pasted word repeated many times wraps at spaces in the rendered fra
 
   const pasted = Array(30).fill('motherfather').join(' ');
   stdin.write(pasted);
-  await tick(100);
+  // This read `tick(100)`, and this file's `tick` takes no argument - so it waited 30ms, which is
+  // less than the 60ms paste debounce. The frame captured below was therefore the EMPTY box, whose
+  // only token is the '>' prompt that the loop explicitly allows, so this test asserted nothing
+  // whatsoever about word wrapping. Verified by probe before fixing it: at 30ms the frame does not
+  // contain "motherfather" at all. Found via NextUp item 35, because `tick(100)` was one of the
+  // type errors that surfaced the first time anything typechecked this file.
+  await until(() => (lastFrame() ?? '').includes('motherfather'), 'the pasted words to render');
 
   const frame = lastFrame() ?? '';
   const contentLines = frame.split('\n').slice(1, -1); // drop the top/bottom border rows
-  // Strip the border/padding chars and any inverse-video SGR codes (the cursor cell), then every
-  // whitespace-separated token on every line must be either empty or the whole word "motherfather"
-  // - if it were still splitting mid-word, some token would be a bare fragment like "mot".
+  // Strip the border/padding chars and any inverse-video SGR codes, then every whitespace-separated
+  // token on every text row must be the whole word "motherfather" - if it were still splitting
+  // mid-word, some token would be a bare fragment like "mot".
+  let wordRows = 0;
   for (const l of contentLines) {
     const stripped = l.replace(/\x1B\[[\d;]+m/g, '').replace(/^│/, '').replace(/│$/, '').trim();
+    // The box's own chrome, not wrapped text: the scroll notices it prints when the value is
+    // taller than the window. Now that this test sees a real frame, it sees those too.
+    if (stripped.startsWith('…')) continue;
     const tokens = stripped.split(/\s+/).filter(Boolean);
+    if (tokens.includes('motherfather')) wordRows++;
     for (const token of tokens) {
       // '>' is the box's own prompt marker (line 0 only), not a word-wrap fragment.
       assert.ok(
@@ -666,6 +677,10 @@ test('a long pasted word repeated many times wraps at spaces in the rendered fra
       );
     }
   }
+  // The guard this test never had, and the reason it stayed broken: with nothing on screen the
+  // loop above passes without examining a single word. Several rows of the word is the whole
+  // point - one row would not have wrapped at all.
+  assert.ok(wordRows >= 2, `expected the pasted words to wrap over several rows, saw ${wordRows}`);
 });
 
 test('Ctrl+J inserts a literal newline instead of submitting', async () => {
@@ -940,7 +955,7 @@ test('an idle input box does not repaint, enabled or disabled - the blink costs 
   // outside the frame, so there is nothing in `frames` to look for. Only a real terminal can
   // confirm it is on screen.
   for (const disabled of [false, true]) {
-    const { frames } = render(React.createElement(InputBox, { disabled }));
+    const { frames } = render(React.createElement(InputBox, { disabled, onSubmit: () => {} }));
     await tick();
     const before = frames.length;
     await new Promise((resolve) => setTimeout(resolve, 1300)); // would have crossed two blink toggles
@@ -1259,3 +1274,4 @@ test('a chunk and a keystroke in one tick keep their order', async () => {
 
   assert.deepEqual(submitted, ['helloX'], 'the later keystroke must land after the chunk');
 });
+

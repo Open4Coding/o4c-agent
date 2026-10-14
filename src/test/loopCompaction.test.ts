@@ -674,8 +674,8 @@ test('an oversized tool result is pruned however recent it is, so a wedged sessi
   const provider = new FakeProvider([{ content: 'recovered', toolCalls: [], stopReason: 'end_turn' }]);
   const loop = new AgentLoop(provider, [], 'system');
 
-  const call = aiToolCallEntry({ id: 't1', name: 'run_shell', input: { command: 'dir /s /b' } });
-  const huge = aiToolCallResponseEntry('t1', 'x'.repeat(2_000_000)); // ~500K tokens, 229K window
+  const call = aiToolCallEntry({ id: 't1', name: 'run_shell', input: { command: 'dir /s /b' } }, undefined);
+  const huge = aiToolCallResponseEntry('t1', 'x'.repeat(2_000_000), undefined); // ~500K tokens, 229K window
   loop.loadEntries([userInputEntry('walk the tree'), call, huge]);
   const before = loop.getVisibleTokenEstimate();
   assert.ok(before > 229_376, `fixture must start over the window, was ${before}`);
@@ -698,8 +698,8 @@ test('pruning an oversized result hides its tool call too, so the request stays 
 
   loop.loadEntries([
     userInputEntry('go'),
-    aiToolCallEntry({ id: 't1', name: 'run_shell', input: { command: 'dir /s /b' } }),
-    aiToolCallResponseEntry('t1', 'y'.repeat(2_000_000)),
+    aiToolCallEntry({ id: 't1', name: 'run_shell', input: { command: 'dir /s /b' } }, undefined),
+    aiToolCallResponseEntry('t1', 'y'.repeat(2_000_000), undefined),
   ]);
 
   await loop.run('next', { contextWindow: 229_376 });
@@ -722,8 +722,8 @@ test('a tool result merely near the budget is left alone - this is not a second 
   const loop = new AgentLoop(provider, [], 'system');
 
   // 60,000 chars = 15,000 tokens: over the 10,000-token budget, under the 2x prune threshold.
-  const nearLimit = aiToolCallResponseEntry('t1', 'z'.repeat(60_000));
-  loop.loadEntries([userInputEntry('go'), aiToolCallEntry({ id: 't1', name: 'read_file', input: {} }), nearLimit]);
+  const nearLimit = aiToolCallResponseEntry('t1', 'z'.repeat(60_000), undefined);
+  loop.loadEntries([userInputEntry('go'), aiToolCallEntry({ id: 't1', name: 'read_file', input: {} }, undefined), nearLimit]);
 
   await loop.run('next', { contextWindow: 229_376 });
 

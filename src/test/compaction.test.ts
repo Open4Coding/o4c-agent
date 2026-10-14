@@ -241,8 +241,8 @@ test('findCutPoint: a single turn with no user message still cuts at a completed
   const entries: ContextEntry[] = [userInputEntry('build it')];
   for (let i = 0; i < 6; i++) {
     entries.push(aiResponseEntry('x'.repeat(400)));
-    entries.push(aiToolCallEntry({ id: `t${i}`, name: 'write_file', input: {} }));
-    entries.push(aiToolCallResponseEntry(`t${i}`, 'ok'));
+    entries.push(aiToolCallEntry({ id: `t${i}`, name: 'write_file', input: {} }, undefined));
+    entries.push(aiToolCallResponseEntry(`t${i}`, 'ok', undefined));
   }
   const cut = findCutPoint(entries, 200);
   assert.ok(cut > 0, 'expected a cut point inside the single turn, not 0');
@@ -252,8 +252,8 @@ test('findCutPoint: a single turn with no user message still cuts at a completed
 test('findCutPoint never splits a tool call from its result', () => {
   const entries: ContextEntry[] = [userInputEntry('go')];
   for (let i = 0; i < 4; i++) {
-    entries.push(aiToolCallEntry({ id: `s${i}`, name: 'read_file', input: {} }));
-    entries.push(aiToolCallResponseEntry(`s${i}`, 'y'.repeat(200)));
+    entries.push(aiToolCallEntry({ id: `s${i}`, name: 'read_file', input: {} }, undefined));
+    entries.push(aiToolCallResponseEntry(`s${i}`, 'y'.repeat(200), undefined));
   }
   const cut = findCutPoint(entries, 100);
   if (cut > 0) {
@@ -265,7 +265,7 @@ test('findCutPoint never splits a tool call from its result', () => {
 test('buildCompactionPrompt survives a tool-call entry whose content was released to a placeholder (2026-10-04)', () => {
   // Real failure: compaction serialized every entry in the region it folds away, including ones an
   // earlier pass already released, and JSON.parse on the placeholder threw - killing the turn.
-  const released = aiToolCallEntry({ id: 'r1', name: 'write_file', input: {} });
+  const released = aiToolCallEntry({ id: 'r1', name: 'write_file', input: {} }, undefined);
   released.content = '[toolcall content released from memory after compaction]';
   const prompt = buildCompactionPrompt({ entries: [userInputEntry('go'), released], previousSummary: undefined, maxContentChars: 10_000 });
   assert.match(prompt, /released from memory/);

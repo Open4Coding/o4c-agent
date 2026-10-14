@@ -1039,6 +1039,7 @@ test('an over-budget tool result is still bounded when there is nowhere to spill
 
   assert.equal(result, 'done');
   const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.ok(response, 'the turn must have appended a tool result entry');
   assert.ok(response.content.length <= 40_000);
   assert.ok(!response.content.includes('Full output:'), 'no path is claimed when nothing was written');
 });
@@ -1058,6 +1059,7 @@ test('a tool result is bounded even when no context window is known at all', asy
   await loop.run('go');
 
   const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.ok(response, 'the turn must have appended a tool result entry');
   assert.ok(response.content.length <= 40_000, `entry was ${response.content.length} chars`);
 });
 
@@ -1077,6 +1079,7 @@ test('a tool result within budget is appended byte-identical', async () => {
   await loop.run('go', { contextWindow: 229_376 });
 
   const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
+  assert.ok(response, 'the turn must have appended a tool result entry');
   assert.equal(response.content, output);
 });
 

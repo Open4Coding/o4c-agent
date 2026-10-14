@@ -332,8 +332,8 @@ test('toWireMessages: a prune marker is sent as a user-role note, never as the f
   // end-of-turn with nothing done. Ending on a user-role note prompts the model to continue.
   const messages = toWireMessages([
     userInputEntry('build it'),
-    aiToolCallEntry({ id: 't1', name: 'write_file', input: { path: 'a.js' } }),
-    aiToolCallResponseEntry('t1', 'Wrote 100 characters'),
+    aiToolCallEntry({ id: 't1', name: 'write_file', input: { path: 'a.js' } }, undefined),
+    aiToolCallResponseEntry('t1', 'Wrote 100 characters', undefined),
     aiPruneEntry(3, 1200, 'older tool calls'),
   ]);
 
@@ -346,15 +346,15 @@ test('toWireMessages: an unreadable tool call is dropped with its result, instea
   // Real failure (2026-10-04): a visible tool-call entry whose content was a released placeholder
   // threw "Unexpected token ... is not valid JSON" and killed the whole turn. Dropping the call
   // and its orphaned result keeps the request valid.
-  const good = aiToolCallEntry({ id: 'ok1', name: 'read_file', input: { path: 'a' } });
-  const bad = aiToolCallEntry({ id: 'bad1', name: 'write_file', input: {} });
+  const good = aiToolCallEntry({ id: 'ok1', name: 'read_file', input: { path: 'a' } }, undefined);
+  const bad = aiToolCallEntry({ id: 'bad1', name: 'write_file', input: {} }, undefined);
   bad.content = '[toolcall content released from memory after compaction]';
   const messages = toWireMessages([
     userInputEntry('go'),
     good,
-    aiToolCallResponseEntry('ok1', 'contents'),
+    aiToolCallResponseEntry('ok1', 'contents', undefined),
     bad,
-    aiToolCallResponseEntry('bad1', 'orphaned result'),
+    aiToolCallResponseEntry('bad1', 'orphaned result', undefined),
   ]);
 
   const toolIds = messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId);

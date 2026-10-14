@@ -1,0 +1,23 @@
+// Typechecks the TESTS, which `tsconfig.json` deliberately does not.
+//
+// The main config excludes `src/test/**` for a good reason: it emits to `dist` with `declaration`
+// on, and the tests have no business being shipped or declared. The side effect nobody had noticed
+// until 2026-10-13 (NextUp item 35) is that `tsc -p tsconfig.json --noEmit` - reported as "tsc
+// clean" throughout this project's history - never looked at a single test file. It took an
+// undestructured `lastFrame` referenced in four tests, silent to `tsc` and surfacing only as a
+// runtime `ReferenceError`, to show that up.
+//
+// So this config exists purely to check them: same compiler options, nothing excluded, and
+// `noEmit` so it cannot write anything anywhere. `npm run typecheck` runs both.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `declaration` is incompatible with `noEmit` under this TypeScript, and there is nothing to
+    // declare here anyway.
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": []
+}

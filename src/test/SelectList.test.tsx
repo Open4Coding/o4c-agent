@@ -121,7 +121,7 @@ test('selection resets to the top when the item set changes (e.g. a live filter 
 test('a long row wraps with its continuation lines starting exactly 4 cells in - 2 further than the first line\'s text', async () => {
   const long = Array.from({ length: 60 }, (_, i) => 'word' + i).join(' ');
   const { lastFrame } = render(
-    React.createElement(SelectList, {
+    React.createElement(SelectList<string>, {
       items: [long, 'a short row'],
       getKey: (s: string) => s.slice(0, 10) + s.length,
       rowText: (s: string) => s,
@@ -145,7 +145,7 @@ test('a long row wraps with its continuation lines starting exactly 4 cells in -
 
 test('an unselected row sits in the same text column as the selected one, with or without a rowColor', async () => {
   const { lastFrame } = render(
-    React.createElement(SelectList, {
+    React.createElement(SelectList<string>, {
       items: ['alpha', 'beta'],
       getKey: (s: string) => s,
       rowText: (s: string) => s,

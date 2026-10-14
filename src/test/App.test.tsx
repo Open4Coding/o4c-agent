@@ -152,7 +152,10 @@ class RecordingProvider implements LLMProvider {
   readonly name = 'recording';
   lastSystemPrompt = '';
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    this.lastSystemPrompt = request.systemPrompt;
+    // `systemPrompt` is optional on the request, and '' is the right stand-in for absent here:
+    // every assertion on this field is a `match`, which no pattern in this file satisfies on an
+    // empty string, so a missing prompt still fails rather than passing vacuously.
+    this.lastSystemPrompt = request.systemPrompt ?? '';
     return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
   }
 }
@@ -376,7 +379,10 @@ async function setup(opts: {
   provider?: LLMProvider;
   // As if this process had been launched via `--resume <id>` (a /resume restart handoff) -
   // see the "launched with an initial session" test below for what this actually covers.
-  initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[] };
+  // Mirrors AppProps.initialSession. `inputHistory` was missing here while the real prop had it,
+  // so the resume test below passed it, `setup` forwarded it (it hands the whole object over), and
+  // the test genuinely worked - but only because nothing typechecked this file until NextUp 35.
+  initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] };
   // Only relevant to Plan-Write mode tests - scopes its write_file exception to
   // `<projectRoot>/.o4c/plans/`. Omitted (as every non-Plan-Write test does) means Plan-Write
   // behaves exactly like plain Plan (see modePolicy.ts's plansDirFor(undefined) fallback).
