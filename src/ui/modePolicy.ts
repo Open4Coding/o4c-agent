@@ -117,6 +117,11 @@ function isPlanFilePath(path: unknown, plansDir: string): boolean {
  * inside `plansDir`) - every other mode ignores them, so existing two-argument call sites keep
  * working unchanged. `plansDir` undefined (no trusted project) means planWrite has nowhere it's
  * allowed to write, so it denies exactly like plain `plan`.
+ *
+ * An MCP server granted `autoApprove` (`tool.mcp`, from the user's own config) is honoured in
+ * exactly one place: the single `confirm` -> `allow` step at the end. See the comment there - the
+ * structure is the safety property, not a style choice. Nothing else about `tool.mcp` is consulted
+ * here at all: the server's own annotations never reach a decision, only the confirm dialog.
  */
 export function classifyToolAccess(
   mode: Mode,
@@ -125,6 +130,22 @@ export function classifyToolAccess(
   plansDir?: string,
 ): ToolAccess {
   if (!tool.mutating) return 'allow';
+  const access = modeAccess(mode, tool, input, plansDir);
+  // The ONLY place a per-server grant is applied, and it can only ever soften a `confirm`.
+  // Written this way so that no mode branch can be edited into turning a `deny` into an `allow`
+  // by accident: Plan mode's promise is "nothing changes", and a promise that a line in a config
+  // file silently revokes is not a promise. A server the user has vouched for gets to skip the
+  // prompt in the modes that ask - not to be let into the mode that refuses.
+  if (access === 'confirm' && tool.mcp?.autoApprove) return 'allow';
+  return access;
+}
+
+function modeAccess(
+  mode: Mode,
+  tool: Tool,
+  input?: Record<string, unknown>,
+  plansDir?: string,
+): ToolAccess {
   switch (mode) {
     case 'plan':
       return 'deny';

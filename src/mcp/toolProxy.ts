@@ -1,5 +1,5 @@
-import type { Tool } from '../tools/types.js';
-import { toolNamespace, type McpServerConfig } from './serverConfig.js';
+import type { McpToolProvenance, Tool } from '../tools/types.js';
+import { reachOf, toolNamespace, type McpServerConfig } from './serverConfig.js';
 
 /**
  * Turning an MCP server's tools into `Tool`s the agent loop can call.
@@ -179,6 +179,36 @@ export function flattenToolResult(result: McpCallResult): string {
 }
 
 /**
+ * What the approval path is told about a proxied tool.
+ *
+ * Note what is and is not here. `autoApprove` comes from the user's config and is allowed to
+ * change a verdict; everything else is the server describing itself, and is carried so the confirm
+ * dialog can *show* it. `endpoint` is set only for a remote server, since "this call leaves your
+ * machine, to this host" is the fact most worth having in front of you before you press Yes - and
+ * for a local one there is nothing to name.
+ */
+export function provenanceOf(server: McpServerConfig, descriptor: McpToolDescriptor): McpToolProvenance {
+  const reach = reachOf(server);
+  let endpoint: string | undefined;
+  if (reach === 'remote' && server.url) {
+    try {
+      endpoint = new URL(server.url).host;
+    } catch {
+      endpoint = server.url;
+    }
+  }
+  return {
+    serverId: server.id,
+    serverToolName: descriptor.name,
+    reach,
+    endpoint,
+    annotations: descriptor.annotations,
+    hintsTrusted: server.grants.trustReadOnlyHints,
+    autoApprove: server.grants.autoApprove,
+  };
+}
+
+/**
  * Wraps one server's advertised tools as `Tool`s.
  *
  * `inputSchema` passes straight through because MCP already speaks JSON Schema and so does our
@@ -197,6 +227,7 @@ export function proxyTools(
     description: `[via MCP server "${server.id}"] ${descriptor.description ?? descriptor.annotations?.title ?? descriptor.name}`,
     inputSchema: descriptor.inputSchema,
     mutating: isMutating(server, descriptor),
+    mcp: provenanceOf(server, descriptor),
     execute: async (input: Record<string, unknown>): Promise<string> => {
       try {
         return flattenToolResult(await call(descriptor.name, input));

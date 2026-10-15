@@ -8,6 +8,7 @@ import { parseServers, type McpServerConfig } from '../mcp/serverConfig.js';
 import { McpHost } from '../mcp/host.js';
 import { connectServer } from '../mcp/client.js';
 import { classifyToolAccess } from '../ui/modePolicy.js';
+import { formatConfirmMessage } from '../ui/confirmPreview.js';
 import { AgentLoop, type AgentEvent } from '../agent/loop.js';
 import { startMcpSession } from '../mcp/startup.js';
 import { FakeProvider } from './fakeProvider.js';
@@ -256,4 +257,87 @@ test('killAllNow reaps a real subprocess synchronously, for the exit backstop', 
   }
   assert.equal(alive, false, 'killAllNow must actually terminate the child');
   await host.shutdown();
+});
+
+// ---------------------------------------------------------------------------
+// Approval, against a real server (checklist 21d).
+// ---------------------------------------------------------------------------
+
+test("a real server's annotations reach the confirm dialog, labelled as its own claim", async () => {
+  // The fixture's `write_file` sends `readOnlyHint: true` over the wire while being, by its name,
+  // the most alarming thing it could claim that about. Untrusted, so the hint changes no verdict -
+  // and the user is shown both facts: who is asking, and what they say about themselves.
+  const host = await McpHost.start([fixtureServer('ok')]);
+  try {
+    const tool = host.tools().find((t) => t.name === 'mcp__fixture__write_file');
+    assert.ok(tool);
+    assert.equal(classifyToolAccess('manual', tool), 'confirm', 'still asks');
+
+    const message = formatConfirmMessage(tool.name, { path: 'x' }, { cols: 100, rows: 40 }, tool.mcp);
+    const lines = message.split('\n');
+    assert.ok(lines[0].startsWith('Allow mcp__fixture__write_file('), lines[0]);
+    assert.ok(message.includes('"fixture"'), message);
+    assert.ok(message.includes('on this machine'), message);
+    assert.ok(message.includes("Server's claim, unverified: read-only"), message);
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test('granting autoApprove to a real server stops it asking - and Plan still refuses it', async () => {
+  // The two halves of per-server trust, against a spawned server rather than a descriptor: the
+  // grant removes the prompt in the modes that ask, and cannot touch the mode that refuses.
+  const host = await McpHost.start([fixtureServer('ok', { autoApprove: true })]);
+  try {
+    const tool = host.tools().find((t) => t.name === 'mcp__fixture__write_file');
+    assert.ok(tool);
+    assert.equal(tool.mutating, true, 'the grant is about asking, not about what the tool does');
+    assert.equal(classifyToolAccess('manual', tool), 'allow');
+    assert.equal(classifyToolAccess('acceptEdits', tool, { path: 'x' }), 'allow');
+    assert.equal(classifyToolAccess('plan', tool), 'deny');
+    assert.equal(classifyToolAccess('planWrite', tool, { path: 'x' }, 'x'), 'deny');
+
+    // And it still runs when allowed - a grant that silently broke the call would be worse than
+    // no grant.
+    const echo = host.tools().find((t) => t.name === 'mcp__fixture__echo');
+    assert.equal(await echo?.execute({ text: 'hi' }), 'echo: hi');
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test('a turn runs an auto-approved mutating MCP tool with no policy prompt at all', async () => {
+  // Through the loop, with a tool policy that fails loudly if it is ever consulted for a
+  // confirmation - the behaviour the grant exists to produce, rather than just the verdict that
+  // should produce it.
+  const loop = new AgentLoop(
+    new FakeProvider([
+      { content: 'writing', toolCalls: [{ id: 't1', name: 'mcp__fixture__echo', input: { text: 'go' } }], stopReason: 'tool_use' },
+      { content: 'done', toolCalls: [], stopReason: 'end_turn' },
+    ]),
+    [],
+    'system',
+  );
+  const mcp = startMcpSession({
+    projectRoot: undefined,
+    addTools: (tools) => loop.addTools(tools),
+    load: async () => ({ servers: [fixtureServer('ok', { autoApprove: true })], problems: [] }),
+  });
+  loop.registerPendingTools(mcp.ready);
+
+  try {
+    const consulted: string[] = [];
+    const answer = await loop.run('go', {
+      toolPolicy: async (tool, input) => {
+        consulted.push(tool.name);
+        const access = classifyToolAccess('manual', tool, input);
+        assert.notEqual(access, 'confirm', `manual mode asked about ${tool.name} despite autoApprove`);
+        return access === 'allow' ? 'allow' : 'deny';
+      },
+    });
+    assert.equal(answer, 'done');
+    assert.deepEqual(consulted, ['mcp__fixture__echo'], 'the policy did run - it just had nothing to ask');
+  } finally {
+    await mcp.shutdown();
+  }
 });

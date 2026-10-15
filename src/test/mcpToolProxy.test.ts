@@ -10,6 +10,7 @@ import {
   type McpToolDescriptor,
 } from '../mcp/toolProxy.js';
 import { classifyToolAccess, MODES } from '../ui/modePolicy.js';
+import { defaultTools } from '../tools/index.js';
 
 function server(grants: Record<string, boolean> = {}): McpServerConfig {
   const { servers, problems } = parseServers({ blender: { transport: 'stdio', command: 'node', grants } });
@@ -200,4 +201,55 @@ test('execute passes the model input through unchanged and returns the flattened
 
   assert.equal(await tool.execute({ frame: 7 }), 'rendered');
   assert.deepEqual(seen, [['render', { frame: 7 }]], 'the server sees its OWN tool name, not the namespaced one');
+});
+
+// ---------------------------------------------------------------------------
+// Provenance (checklist 21d): what the approval path is told about a proxied tool.
+// ---------------------------------------------------------------------------
+
+test('a proxied tool carries its server, the real tool name and the grants', () => {
+  const [tool] = proxyTools(
+    server({ autoApprove: true, trustReadOnlyHints: true }),
+    [{ name: 'render', inputSchema: { type: 'object' }, annotations: { readOnlyHint: false, title: 'Render' } }],
+    async () => ({ content: [] }),
+  );
+
+  assert.equal(tool.mcp?.serverId, 'blender');
+  // The un-namespaced name, because that is what the dialog should say the server knows it by -
+  // and what any future "disable this one tool" setting would have to be written against.
+  assert.equal(tool.mcp?.serverToolName, 'render');
+  assert.equal(tool.mcp?.autoApprove, true);
+  assert.equal(tool.mcp?.hintsTrusted, true);
+  assert.deepEqual(tool.mcp?.annotations, { readOnlyHint: false, title: 'Render' }, 'verbatim, unjudged');
+});
+
+test('a built-in tool has no provenance at all', () => {
+  // `mcp` being absent is the honest answer to "is this ours?", and the mode policy depends on
+  // it: `tool.mcp?.autoApprove` must be undefined for every built-in, whatever the config says.
+  const builtIn = defaultTools[0];
+  assert.equal(builtIn.mcp, undefined);
+});
+
+test('a stdio server is local, with no endpoint to name', () => {
+  const [tool] = proxyTools(server(), [{ name: 'render', inputSchema: {} }], async () => ({ content: [] }));
+  assert.equal(tool.mcp?.reach, 'local');
+  assert.equal(tool.mcp?.endpoint, undefined);
+});
+
+test('a remote server carries the host the call goes to', () => {
+  // The fact the tool name cannot carry. Host only, not the full URL: a path or query string is
+  // not what makes this decision, and the line is clipped to the window.
+  const { servers } = parseServers({ search: { transport: 'http', url: 'https://search.example.com/mcp?k=1' } });
+  const [tool] = proxyTools(servers[0], [{ name: 'query', inputSchema: {} }], async () => ({ content: [] }));
+  assert.equal(tool.mcp?.reach, 'remote');
+  assert.equal(tool.mcp?.endpoint, 'search.example.com');
+});
+
+test('a loopback http server is local, so it is not announced as leaving the machine', () => {
+  // The Blender case: reached over HTTP, with zero egress. Same rule `reachOf` applies for secure
+  // mode, used here so the dialog and the gate can never disagree about one server.
+  const { servers } = parseServers({ blender: { transport: 'http', url: 'http://127.0.0.1:9876/mcp' } });
+  const [tool] = proxyTools(servers[0], [{ name: 'render', inputSchema: {} }], async () => ({ content: [] }));
+  assert.equal(tool.mcp?.reach, 'local');
+  assert.equal(tool.mcp?.endpoint, undefined);
 });

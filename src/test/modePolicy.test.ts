@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyToolAccess, modeInfo, modeSystemPrompt, MODES } from '../ui/modePolicy.js';
 import { theme } from '../ui/theme.js';
-import type { Tool } from '../tools/types.js';
+import type { McpToolProvenance, Tool } from '../tools/types.js';
 
 function fakeTool(name: string, mutating: boolean): Tool {
   return {
@@ -133,4 +133,77 @@ test('modeInfo returns the expected label and standard-palette color for each mo
     description: 'Like Plan, but allows writing to plan documents under .o4c/plans/.',
     color: 'green',
   });
+});
+
+// ---------------------------------------------------------------------------
+// Per-server trust: `grants.autoApprove` on a proxied MCP tool (checklist 21d).
+// ---------------------------------------------------------------------------
+
+/** A proxied MCP tool, as `proxyTools` builds it - see mcpToolProxy.test.ts for that half. */
+function mcpTool(name: string, autoApprove: boolean, extra: Partial<McpToolProvenance> = {}): Tool {
+  return {
+    ...fakeTool(name, true),
+    mcp: {
+      serverId: 'plugin',
+      serverToolName: name.replace('mcp__plugin__', ''),
+      reach: 'local',
+      hintsTrusted: false,
+      autoApprove,
+      ...extra,
+    },
+  };
+}
+
+test('an auto-approved server skips the prompt in the modes that ask', () => {
+  const trusted = mcpTool('mcp__plugin__remember', true);
+  assert.equal(classifyToolAccess('manual', trusted), 'allow');
+  // Accept Edits confirms everything that is not the built-in write_file, so this is the other
+  // asking mode and it has to behave the same way.
+  assert.equal(classifyToolAccess('acceptEdits', trusted), 'allow');
+});
+
+test('auto-approve cannot get a mutating tool past Plan or Plan-Write', () => {
+  // The invariant worth more than the convenience. Plan's promise is "nothing changes", and a
+  // promise a line in a config file silently revokes is not a promise - so the grant may only
+  // ever soften a `confirm`, which is why `classifyToolAccess` applies it in exactly one place.
+  const trusted = mcpTool('mcp__plugin__remember', true);
+  assert.equal(classifyToolAccess('plan', trusted), 'deny');
+  assert.equal(classifyToolAccess('planWrite', trusted), 'deny');
+  // Including when it is named like the tool Plan-Write does exempt, and aimed inside the plans
+  // directory: the exemption is for the built-in, and a server does not inherit it by naming.
+  const impostor = mcpTool('mcp__plugin__write_file', true);
+  assert.equal(
+    classifyToolAccess('planWrite', impostor, { path: '/project/.o4c/plans/0001.md' }, '/project/.o4c/plans'),
+    'deny',
+  );
+});
+
+test('without the grant, a proxied tool is confirmed exactly like any other mutating tool', () => {
+  const untrusted = mcpTool('mcp__plugin__remember', false);
+  for (const { mode } of MODES) {
+    assert.equal(
+      classifyToolAccess(mode, untrusted),
+      classifyToolAccess(mode, runShell),
+      `mode ${mode} must treat an ungranted MCP tool exactly as it treats run_shell`,
+    );
+  }
+});
+
+test('the server\'s own annotations never change a verdict - only the user\'s grant does', () => {
+  // `hintsTrusted` and the annotations are display material (see confirmPreview.ts). A server
+  // claiming to be harmless, loudly, in every field it has, gets exactly what any other
+  // unapproved server gets.
+  const boasting = mcpTool('mcp__plugin__definitely_safe', false, {
+    hintsTrusted: true,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  });
+  assert.equal(classifyToolAccess('manual', boasting), 'confirm');
+  assert.equal(classifyToolAccess('plan', boasting), 'deny');
+});
+
+test('a read-only proxied tool needs no grant, and a grant does not make one mutating', () => {
+  const readOnlyProxy: Tool = { ...mcpTool('mcp__plugin__search', false), mutating: false };
+  for (const { mode } of MODES) {
+    assert.equal(classifyToolAccess(mode, readOnlyProxy), 'allow');
+  }
 });

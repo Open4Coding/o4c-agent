@@ -989,7 +989,10 @@ export function App({
       const access = classifyToolAccess(modeRef.current, tool, input, plansDirRef.current);
       if (access === 'allow') return 'allow';
       if (access === 'deny') return 'deny';
-      const ok = await askConfirm(formatConfirmMessage(tool.name, input), tool, input);
+      // `tool.mcp` is undefined for every built-in; for a proxied tool it is what puts the
+      // server, the egress and the server's own claims about the tool in front of the user
+      // before they answer. Nothing here decides anything - see confirmPreview.ts.
+      const ok = await askConfirm(formatConfirmMessage(tool.name, input, undefined, tool.mcp), tool, input);
       // `declined`, not `deny`: the mode permits this tool and only this call was refused. The loop
       // tells the model which of the two happened, because it changes what the model does next.
       return ok ? 'allow' : 'declined';

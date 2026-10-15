@@ -12,6 +12,9 @@ import type { OsKey } from '../ui/platform.js';
 import { AgentLoop } from '../agent/loop.js';
 import { MockProvider } from '../providers/mock.js';
 import { defaultTools } from '../tools/index.js';
+import type { Tool } from '../tools/types.js';
+import { parseServers } from '../mcp/serverConfig.js';
+import { proxyTools } from '../mcp/toolProxy.js';
 import { SessionStore } from '../session/sessionStore.js';
 import { RunLogger } from '../session/runLog.js';
 import { ConfigStore } from '../session/configStore.js';
@@ -449,11 +452,14 @@ async function setup(opts: {
   // that is not about them, exactly like an untrusted run, where the footer falls back to this
   // process's own figures.
   usageStore?: UsageStore;
+  // The loop's tool list. Only the MCP test below passes this; everything else gets the real
+  // built-ins, as a real launch does.
+  tools?: Tool[];
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
   const fullContextLogger = new RunLogger(join(opts.dir, 'logs'), 'FULLCONTEXT');
-  const loop = new AgentLoop(opts.provider ?? new MockProvider(), defaultTools, 'test system prompt');
+  const loop = new AgentLoop(opts.provider ?? new MockProvider(), opts.tools ?? defaultTools, 'test system prompt');
   // /clear and /resume now hand off to a brand-new process instead of resetting state
   // in-place (see AppProps.restart's doc comment) - nothing to actually spawn in a test, so this
   // just records what App asked for.
@@ -543,7 +549,12 @@ test('the footer is three lines, in order, with the model and dir line last', as
       `settings should lead the token line, flush left: ${frameLines.slice(status).join(' / ')}`,
     );
     assert.equal(/view:|Think:/.test(frameLines[status]), false, `settings left line 1: ${frameLines[status]}`);
-    assert.match(frameLines[settings + 1], /^◆ .* \| dir: /, `model and dir line should be last, flush left: ${frameLines[settings + 1]}`);
+    // Deliberately not pinned to "| dir: ": the branch segment sits between the model and the
+    // directory once the asynchronous git read lands (`◆ model | main · dir: ...`), so a regex
+    // requiring them adjacent passes or fails on whether that read beat this assertion - it was
+    // failing exactly that way when this file is run on its own rather than under full-suite
+    // load. What the test is about is the order and the flush-left start, both still checked.
+    assert.match(frameLines[settings + 1], /^◆ .*dir: /, `model and dir line should be last, flush left: ${frameLines[settings + 1]}`);
   });
 });
 
@@ -3392,3 +3403,62 @@ test('Accept Edits mode still confirms run_shell even though write_file is autom
 // and swapping the live region for a placeholder during a drag (every frame transition still
 // went through Ink's same broken erase, so it only changed which stale frames got left behind).
 // See the module's doc comment and docs/frontend-design.checklist.md §5e for the full history.
+
+// A provider that calls one named tool once, then ends the turn - for driving a specific tool
+// through the real dialog rather than whatever MockProvider picks first.
+class OneToolProvider implements LLMProvider {
+  readonly name = 'one-tool-test';
+  private called = false;
+  constructor(private toolName: string, private input: Record<string, unknown> = {}) {}
+  async complete(_request: CompletionRequest): Promise<CompletionResponse> {
+    if (!this.called) {
+      this.called = true;
+      return {
+        content: '',
+        toolCalls: [{ id: 'm1', name: this.toolName, input: this.input }],
+        stopReason: 'tool_use',
+      };
+    }
+    return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
+test("an MCP tool's confirmation names its server and shows the server's claim, in the real dialog", async () => {
+  // The last stretch of checklist 21d that unit tests cannot reach: that App actually passes
+  // `tool.mcp` into formatConfirmMessage, and that what comes out is on screen in the rendered
+  // frame. The server here is a descriptor, not a subprocess - mcpIntegration.test.ts covers the
+  // spawned case, and what is being checked is the wiring from tool to dialog.
+  await withTempDir(async (dir) => {
+    const { servers, problems } = parseServers({
+      blender: { transport: 'http', url: 'https://render.example.com/mcp' },
+    });
+    assert.deepEqual(problems, []);
+    const tools = proxyTools(
+      servers[0],
+      [{ name: 'render', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }],
+      async () => ({ content: [{ type: 'text', text: 'rendered' }] }),
+    );
+
+    const { stdin, frames } = await setup({
+      dir,
+      provider: new OneToolProvider('mcp__blender__render', { frame: 1 }),
+      tools,
+    });
+
+    await submit(stdin, 'render the scene');
+    await waitFor(() => anyFrameIncludes(frames, 'Allow mcp__blender__render'));
+
+    // Whose tool it is, that the call leaves the machine and where to, and what the server says
+    // about itself - all three, labelled as the server's claim rather than as o4c's finding.
+    assert.ok(anyFrameIncludes(frames, 'MCP server "blender"'));
+    assert.ok(anyFrameIncludes(frames, 'Leaves your machine'));
+    assert.ok(anyFrameIncludes(frames, 'render.example.com'));
+    assert.ok(anyFrameIncludes(frames, "Server's claim, unverified: read-only"));
+
+    // Decline, which both proves the gate is real for a proxied tool - the server called it
+    // read-only and was still asked about - and lets the turn finish instead of leaving a pending
+    // promise and a mounted tree behind.
+    stdin.write(ESCAPE);
+    await tick(50);
+  });
+});

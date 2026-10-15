@@ -55,7 +55,12 @@ test('a host that merely looks loopback is remote', () => {
 
 test('every grant defaults to false - a server gets only what it was explicitly given', () => {
   const server = only({ memory: STDIO });
-  assert.deepEqual(server.grants, { slashCommands: false, resources: false, trustReadOnlyHints: false });
+  assert.deepEqual(server.grants, {
+    autoApprove: false,
+    slashCommands: false,
+    resources: false,
+    trustReadOnlyHints: false,
+  });
   assert.equal(server.enabled, true, 'a server with no "enabled" key is on');
 });
 
@@ -193,4 +198,48 @@ test('a project can turn a globally-defined server off, and arrays replace whole
   const server = only(merged.servers);
   assert.equal(server.enabled, false);
   assert.deepEqual(server.args, ['only'], 'args replace rather than concatenate');
+});
+
+// ---------------------------------------------------------------------------
+// `grants.autoApprove` (checklist 21d) - the per-server trust the approval path reads.
+// ---------------------------------------------------------------------------
+
+test('autoApprove is off unless the config says otherwise', () => {
+  const { servers } = parseServers({ plugin: { transport: 'stdio', command: 'node' } });
+  assert.equal(servers[0].grants.autoApprove, false, 'a server gets nothing it was not given');
+
+  const granted = parseServers({ plugin: { transport: 'stdio', command: 'node', grants: { autoApprove: true } } });
+  assert.deepEqual(granted.problems, []);
+  assert.equal(granted.servers[0].grants.autoApprove, true);
+});
+
+test('a non-boolean autoApprove is false, and says so', () => {
+  // Same rule as every other grant: an unreadable setting is not consent. "yes" is the likely
+  // hand-edit, and reading it as truthy would skip confirmations the user never granted.
+  const { servers, problems } = parseServers({
+    plugin: { transport: 'stdio', command: 'node', grants: { autoApprove: 'yes' } },
+  });
+  assert.equal(servers[0].grants.autoApprove, false);
+  assert.equal(problems.length, 1, JSON.stringify(problems));
+  assert.ok(problems[0].includes('autoApprove'), problems[0]);
+});
+
+test('a misspelled autoApprove is reported rather than silently granting nothing', () => {
+  // The dangerous direction is the reverse of the one above: the user believes they granted it,
+  // the server keeps prompting, and nothing says why.
+  const { servers, problems } = parseServers({
+    plugin: { transport: 'stdio', command: 'node', grants: { autoapprove: true } },
+  });
+  assert.equal(servers[0].grants.autoApprove, false);
+  assert.ok(problems.some((p) => p.includes('autoapprove')), JSON.stringify(problems));
+});
+
+test('every grant is still listed in one place, so none can be half-added', () => {
+  // The parser validates against GRANT_KEYS; this pins that the public type and that list agree,
+  // which is what stops a new grant from being accepted but never read (or read but rejected as
+  // unknown).
+  const all = { autoApprove: true, slashCommands: true, resources: true, trustReadOnlyHints: true };
+  const { servers, problems } = parseServers({ plugin: { transport: 'stdio', command: 'node', grants: all } });
+  assert.deepEqual(problems, [], 'no grant in the type may read as unknown');
+  assert.deepEqual(servers[0].grants, all);
 });

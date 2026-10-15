@@ -48,6 +48,26 @@ export type McpReach = 'local' | 'remote';
  * false: a server gets nothing it was not explicitly given. */
 export interface McpGrants {
   /**
+   * Whether this server's tools may run without a confirmation prompt in the modes that would
+   * otherwise ask for one.
+   *
+   * This is the "per-server trust" half of the approval model, and it is deliberately narrow:
+   * it can only ever turn a **`confirm` into an `allow`**, never a `deny` into anything (see
+   * `classifyToolAccess`, which applies it in exactly one place, last). Plan mode still refuses
+   * every mutating tool from this server, because Plan's promise to the user is "nothing changes",
+   * and a promise a config key can quietly revoke is not one.
+   *
+   * What it is for: a plugin o4c itself owns - the infinite-context store writing its own
+   * `.o4c/data/<id>/` - where confirming every single call would make the session unusable and the
+   * user already said yes by configuring it. What it is not for: a server reached over the
+   * network, where each call is an action with consequences off this machine.
+   *
+   * Off by default, like every grant here. Note the asymmetry with `trustReadOnlyHints` below:
+   * this is the user making a decision about a server, which is theirs to make; that one would be
+   * the *server* making a decision about itself, which is why it is hedged much more carefully.
+   */
+  autoApprove?: boolean;
+  /**
    * Whether this server's tools also appear as `/`-invokable commands, through the
    * `commands.json` contract of §5.5.
    *
@@ -125,14 +145,23 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Every grant, in one list, so adding one cannot be half-added: the parser below both reads
+ * and validates against this. */
+const GRANT_KEYS = ['autoApprove', 'slashCommands', 'resources', 'trustReadOnlyHints'] as const;
+
 function parseGrants(raw: unknown, id: string, problems: string[]): Required<McpGrants> {
-  const grants: Required<McpGrants> = { slashCommands: false, resources: false, trustReadOnlyHints: false };
+  const grants: Required<McpGrants> = {
+    autoApprove: false,
+    slashCommands: false,
+    resources: false,
+    trustReadOnlyHints: false,
+  };
   if (raw === undefined) return grants;
   if (!isPlainObject(raw)) {
     problems.push(`MCP server "${id}": "grants" must be an object; ignoring it and granting nothing.`);
     return grants;
   }
-  for (const key of ['slashCommands', 'resources', 'trustReadOnlyHints'] as const) {
+  for (const key of GRANT_KEYS) {
     const value = raw[key];
     if (value === undefined) continue;
     if (typeof value !== 'boolean') {
@@ -142,7 +171,7 @@ function parseGrants(raw: unknown, id: string, problems: string[]): Required<Mcp
     grants[key] = value;
   }
   for (const key of Object.keys(raw)) {
-    if (key !== 'slashCommands' && key !== 'resources' && key !== 'trustReadOnlyHints') {
+    if (!(GRANT_KEYS as readonly string[]).includes(key)) {
       problems.push(`MCP server "${id}": unknown grant "${key}" - ignored. A misspelled grant must never read as granted.`);
     }
   }
