@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { McpServerConfig } from './serverConfig.js';
 import type { McpCallResult, McpToolDescriptor } from './toolProxy.js';
+import type { McpPromptDescriptor, McpPromptResult } from './promptCommands.js';
 
 /**
  * One MCP client connection, and the two transports behind it.
@@ -50,7 +51,17 @@ export function closeGraceTimer(ms: number = MCP_CLOSE_GRACE_MS): Promise<void> 
 export interface ConnectedServer {
   readonly config: McpServerConfig;
   readonly tools: readonly McpToolDescriptor[];
+  /**
+   * The server's prompts, or empty - which means any of three things, deliberately not
+   * distinguished here: the server has none, it was not granted `slashCommands`, or listing
+   * them failed (and then `promptProblem` says so).
+   */
+  readonly prompts: readonly McpPromptDescriptor[];
+  /** Why `prompts` is empty when it should not have been. */
+  readonly promptProblem?: string;
   callTool(toolName: string, input: Record<string, unknown>): Promise<McpCallResult>;
+  /** Expands one prompt. Arguments are strings per the spec's own `GetPromptRequest`. */
+  getPrompt(promptName: string, args: Record<string, string>): Promise<McpPromptResult>;
   /** Whatever the server wrote to stderr, newest last, capped. Empty for an http server. */
   stderrTail(): string;
   close(): Promise<void>;
@@ -144,10 +155,36 @@ export async function connectServer(server: McpServerConfig): Promise<ConnectedS
       annotations: tool.annotations,
     }));
 
+    // Prompts are asked for only when the user granted this server `slashCommands` AND the
+    // server said it has any. Both halves matter: without the grant this is work and surface
+    // area nobody asked for (the default is off), and without the capability check it is a
+    // request the spec says a server need not implement, which a strict one may answer with an
+    // error - turning "no prompts" into "no server".
+    let prompts: McpPromptDescriptor[] = [];
+    let promptProblem: string | undefined;
+    if (server.grants.slashCommands && client.getServerCapabilities()?.prompts) {
+      try {
+        const listedPrompts = await client.listPrompts(undefined, { timeout: MCP_CONNECT_TIMEOUT_MS });
+        prompts = listedPrompts.prompts.map((prompt) => ({
+          name: prompt.name,
+          description: prompt.description,
+          title: prompt.title,
+          arguments: prompt.arguments,
+        }));
+      } catch (error) {
+        // Caught, not propagated: a server whose prompts cannot be listed still has tools, and
+        // losing those too would be a much bigger failure than the one that happened.
+        promptProblem = error instanceof Error ? error.message : String(error);
+      }
+    }
+
     return {
       config: server,
       tools,
+      prompts,
+      promptProblem,
       callTool: (toolName, input) => client.callTool({ name: toolName, arguments: input }),
+      getPrompt: (promptName, args) => client.getPrompt({ name: promptName, arguments: args }),
       stderrTail: () => stderr,
       close: async () => {
         try {

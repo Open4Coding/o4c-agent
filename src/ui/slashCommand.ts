@@ -1,3 +1,19 @@
+/**
+ * Where an MCP-prompt command came from, and what it needs typed after it.
+ *
+ * Declared here rather than in `src/mcp/` so `src/ui` never has to import the MCP layer just to
+ * describe a command row - the same reasoning that put `McpToolProvenance` next to `Tool`. This
+ * file has no imports of its own and no React, so `src/mcp/promptCommands.ts` building these is
+ * not a UI dependency creeping into the MCP layer, it is one module using another's data shape.
+ */
+export interface McpPromptRef {
+  readonly serverId: string;
+  /** The server-side name, verbatim - what goes on the wire. The command name is a typable slug
+   * of it, which is not always the same string. */
+  readonly promptName: string;
+  readonly arguments: readonly { name: string; description?: string; required: boolean }[];
+}
+
 export interface CommandInfo {
   /** Canonical form, including the leading slash, e.g. '/exit'. */
   name: string;
@@ -22,6 +38,13 @@ export interface CommandInfo {
    * The dropdown reads this and acts, with no special cases of its own.
    */
   select?: 'run' | 'prefill' | 'none';
+  /**
+   * Set when this command is an MCP server's prompt rather than a built-in.
+   *
+   * Its presence is what makes a row dynamic: these are discovered at connect time, so they
+   * reach the registry readers below as an `extra` argument instead of living in `COMMANDS`.
+   */
+  mcpPrompt?: McpPromptRef;
 }
 
 // Single source of truth for the front end's own commands, used by both the "/" command palette
@@ -178,6 +201,15 @@ export const COMMANDS: CommandInfo[] = [
     description: "Set the palette highlight color for this machine's global default (~/.o4c/config.json).",
     hidden: true,
   },
+  // Heads the MCP family. Runs on Enter rather than only opening its list, because it has a real
+  // action of its own - listing every configured server and what state it is in - and that
+  // listing is the whole answer when no server offers prompts, which is the default.
+  {
+    name: '/mcp',
+    select: 'run',
+    description:
+      'Show configured MCP servers and their state. A server granted slashCommands also adds its prompts as /mcp-<server>-<prompt>.',
+  },
 ];
 
 /** Every registered `/set-*` command, in the order they'd appear in `/set`'s own picker -
@@ -190,7 +222,7 @@ export function setCommands(): CommandInfo[] {
  * The bare command names that head a family of `<name>-*` commands. Typing one of these opens that
  * family's dropdown; everything else is an ordinary command the generic palette answers for.
  */
-export const COMMAND_FAMILIES = ['/keyboard', '/set', '/config'] as const;
+export const COMMAND_FAMILIES = ['/keyboard', '/set', '/config', '/mcp'] as const;
 
 /**
  * A family's rows: the bare command first, then its `-` variants, in registry order.
@@ -200,8 +232,8 @@ export const COMMAND_FAMILIES = ['/keyboard', '/set', '/config'] as const;
  * alternatives. Where it has no action of its own (`/set`, `/config`) it is marked `select: 'none'`
  * and simply heads the list.
  */
-export function commandFamily(bare: string): CommandInfo[] {
-  return COMMANDS.filter((c) => c.name === bare || c.name.startsWith(`${bare}-`));
+export function commandFamily(bare: string, extra: readonly CommandInfo[] = []): CommandInfo[] {
+  return [...COMMANDS, ...extra].filter((c) => c.name === bare || c.name.startsWith(`${bare}-`));
 }
 
 /** The family `input` is composing, if any - the longest bare name it starts with, so `/config`
@@ -223,6 +255,19 @@ export function configCommands(): CommandInfo[] {
 }
 
 export const KNOWN_COMMANDS = COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]);
+
+/**
+ * Every command name and alias that exists right now, built-ins plus whatever was registered
+ * dynamically.
+ *
+ * A function rather than a second constant because the dynamic half arrives after module load -
+ * an MCP server is still connecting while the first frame renders. `KNOWN_COMMANDS` remains the
+ * built-in list, and is what `buildPromptCommands` checks against so no server can register a
+ * name that already means something.
+ */
+export function knownCommandNames(extra: readonly CommandInfo[] = []): string[] {
+  return [...KNOWN_COMMANDS, ...extra.flatMap((c) => [c.name, ...(c.aliases ?? [])])];
+}
 
 /**
  * Whether `input` looks like an attempted slash command, as opposed to ordinary text that
@@ -258,9 +303,9 @@ export function isComposingCommand(value: string): boolean {
  * (see `CommandInfo.hidden`'s doc comment): it's still directly invocable by its exact name, and
  * discoverable via its own family's picker instead.
  */
-export function matchCommands(prefix: string): CommandInfo[] {
+export function matchCommands(prefix: string, extra: readonly CommandInfo[] = []): CommandInfo[] {
   const needle = prefix.toLowerCase();
-  return COMMANDS.filter(
+  return [...COMMANDS, ...extra].filter(
     (c) =>
       !c.hidden && [c.name, ...(c.aliases ?? [])].some((name) => name.toLowerCase().startsWith(needle)),
   ).sort((a, b) => a.name.localeCompare(b.name));
@@ -274,7 +319,78 @@ export function matchCommands(prefix: string): CommandInfo[] {
  * itself), not a browseable listing, so a hidden command's own help is still reachable this way,
  * matching how it's still directly invocable by typing its exact name.
  */
-export function commandForHelpTarget(rest: string): CommandInfo | undefined {
+export function commandForHelpTarget(rest: string, extra: readonly CommandInfo[] = []): CommandInfo | undefined {
   const target = `/${rest}`;
-  return COMMANDS.find((c) => c.name === target || c.aliases?.includes(target));
+  return [...COMMANDS, ...extra].find((c) => c.name === target || c.aliases?.includes(target));
+}
+
+export type ParsedPromptArguments =
+  | { readonly ok: true; readonly args: Record<string, string> }
+  | { readonly ok: false; readonly error: string };
+
+/**
+ * Parses what the user typed after `/mcp-<server>-<prompt>` into prompt arguments.
+ *
+ * Two forms, because one rule would be worse than two:
+ *
+ * - `key=value key=value` - the general case, and the only way to give several arguments.
+ * - the whole remainder, verbatim, **when the prompt takes exactly one argument and no `=`
+ *   appears**. `/mcp-x-review src/ui/App.tsx` is what a person types, and it is also the only
+ *   form that can carry a value containing spaces, since there is no quoting here.
+ *
+ * Unknown keys and missing required arguments are refused by name rather than passed through:
+ * a typo'd key would otherwise reach the server as a silently absent argument, and the prompt
+ * would expand wrong rather than not at all.
+ */
+export function parsePromptArguments(ref: McpPromptRef, rest: string): ParsedPromptArguments {
+  const declared = ref.arguments;
+  const text = rest.trim();
+  const args: Record<string, string> = {};
+
+  // Checked before parsing, not after: a prompt with no arguments at all has nothing for the
+  // `key=value` branch to match against, so it would otherwise fail with a usage line listing
+  // nothing.
+  if (text && declared.length === 0) {
+    return { ok: false, error: `This prompt takes no arguments, so "${text}" was not used. Run it on its own.` };
+  }
+
+  if (text) {
+    if (declared.length === 1 && !text.includes('=')) {
+      args[declared[0].name] = text;
+    } else {
+      for (const pair of text.split(/\s+/)) {
+        const eq = pair.indexOf('=');
+        if (eq <= 0) {
+          return {
+            ok: false,
+            error:
+              declared.length === 1
+                ? `Could not read "${pair}" as an argument. Give one value on its own, or ${declared[0].name}=<value>.`
+                : `Could not read "${pair}" as an argument. This prompt takes ${declared
+                    .map((a) => `${a.name}=<value>`)
+                    .join(' ')}.`,
+          };
+        }
+        const key = pair.slice(0, eq);
+        if (!declared.some((a) => a.name === key)) {
+          return {
+            ok: false,
+            error: `This prompt has no argument "${key}". It takes: ${
+              declared.map((a) => a.name).join(', ') || 'no arguments'
+            }.`,
+          };
+        }
+        args[key] = pair.slice(eq + 1);
+      }
+    }
+  }
+
+  const missing = declared.filter((a) => a.required && !(a.name in args)).map((a) => a.name);
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: `This prompt needs ${missing.length === 1 ? 'an argument' : 'arguments'}: ${missing.join(', ')}.`,
+    };
+  }
+  return { ok: true, args };
 }

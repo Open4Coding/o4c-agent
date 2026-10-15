@@ -31,6 +31,7 @@ import {
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import type { Mode } from '../ui/modePolicy.js';
 import type { SessionView } from '../ui/formatEntries.js';
+import type { CommandInfo, McpPromptRef } from '../ui/slashCommand.js';
 import type { ServerProbe, ServerStatus } from '../providers/local.js';
 import { ServerUnavailableError } from '../providers/types.js';
 
@@ -455,6 +456,14 @@ async function setup(opts: {
   // The loop's tool list. Only the MCP test below passes this; everything else gets the real
   // built-ins, as a real launch does.
   tools?: Tool[];
+  // The MCP command surface (item 21e). Only the /mcp tests pass these; undefined elsewhere is
+  // exactly a session with no MCP layer, which is what most launches are.
+  mcpPromptCommands?: Promise<readonly CommandInfo[]>;
+  mcpStatusReport?: () => readonly string[];
+  expandMcpPrompt?: (
+    ref: McpPromptRef,
+    args: Record<string, string>,
+  ) => Promise<{ readonly text: string; readonly notes: readonly string[] }>;
 }) {
   const store = new SessionStore(opts.dir);
   const runLogger = new RunLogger(join(opts.dir, 'logs'));
@@ -493,6 +502,9 @@ async function setup(opts: {
       serverPollMs: opts.serverPollMs,
       os: opts.os,
       usageStore: opts.usageStore,
+      mcpPromptCommands: opts.mcpPromptCommands,
+      mcpStatusReport: opts.mcpStatusReport,
+      expandMcpPrompt: opts.expandMcpPrompt,
     }),
   );
   liveInstances.push(instance);
@@ -3462,3 +3474,167 @@ test("an MCP tool's confirmation names its server and shows the server's claim, 
     await tick(50);
   });
 });
+
+// ----------------------------------------------------------------------------------------------
+// MCP prompts as slash commands (NextUp item 21e). These drive the real rendered app, which is
+// what the unit tests cannot do: whether a dynamically registered command is reachable at all
+// depends on the palette, the family picker and the unknown-command check all agreeing.
+// ----------------------------------------------------------------------------------------------
+
+const REVIEW_PROMPT: CommandInfo = {
+  name: '/mcp-fixture-review-file',
+  description: 'Review one file. Usage: /mcp-fixture-review-file <path>',
+  hidden: true,
+  select: 'prefill',
+  mcpPrompt: { serverId: 'fixture', promptName: 'Review File', arguments: [{ name: 'path', required: true }] },
+};
+
+test('/mcp prints the server listing it is given', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({
+      dir,
+      mcpStatusReport: () => ['MCP servers:', '  fixture - 2 tools, spawned, local'],
+    });
+    await submit(stdin, '/mcp');
+    await waitFor(() => anyFrameIncludes(frames, 'MCP servers:'));
+    assert.ok(anyFrameIncludes(frames, 'fixture - 2 tools, spawned, local'));
+  });
+});
+
+test('/mcp says MCP is not running when the session has no MCP layer at all', async () => {
+  await withTempDir(async (dir) => {
+    // Deliberately different wording from the report's own "No MCP servers are configured":
+    // a typo'd config must not read like the feature is missing.
+    const { stdin, frames } = await setup({ dir });
+    await submit(stdin, '/mcp');
+    await waitFor(() => anyFrameIncludes(frames, 'MCP is not running in this session.'));
+  });
+});
+
+test("a server's prompt command is discoverable in /mcp's family list once it connects", async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({
+      dir,
+      mcpPromptCommands: Promise.resolve([REVIEW_PROMPT]),
+      expandMcpPrompt: async () => ({ text: 'x', notes: [] }),
+    });
+    // Typed, not submitted: what is being checked is that a row discovered after mount reaches
+    // the dropdown at all. The rows arrive asynchronously, exactly as a real handshake does.
+    await type(stdin, '/mcp-fixture');
+    await waitFor(() => anyFrameIncludes(frames, '/mcp-fixture-review-file'));
+    assert.ok(anyFrameIncludes(frames, 'Review one file'), 'with its own description');
+  });
+});
+
+test("a prompt command expands into the input box instead of being sent", async () => {
+  await withTempDir(async (dir) => {
+    const asked: Array<{ ref: McpPromptRef; args: Record<string, string> }> = [];
+    const { stdin, frames } = await setup({
+      dir,
+      mcpPromptCommands: Promise.resolve([REVIEW_PROMPT]),
+      expandMcpPrompt: async (ref, args) => {
+        asked.push({ ref, args });
+        return { text: `Please review ${args.path} line by line.`, notes: [] };
+      },
+    });
+    await type(stdin, '/mcp-fixture');
+    await waitFor(() => anyFrameIncludes(frames, '/mcp-fixture-review-file'));
+
+    await submit(stdin, '-review-file src/ui/App.tsx');
+    await waitFor(() => anyFrameIncludes(frames, 'expanded into the input box'));
+
+    // The server was asked for the name it published, not the slug the command is typed as.
+    assert.equal(asked.length, 1, JSON.stringify(asked));
+    assert.equal(asked[0].ref.promptName, 'Review File');
+    assert.deepEqual(asked[0].args, { path: 'src/ui/App.tsx' });
+
+    // In front of the user, unsent: text from a server must never auto-submit, and must never be
+    // re-read as a command.
+    assert.ok(anyFrameIncludes(frames, 'Please review src/ui/App.tsx line by line.'));
+    assert.ok(!anyFrameIncludes(frames, 'mock response'), 'no turn was run');
+  });
+});
+
+test('a prompt expansion that notes a dropped part shows the note with it', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({
+      dir,
+      mcpPromptCommands: Promise.resolve([
+        {
+          name: '/mcp-fixture-mixed',
+          description: 'A prompt with an image in it',
+          hidden: true,
+          select: 'run',
+          mcpPrompt: { serverId: 'fixture', promptName: 'mixed', arguments: [] },
+        },
+      ]),
+      expandMcpPrompt: async () => ({
+        text: 'the user half',
+        notes: ['1 image part of this prompt could not be put into the input box.'],
+      }),
+    });
+    await type(stdin, '/mcp-fixture');
+    await waitFor(() => anyFrameIncludes(frames, '/mcp-fixture-mixed'));
+    await submit(stdin, '-mixed');
+    await waitFor(() => anyFrameIncludes(frames, '1 image part of this prompt could not be put'));
+  });
+});
+
+test('a missing required argument is refused before the server is asked anything', async () => {
+  await withTempDir(async (dir) => {
+    let calls = 0;
+    const { stdin, frames } = await setup({
+      dir,
+      mcpPromptCommands: Promise.resolve([REVIEW_PROMPT]),
+      expandMcpPrompt: async () => {
+        calls += 1;
+        return { text: 'should not happen', notes: [] };
+      },
+    });
+    await type(stdin, '/mcp-fixture');
+    await waitFor(() => anyFrameIncludes(frames, '/mcp-fixture-review-file'));
+    // The trailing space matters: without it this is still composing a command name, so the
+    // family dropdown owns Enter and prefills rather than submitting.
+    await submit(stdin, '-review-file ');
+    await waitFor(() => anyFrameIncludes(frames, 'needs an argument: path'));
+    assert.equal(calls, 0, 'nothing was asked of the server');
+  });
+});
+
+test('/help lists a prompt command, since /help claims to be the complete reference', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({
+      dir,
+      mcpPromptCommands: Promise.resolve([
+        {
+          name: '/mcp-fixture-summarize',
+          description: 'Summarize the work so far',
+          hidden: true,
+          select: 'run',
+          mcpPrompt: { serverId: 'fixture', promptName: 'summarize', arguments: [] },
+        },
+      ]),
+      expandMcpPrompt: async () => ({ text: 'Summarize the work so far.', notes: [] }),
+    });
+    await type(stdin, '/mcp-fixture');
+    await waitFor(() => anyFrameIncludes(frames, '/mcp-fixture-summarize'));
+    await submit(stdin, ESCAPE);
+
+    // Only frames from here on count. `frames` is cumulative, and the family dropdown a few lines
+    // up draws this row in the identical `name — description` format that /help uses - so a naive
+    // anyFrameIncludes was already satisfied before /help had run at all, and the test passed with
+    // /help's own listing reverted to built-ins only. Found by breaking it on purpose.
+    const before = frames.length;
+    await submit(stdin, '/help');
+    // Matched on /help's own `name — description` form, not the bare name: the bare name also
+    // reaches later frames through the permanent scrollback above (an earlier line, and the
+    // "Known commands:" list an unknown command prints), so a looser match passed with /help's
+    // listing reverted to built-ins only. Found by breaking it on purpose, twice.
+    await waitFor(() =>
+      frames
+        .slice(before)
+        .some((f) => f.includes('/mcp-fixture-summarize — Summarize the work so far')),
+    );
+  });
+});
+

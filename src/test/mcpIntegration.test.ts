@@ -11,6 +11,8 @@ import { classifyToolAccess } from '../ui/modePolicy.js';
 import { formatConfirmMessage } from '../ui/confirmPreview.js';
 import { AgentLoop, type AgentEvent } from '../agent/loop.js';
 import { startMcpSession } from '../mcp/startup.js';
+import { buildPromptCommands, flattenPromptMessages } from '../mcp/promptCommands.js';
+import { KNOWN_COMMANDS, parsePromptArguments } from '../ui/slashCommand.js';
 import { FakeProvider } from './fakeProvider.js';
 
 /**
@@ -339,5 +341,110 @@ test('a turn runs an auto-approved mutating MCP tool with no policy prompt at al
     assert.deepEqual(consulted, ['mcp__fixture__echo'], 'the policy did run - it just had nothing to ask');
   } finally {
     await mcp.shutdown();
+  }
+});
+
+test('a real server offering prompts adds no commands until it is granted slashCommands', async () => {
+  // The fixture declares the `prompts` capability unconditionally, so this is the default-off
+  // claim against a server that genuinely has prompts to give - not against one that has none.
+  const host = await McpHost.start([fixtureServer('ok')]);
+  try {
+    assert.equal(host.status()[0].state, 'ready');
+    assert.equal(host.tools().length, 2, 'tools are unaffected either way');
+    assert.deepEqual(host.promptSources(), [], 'o4c did not even ask');
+    assert.deepEqual(host.promptProblems(), []);
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test('granting slashCommands turns a real server\'s prompts into real commands', async () => {
+  const host = await McpHost.start([fixtureServer('ok', { slashCommands: true })]);
+  try {
+    const { commands, problems } = buildPromptCommands(host.promptSources(), KNOWN_COMMANDS);
+    assert.deepEqual(problems, []);
+    assert.deepEqual(
+      commands.map((c) => c.name).sort(),
+      ['/mcp-fixture-mixed', '/mcp-fixture-review-file', '/mcp-fixture-summarize'],
+    );
+
+    // "Review File" is not typable as a command, so the row is slugged while the wire name is
+    // kept - and this proves the wire name is what the real server is actually asked for.
+    const review = commands.find((c) => c.name === '/mcp-fixture-review-file');
+    assert.equal(review?.mcpPrompt?.promptName, 'Review File');
+    assert.equal(review?.select, 'prefill', 'it takes a required argument');
+
+    const parsed = parsePromptArguments(review!.mcpPrompt!, ' src/ui/App.tsx');
+    assert.ok(parsed.ok);
+    const expanded = flattenPromptMessages(
+      await host.getPrompt('fixture', review!.mcpPrompt!.promptName, parsed.args),
+    );
+    assert.equal(expanded.text, 'Please review src/ui/App.tsx line by line.');
+    assert.deepEqual(expanded.notes, []);
+
+    // The no-argument one runs straight away and needs no tail.
+    const summarize = commands.find((c) => c.name === '/mcp-fixture-summarize');
+    assert.equal(summarize?.select, 'run');
+    const summary = flattenPromptMessages(await host.getPrompt('fixture', 'summarize', {}));
+    assert.equal(summary.text, 'Summarize the work so far.');
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test('a real prompt carrying an assistant turn and an image is reported, not silently halved', async () => {
+  const host = await McpHost.start([fixtureServer('ok', { slashCommands: true })]);
+  try {
+    const flat = flattenPromptMessages(await host.getPrompt('fixture', 'mixed', {}));
+    assert.match(flat.text, /first, the user half/);
+    assert.match(flat.text, /\[assistant, from the prompt template\]/);
+    assert.equal(flat.notes.length, 2, JSON.stringify(flat.notes));
+    assert.ok(flat.notes.some((n) => /1 assistant turn/.test(n)));
+    assert.ok(flat.notes.some((n) => /1 image part/.test(n)));
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test('a real server whose prompts/list throws keeps its tools, and the session says why', async () => {
+  const session = startMcpSession({
+    projectRoot: undefined,
+    addTools: () => {},
+    load: async () => ({ servers: [fixtureServer('promptfail', { slashCommands: true })], problems: [] }),
+  });
+  try {
+    const notices = await session.ready;
+    assert.deepEqual(session.status().map((s) => s.state), ['ready'], 'the server itself is fine');
+    assert.deepEqual(session.promptCommands(), []);
+    assert.equal(notices.length, 1, JSON.stringify(notices));
+    assert.match(notices[0], /granted slashCommands but its prompts could not be listed/);
+    assert.match(notices[0], /its tools are unaffected/);
+    assert.match(notices[0], /prompts are broken here/);
+  } finally {
+    await session.shutdown();
+  }
+});
+
+test('the whole prompt path works through a session: config to command to expanded text', async () => {
+  const session = startMcpSession({
+    projectRoot: undefined,
+    addTools: () => {},
+    load: async () => ({ servers: [fixtureServer('ok', { slashCommands: true })], problems: [] }),
+  });
+  try {
+    assert.deepEqual(await session.ready, [], 'a working setup is silent');
+    const review = session.promptCommands().find((c) => c.name === '/mcp-fixture-review-file');
+    assert.ok(review?.mcpPrompt);
+    const expanded = await session.expandPrompt(review.mcpPrompt, { path: 'a.ts' });
+    assert.equal(expanded.text, 'Please review a.ts line by line.');
+
+    // And the listing /mcp prints describes what just happened.
+    const report = session.statusReport();
+    assert.equal(report[0], 'MCP servers:');
+    assert.equal(report[1], '  fixture - 2 tools, spawned, local');
+    assert.ok(report.includes('Prompt commands:'));
+    assert.ok(report.some((l) => l.startsWith('  /mcp-fixture-review-file - Review one file')));
+  } finally {
+    await session.shutdown();
   }
 });

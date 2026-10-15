@@ -88,6 +88,8 @@ import type { ContextEntry } from '../agent/contextEntry.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
+  knownCommandNames,
+  parsePromptArguments,
   looksLikeSlashCommand,
   isComposingCommand,
   matchCommands,
@@ -98,6 +100,7 @@ import {
   commandFamily,
   familyFor,
   type CommandInfo,
+  type McpPromptRef,
 } from './slashCommand.js';
 
 export interface AppProps {
@@ -160,6 +163,23 @@ export interface AppProps {
   /** The model id this session is running (`-m`/config.json's `model`, as passed to the
    * provider) - display only, shown in the status bar. */
   model: string;
+  /**
+   * The `/mcp-<server>-<prompt>` command rows, once discovery finishes - `McpSession.ready`
+   * resolved. A promise rather than a value because servers are still connecting while the
+   * first frame renders, which is deliberate (see `startMcpSession`): the screen must not wait
+   * on a handshake.
+   */
+  mcpPromptCommands?: Promise<readonly CommandInfo[]>;
+  /** The lines `/mcp` prints. Undefined when this session has no MCP layer at all. */
+  mcpStatusReport?: () => readonly string[];
+  /**
+   * Expands one prompt into text for the input box. Pre-flattened by `startMcpSession`, so this
+   * file needs no MCP types - a `McpPromptRef` and strings are all that cross the boundary.
+   */
+  expandMcpPrompt?: (
+    ref: McpPromptRef,
+    args: Record<string, string>,
+  ) => Promise<{ readonly text: string; readonly notes: readonly string[] }>;
   /** `'local' | 'anthropic' | 'mock'` - display only, for the startup splash header. */
   provider: string;
   /** Only meaningful (and only shown) for the local provider - display only, for the startup
@@ -522,6 +542,9 @@ export function App({
   maxIterations,
   initialHighlightColor,
   configGlobalDir,
+  mcpPromptCommands,
+  mcpStatusReport,
+  expandMcpPrompt,
 }: AppProps) {
   const { exit } = useApp();
   // The model name and context size can change after launch: a server that was down at startup tells us both
@@ -864,6 +887,23 @@ export function App({
   // Same token-bump shape as `prefill`: appends to InputBox's ↑/↓ history without touching its
   // text, for commands run straight from the palette or a family dropdown.
   const [historyAppend, setHistoryAppend] = useState<{ token: number; text: string } | undefined>(undefined);
+  // The one dynamic part of the command registry: an MCP server's prompts, which arrive when its
+  // handshake finishes rather than at module load. Empty is both the initial state and the
+  // normal one - `grants.slashCommands` is off by default.
+  const [mcpCommands, setMcpCommands] = useState<readonly CommandInfo[]>([]);
+  useEffect(() => {
+    if (!mcpPromptCommands) return;
+    let live = true;
+    void mcpPromptCommands.then((commands) => {
+      // Guarded against a resolve landing after unmount, which is the ordinary case rather than
+      // the exotic one: o4c hands off to a fresh process after most turns, so a server still
+      // inside its connect timeout will resolve into a torn-down tree.
+      if (live && commands.length > 0) setMcpCommands(commands);
+    });
+    return () => {
+      live = false;
+    };
+  }, [mcpPromptCommands]);
 
   // Same pending-Promise-resolver pattern as resumePicker, generic to any yes/no confirmation
   // (run_shell execution, write_file overwrite). A caller can chain two of these in sequence by
@@ -1494,7 +1534,9 @@ export function App({
         }
       } else if (input === '/help') {
         pushBlock([userLine(input)]);
-        const lines = COMMANDS.map(
+        // Dynamic rows included: /help is the single full reference, and a command that exists
+        // but is missing from the one listing that claims to be complete is worse than noise.
+        const lines = [...COMMANDS, ...mcpCommands].map(
           (c) => `${c.name}${c.aliases?.length ? ` (${c.aliases.join(', ')})` : ''} — ${c.description}`,
         );
         pushBlock([
@@ -1508,7 +1550,7 @@ export function App({
       } else if (commandName(input).startsWith('/help-')) {
         pushBlock([userLine(input)]);
         const rest = commandName(input).slice('/help-'.length);
-        const target = commandForHelpTarget(rest);
+        const target = commandForHelpTarget(rest, mcpCommands);
         if (!target) {
           pushBlock([{ kind: 'error', text: `No such command: /${rest}. Try /help for the full list.` }]);
         } else {
@@ -1524,12 +1566,69 @@ export function App({
           pushBlock([infoLine(detailLines.join('\n'))]);
           void runLogger.log({ type: 'system', sub_type: 'info', command: `/help-${rest}` });
         }
-      } else if (looksLikeSlashCommand(input) && !KNOWN_COMMANDS.includes(commandName(input))) {
+      } else if (commandName(input) === '/mcp') {
+        pushBlock([userLine(input)]);
+        // `mcpStatusReport` is undefined only for a session with no MCP layer at all (tests, and
+        // any future headless path) - distinct from "configured nothing", which the report
+        // itself says, so the two never get confused for each other.
+        pushBlock([
+          infoLine(
+            (mcpStatusReport?.() ?? ['MCP is not running in this session.']).join('\n'),
+          ),
+        ]);
+        void runLogger.log({ type: 'system', sub_type: 'info', command: '/mcp' });
+      } else if (mcpCommands.some((c) => c.name === commandName(input))) {
+        // An MCP prompt is a template the user asked for by name. It expands into the input box
+        // rather than being sent: the spec's own user-interaction model for prompts asks for
+        // "transparent display of the prompt's underlying template", and more concretely, text
+        // that came from a server must never auto-submit or be re-read as a command - an
+        // expansion beginning "/clear" would otherwise be a server clearing the session.
+        pushBlock([userLine(input)]);
+        const name = commandName(input);
+        const ref = mcpCommands.find((c) => c.name === name)?.mcpPrompt;
+        if (!ref || !expandMcpPrompt) {
+          pushBlock([{ kind: 'error', text: `${name} is no longer available - its MCP server is not connected.` }]);
+        } else {
+          const parsed = parsePromptArguments(ref, input.slice(name.length));
+          if (!parsed.ok) {
+            pushBlock([{ kind: 'error', text: parsed.error }]);
+          } else {
+            try {
+              const expanded = await expandMcpPrompt(ref, parsed.args);
+              if (!expanded.text.trim()) {
+                pushBlock([
+                  {
+                    kind: 'error',
+                    text: [
+                      `Prompt "${ref.promptName}" on MCP server "${ref.serverId}" expanded to no text, so there is nothing to send.`,
+                      ...expanded.notes,
+                    ].join('\n'),
+                  },
+                ]);
+              } else {
+                setInputValue(expanded.text);
+                setPrefill({ token: nextPrefillToken++, text: expanded.text });
+                pushBlock([
+                  infoLine(
+                    [
+                      `${name} expanded into the input box. Read it, edit it if you like, then press Enter to send it.`,
+                      ...expanded.notes,
+                    ].join('\n'),
+                  ),
+                ]);
+              }
+              void runLogger.log({ type: 'system', sub_type: 'info', command: name });
+            } catch (err) {
+              pushBlock([{ kind: 'error', text: formatError(err) }]);
+            }
+          }
+        }
+      } else if (looksLikeSlashCommand(input) && !knownCommandNames(mcpCommands).includes(commandName(input))) {
         pushBlock([
           userLine(input),
           {
             kind: 'error',
-            text: `Unknown command: ${commandName(input)}. Known commands: ${KNOWN_COMMANDS.join(', ')}.`,
+            text: `Unknown command: ${commandName(input)}. Known commands: ${knownCommandNames(mcpCommands).join(', ')}.`,
           },
         ]);
       } else {
@@ -1908,7 +2007,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt],
   );
 
   const handleModePickerSelect = useCallback(
@@ -2221,7 +2320,7 @@ export function App({
   // `/keyboard`, so showing a one-row palette and then swapping to the family list a few
   // keystrokes later is just a flicker. `/c` still gets the palette, since it could become
   // /clear, /config or /context.
-  const soleMatch = familyTyped ? matchCommands(familyTyped) : [];
+  const soleMatch = familyTyped ? matchCommands(familyTyped, mcpCommands) : [];
   const familyBare =
     (familyTyped ? familyFor(familyTyped) : undefined) ??
     (soleMatch.length === 1 && familyFor(soleMatch[0].name) === soleMatch[0].name
@@ -2232,7 +2331,7 @@ export function App({
   // the matching variants remain.
   const familyBasePrefix = familyTyped.endsWith('-') ? familyTyped.slice(0, -1) : familyTyped;
   const familyMatches = familyBare
-    ? commandFamily(familyBare)
+    ? commandFamily(familyBare, mcpCommands)
         .filter((c) =>
           c.name === familyBare
             ? c.name.startsWith(familyBasePrefix)
@@ -2286,7 +2385,7 @@ export function App({
     });
   }, []);
 
-  const paletteMatches = isComposingCommand(inputValue) ? matchCommands(inputValue) : [];
+  const paletteMatches = isComposingCommand(inputValue) ? matchCommands(inputValue, mcpCommands) : [];
   const paletteOpen =
     !paletteDismissed &&
     !confirmDialog &&

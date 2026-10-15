@@ -246,6 +246,12 @@ async function runRepl(
       usageStore,
       maxIterations,
       initialHighlightColor: highlightColor,
+      // The prompt rows are handed over as the promise rather than a value: discovery is still
+      // running while this renders, which is the point of `startMcpSession` returning
+      // synchronously. The other two are plain calls - `/mcp`'s listing and one prompt expansion.
+      mcpPromptCommands: mcp && mcp.ready.then(() => mcp.promptCommands()),
+      mcpStatusReport: mcp?.statusReport,
+      expandMcpPrompt: mcp?.expandPrompt,
     }),
     {
       // Opt-in, off by default (confirmed in ink's own source: does nothing unless set). 'auto'

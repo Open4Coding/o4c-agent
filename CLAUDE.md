@@ -31,5 +31,9 @@ picker, and any future one) follows these rules:
   above and not as a new row. (`src/test/pickerRows.test.ts` fails if a picker draws its own marker.)
 - Keep a row's description to **1-3 lines at a 100-column terminal, 3 only in extreme cases** (aim for 2 or
   fewer). Put detail in `/help-<command>` or the docs, not the picker row. The same test fails on a longer row.
+- A row whose text does not come from this repo (an MCP server's prompt description, via
+  `grants.slashCommands`) cannot be held to that by review, so clip it instead: `buildPromptCommands`
+  caps the whole `name - description` row at `MAX_ROW_CHARS`, measured against `wrapRow` itself. Any
+  future source of dynamic rows needs the same treatment.
 - Do not start a command description with the picker's own title text: tests (and people) detect a picker by its
   title, and the `/set` list shows every description.

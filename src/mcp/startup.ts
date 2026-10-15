@@ -2,6 +2,8 @@ import type { Tool } from '../tools/types.js';
 import { closeGraceTimer } from './client.js';
 import { loadMcpServers } from './registry.js';
 import { McpHost, type McpServerStatus } from './host.js';
+import { buildPromptCommands, flattenPromptMessages, type FlattenedPrompt } from './promptCommands.js';
+import { KNOWN_COMMANDS, type CommandInfo, type McpPromptRef } from '../ui/slashCommand.js';
 
 /**
  * Starting MCP without making anyone wait for it.
@@ -42,6 +44,23 @@ export interface McpSession {
   readonly ready: Promise<readonly string[]>;
   /** One row per configured server, once `ready` has resolved; empty before that. */
   status(): readonly McpServerStatus[];
+  /**
+   * The `/mcp-<server>-<prompt>` command rows, once `ready` has resolved; empty before that.
+   *
+   * Empty is the normal case: `grants.slashCommands` is off by default, so a server adds
+   * nothing to the command surface unless the user asked it to.
+   */
+  promptCommands(): readonly CommandInfo[];
+  /**
+   * Expands one prompt into the text that goes in front of the user, with a note for anything
+   * the expansion could not represent. Rejects if that server is no longer connected.
+   *
+   * Flattened here rather than in the UI so `App.tsx` needs nothing from `src/mcp` at all - it
+   * deals in `CommandInfo`, `McpPromptRef` and strings, all of which are its own.
+   */
+  expandPrompt(ref: McpPromptRef, args: Record<string, string>): Promise<FlattenedPrompt>;
+  /** What `/mcp` prints: every configured server and its state, then the prompt commands. */
+  statusReport(): readonly string[];
   /** Bounded, and safe to call more than once. */
   shutdown(): Promise<void>;
   /** Synchronous kill, for `process.on('exit')`. */
@@ -66,6 +85,47 @@ function noticesFor(statuses: readonly McpServerStatus[]): string[] {
 }
 
 /**
+ * The lines `/mcp` prints.
+ *
+ * Lives here rather than in the UI for the same reason `noticesFor` does: this file already
+ * owns what the user is told about MCP, and keeping both in one place is what stops the two
+ * from describing the same server differently. Pure, so the wording is assertable.
+ */
+export function statusReport(
+  statuses: readonly McpServerStatus[],
+  commands: readonly CommandInfo[],
+): readonly string[] {
+  if (statuses.length === 0) {
+    // Said as a fact plus where to change it, because "no servers" is indistinguishable from
+    // "o4c cannot do MCP" unless the file is named.
+    return ['No MCP servers are configured.', 'Add them under "servers" in .o4c/mcp/config.json.'];
+  }
+
+  const lines = ["MCP servers:"];
+  for (const status of statuses) {
+    const where = `${status.lifecycle === 'spawn' ? 'spawned' : 'attached'}, ${status.reach}`;
+    const head =
+      status.state === 'ready'
+        ? `${status.toolCount} tool${status.toolCount === 1 ? '' : 's'}, ${where}`
+        : `${status.state}${status.detail ? `: ${status.detail}` : ''}`;
+    lines.push(`  ${status.id} - ${head}`);
+  }
+
+  // Listed separately, and only when there are any: the two are different grants, and a server
+  // being ready says nothing about whether it was asked for commands.
+  if (commands.length > 0) {
+    lines.push('', 'Prompt commands:');
+    for (const command of commands) lines.push(`  ${command.name} - ${command.description}`);
+  } else {
+    lines.push(
+      '',
+      'No server adds slash commands. Set grants.slashCommands on a server that offers prompts.',
+    );
+  }
+  return lines;
+}
+
+/**
  * Reads the config, connects every enabled server in the background, and returns immediately.
  *
  * Returns synchronously **on purpose**. Startup blocking on MCP is the failure this is shaped to
@@ -83,6 +143,7 @@ export function startMcpSession(options: McpSessionOptions): McpSession {
 
   let host: McpHost | undefined;
   let statuses: readonly McpServerStatus[] = [];
+  let promptCommands: readonly CommandInfo[] = [];
 
   const ready = (async (): Promise<readonly string[]> => {
     const { servers, problems } = await load(options.projectRoot);
@@ -95,7 +156,11 @@ export function startMcpSession(options: McpSessionOptions): McpSession {
     host = await start(servers, { secureMode: options.secureMode });
     statuses = host.status();
     options.addTools(host.tools());
-    return [...problems, ...noticesFor(statuses)];
+    // Built against the built-in names, so a server can never register a command that already
+    // means something - see `buildPromptCommands`, which refuses rather than shadows.
+    const built = buildPromptCommands(host.promptSources(), KNOWN_COMMANDS);
+    promptCommands = built.commands;
+    return [...problems, ...noticesFor(statuses), ...host.promptProblems(), ...built.problems];
   })().catch((error: unknown) => [
     // `McpHost.start` collects per-server failures rather than throwing, and `loadMcpServers`
     // turns unreadable config into a problem string, so reaching here means something unforeseen.
@@ -106,6 +171,16 @@ export function startMcpSession(options: McpSessionOptions): McpSession {
   return {
     ready,
     status: () => statuses,
+    promptCommands: () => promptCommands,
+    expandPrompt: async (ref, args) => {
+      // Waited on rather than failing fast: a user can reach a prompt command the moment it
+      // appears, and `ready` is already resolved by then in every ordinary case. This only
+      // matters for the race, where failing would be wrong - the server is coming.
+      await ready;
+      if (!host) throw new Error('No MCP server is running.');
+      return flattenPromptMessages(await host.getPrompt(ref.serverId, ref.promptName, args));
+    },
+    statusReport: () => statusReport(statuses, promptCommands),
     shutdown: async () => {
       // Waited on, so a shutdown racing a still-connecting server does not leave the host - and
       // its subprocesses - created a moment after we stopped looking. Bounded, because on this

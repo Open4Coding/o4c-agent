@@ -4,6 +4,7 @@ import { parseServers, type McpServerConfig } from '../mcp/serverConfig.js';
 import { McpHost } from '../mcp/host.js';
 import type { ConnectedServer } from '../mcp/client.js';
 import type { McpToolDescriptor } from '../mcp/toolProxy.js';
+import type { McpPromptDescriptor, McpPromptResult } from '../mcp/promptCommands.js';
 
 function configure(raw: Record<string, unknown>): readonly McpServerConfig[] {
   const { servers, problems } = parseServers(raw);
@@ -17,12 +18,24 @@ const STDIO = { transport: 'stdio', command: 'node', args: ['s.js'] };
 function fakeConnection(
   config: McpServerConfig,
   tools: McpToolDescriptor[],
-  opts: { onCall?: () => Promise<{ content?: unknown }>; closed?: string[]; killed?: string[] } = {},
+  opts: {
+    onCall?: () => Promise<{ content?: unknown }>;
+    closed?: string[];
+    killed?: string[];
+    prompts?: McpPromptDescriptor[];
+    promptProblem?: string;
+    onPrompt?: (name: string, args: Record<string, string>) => Promise<McpPromptResult>;
+  } = {},
 ): ConnectedServer {
   return {
     config,
     tools,
+    prompts: opts.prompts ?? [],
+    promptProblem: opts.promptProblem,
     callTool: opts.onCall ?? (async () => ({ content: [{ type: 'text', text: 'ok' }] })),
+    getPrompt:
+      opts.onPrompt ??
+      (async (name) => ({ messages: [{ role: 'user' as const, content: { type: 'text', text: `expanded ${name}` } }] })),
     stderrTail: () => '',
     close: async () => {
       opts.closed?.push(config.id);
@@ -217,4 +230,57 @@ test('servers are connected concurrently, so N slow servers cost one wait, not N
 
   assert.equal(host.tools().length, 5);
   assert.ok(elapsed < 240, `expected overlapping connects, took ${elapsed}ms for 5 x 60ms`);
+});
+
+test('promptSources carries only the servers that actually have prompts', async () => {
+  const servers = configure({ withprompts: STDIO, without: STDIO });
+  const host = await McpHost.start(servers, {
+    connect: async (s) =>
+      fakeConnection(s, ONE_TOOL, s.id === 'withprompts' ? { prompts: [{ name: 'summarize' }] } : {}),
+  });
+  assert.deepEqual(
+    host.promptSources().map((p) => p.config.id),
+    ['withprompts'],
+  );
+  assert.deepEqual(host.promptSources()[0].prompts.map((p) => p.name), ['summarize']);
+  await host.shutdown();
+});
+
+test('a server whose prompts could not be listed keeps its tools and is reported by name', async () => {
+  const servers = configure({ fixture: STDIO });
+  const host = await McpHost.start(servers, {
+    connect: async (s) => fakeConnection(s, ONE_TOOL, { promptProblem: 'prompts are broken here' }),
+  });
+  // The point: losing the prompts must not cost the tools, which is the much bigger failure.
+  assert.equal(host.tools().length, 1);
+  assert.equal(host.status()[0].state, 'ready');
+  const problems = host.promptProblems();
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /MCP server "fixture" is granted slashCommands/);
+  assert.match(problems[0], /its tools are unaffected/);
+  assert.match(problems[0], /prompts are broken here/);
+  await host.shutdown();
+});
+
+test('getPrompt reaches the right server, and says so when that server is gone', async () => {
+  const servers = configure({ alpha: STDIO });
+  const asked: string[] = [];
+  const host = await McpHost.start(servers, {
+    connect: async (s) =>
+      fakeConnection(s, ONE_TOOL, {
+        prompts: [{ name: 'review' }],
+        onPrompt: async (name, args) => {
+          asked.push(`${name}:${JSON.stringify(args)}`);
+          return { messages: [{ role: 'user' as const, content: { type: 'text', text: 'ok' } }] };
+        },
+      }),
+  });
+  const result = await host.getPrompt('alpha', 'review', { path: 'a.ts' });
+  assert.deepEqual(asked, ['review:{"path":"a.ts"}']);
+  assert.equal(result.messages[0].content.text, 'ok');
+
+  // Not "return nothing": the only caller resolved the id from a row this host produced, so a
+  // miss means the rows outlived the connection and the user needs telling.
+  await assert.rejects(() => host.getPrompt('nosuch', 'review', {}), /not connected/);
+  await host.shutdown();
 });

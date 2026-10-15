@@ -5,7 +5,8 @@ import { McpHost, type McpHostOptions } from '../mcp/host.js';
 import { parseServers, type McpServerConfig } from '../mcp/serverConfig.js';
 import type { ConnectedServer } from '../mcp/client.js';
 import type { McpToolDescriptor } from '../mcp/toolProxy.js';
-import { startMcpSession, type McpSessionOptions } from '../mcp/startup.js';
+import type { McpPromptDescriptor } from '../mcp/promptCommands.js';
+import { startMcpSession, statusReport, type McpSessionOptions } from '../mcp/startup.js';
 
 /**
  * The startup policy: what is read, when tools arrive, what the user is told, and what happens on
@@ -15,12 +16,20 @@ import { startMcpSession, type McpSessionOptions } from '../mcp/startup.js';
 
 const STDIO = { transport: 'stdio', command: 'node', args: ['s.js'] };
 
-function fakeConnection(config: McpServerConfig, opts: { closed?: string[] } = {}): ConnectedServer {
+function fakeConnection(
+  config: McpServerConfig,
+  opts: { closed?: string[]; prompts?: McpPromptDescriptor[]; promptProblem?: string } = {},
+): ConnectedServer {
   const tools: McpToolDescriptor[] = [{ name: 'render', inputSchema: { type: 'object' } }];
   return {
     config,
     tools,
+    prompts: opts.prompts ?? [],
+    promptProblem: opts.promptProblem,
     callTool: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
+    getPrompt: async (name) => ({
+      messages: [{ role: 'user' as const, content: { type: 'text', text: `expanded ${name}` } }],
+    }),
     stderrTail: () => '',
     close: async () => {
       opts.closed?.push(config.id);
@@ -229,4 +238,91 @@ test('shutdown gives up on a server that will not close, rather than hanging', a
 test('killAllNow is synchronous, and safe before anything has connected', () => {
   const s = session({ a: STDIO });
   assert.doesNotThrow(() => s.handle.killAllNow(), 'the exit backstop can fire at any moment');
+});
+
+test('a granted server\'s prompts become command rows once discovery finishes', async () => {
+  const { handle: mcp } = session(
+    { fixture: { ...STDIO, grants: { slashCommands: true } } },
+    { connect: async (s) => fakeConnection(s, { prompts: [{ name: 'summarize', description: 'Summarize the work so far' }] }) },
+  );
+  // Empty before ready, which is the whole reason this arrives as a promise.
+  assert.deepEqual(mcp.promptCommands(), []);
+  await mcp.ready;
+  assert.deepEqual(
+    mcp.promptCommands().map((c) => c.name),
+    ['/mcp-fixture-summarize'],
+  );
+  await mcp.shutdown();
+});
+
+test('a prompt that could not be listed becomes a notice, not a dead command', async () => {
+  const { handle: mcp } = session(
+    { fixture: { ...STDIO, grants: { slashCommands: true } } },
+    { connect: async (s) => fakeConnection(s, { promptProblem: 'prompts are broken here' }) },
+  );
+  const notices = await mcp.ready;
+  assert.deepEqual(mcp.promptCommands(), []);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /granted slashCommands but its prompts could not be listed/);
+  await mcp.shutdown();
+});
+
+test('expandPrompt returns flattened text, so the UI never sees an MCP shape', async () => {
+  const { handle: mcp } = session(
+    { fixture: { ...STDIO, grants: { slashCommands: true } } },
+    { connect: async (s) => fakeConnection(s, { prompts: [{ name: 'summarize' }] }) },
+  );
+  await mcp.ready;
+  const ref = mcp.promptCommands()[0].mcpPrompt;
+  assert.ok(ref);
+  const expanded = await mcp.expandPrompt(ref, {});
+  assert.equal(expanded.text, 'expanded summarize');
+  assert.deepEqual(expanded.notes, []);
+  await mcp.shutdown();
+});
+
+test('expandPrompt rejects rather than hanging when nothing is running', async () => {
+  const { handle: mcp } = session({}, {});
+  await mcp.ready;
+  await assert.rejects(
+    () => mcp.expandPrompt({ serverId: 'fixture', promptName: 'x', arguments: [] }, {}),
+    /No MCP server is running/,
+  );
+  await mcp.shutdown();
+});
+
+test('statusReport names every server and its state, and says when none adds commands', () => {
+  const lines = statusReport(
+    [
+      { id: 'fixture', state: 'ready', lifecycle: 'spawn', reach: 'local', toolCount: 2 },
+      { id: 'search', state: 'blocked', lifecycle: 'attach', reach: 'remote', toolCount: 0, detail: 'Secure mode.' },
+      { id: 'off', state: 'disabled', lifecycle: 'spawn', reach: 'local', toolCount: 0, detail: 'Turned off in config.' },
+    ],
+    [],
+  );
+  assert.equal(lines[0], 'MCP servers:');
+  assert.equal(lines[1], '  fixture - 2 tools, spawned, local');
+  assert.equal(lines[2], '  search - blocked: Secure mode.');
+  assert.equal(lines[3], '  off - disabled: Turned off in config.');
+  // The two grants are different things, so a ready server says nothing about commands.
+  assert.ok(lines.some((l) => /No server adds slash commands/.test(l)));
+});
+
+test('statusReport lists the prompt commands when there are any', () => {
+  const lines = statusReport(
+    [{ id: 'fixture', state: 'ready', lifecycle: 'spawn', reach: 'local', toolCount: 1 }],
+    [{ name: '/mcp-fixture-summarize', description: 'Summarize the work so far' }],
+  );
+  assert.ok(lines.includes('Prompt commands:'));
+  assert.ok(lines.includes('  /mcp-fixture-summarize - Summarize the work so far'));
+  assert.equal(lines[1], '  fixture - 1 tool, spawned, local');
+});
+
+test('statusReport says where to configure servers when there are none', () => {
+  const lines = statusReport([], []);
+  // "No servers" is indistinguishable from "o4c cannot do MCP" unless the file is named.
+  assert.deepEqual(lines, [
+    'No MCP servers are configured.',
+    'Add them under "servers" in .o4c/mcp/config.json.',
+  ]);
 });

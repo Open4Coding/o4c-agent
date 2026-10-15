@@ -2,6 +2,7 @@ import type { Tool } from '../tools/types.js';
 import { lifecycleOf, reachOf, type McpReach, type McpServerConfig } from './serverConfig.js';
 import { closeGraceTimer, connectServer, MCP_CLOSE_GRACE_MS, type ConnectedServer } from './client.js';
 import { proxyTools } from './toolProxy.js';
+import type { McpPromptResult, McpPromptSource } from './promptCommands.js';
 
 /**
  * The MCP host: o4c's side of "one host, N clients, one client per server".
@@ -111,6 +112,44 @@ export class McpHost {
   /** Whatever a spawned server wrote to stderr, for diagnostics. */
   stderrTail(serverId: string): string {
     return this.connections.find((c) => c.config.id === serverId)?.stderrTail() ?? '';
+  }
+
+  /**
+   * Every granted server's prompts, for `buildPromptCommands`.
+   *
+   * The grant is already applied in `client.ts` (an ungranted server is never asked), so this
+   * filters on nothing: a server with no prompts simply contributes none. Kept as a method
+   * rather than resolved into commands here because turning prompts into command rows is
+   * startup *policy* - it needs the built-in name list to check against - and this class is
+   * deliberately the layer that knows only about connections.
+   */
+  promptSources(): readonly McpPromptSource[] {
+    return this.connections
+      .filter((c) => c.prompts.length > 0)
+      .map((c) => ({ config: c.config, prompts: c.prompts }));
+  }
+
+  /** One notice per server whose prompts could not be listed, phrased like the rest: named,
+   * with the reason, and clear that only the prompts are missing. */
+  promptProblems(): readonly string[] {
+    return this.connections.flatMap((c) =>
+      c.promptProblem
+        ? [`MCP server "${c.config.id}" is granted slashCommands but its prompts could not be listed, so it adds no commands (its tools are unaffected): ${c.promptProblem}`]
+        : [],
+    );
+  }
+
+  /**
+   * Expands one prompt on one server.
+   *
+   * Throws for an unknown server rather than returning empty: the only caller resolves the
+   * server id from a command row this host produced, so a miss means the session reloaded and
+   * the rows outlived the connection - which the user needs told, not silently given nothing.
+   */
+  async getPrompt(serverId: string, promptName: string, args: Record<string, string>): Promise<McpPromptResult> {
+    const connection = this.connections.find((c) => c.config.id === serverId);
+    if (!connection) throw new Error(`MCP server "${serverId}" is not connected.`);
+    return connection.getPrompt(promptName, args);
   }
 
   /**
