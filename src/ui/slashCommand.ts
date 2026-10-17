@@ -63,6 +63,12 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Show local token-usage for this session - no LLM call.',
   },
   {
+    name: '/plans',
+    // Runs on Enter rather than prefilling: it takes no argument, so there is nothing to fill in.
+    select: 'run',
+    description: "List this project's plan documents, from .o4c/plans/ - no LLM call.",
+  },
+  {
     name: '/keyboard',
     // Runs on Enter rather than prefilling: its `[windows|mac|linux]` argument is optional, and
     // picking it from a list of systems plainly means "this one".

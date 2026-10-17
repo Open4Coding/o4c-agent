@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -3638,3 +3638,32 @@ test('/help lists a prompt command, since /help claims to be the complete refere
   });
 });
 
+// Front-end checklist item 10, the browsing half. Writing already worked through Plan-Write
+// mode's write_file exception; what was missing was seeing what is there.
+test("/plans lists the grouped plan files, and names the path when there are none", async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = join(dir, "repo");
+    await mkdir(join(projectRoot, ".o4c", "plans"), { recursive: true });
+
+    // Empty first: "no plans" has to name the path AND the naming rule, or it reads as
+    // "o4c cannot do plans".
+    const bare = await setup({ dir: join(dir, "s1"), projectRoot });
+    await submit(bare.stdin, "/plans");
+    await waitFor(() => anyFrameIncludes(bare.frames, "No plans yet."));
+    await waitFor(() => anyFrameIncludes(bare.frames, "NNNN.Name.plan.md"));
+
+    // Then with real files, in a second app rather than refreshing the first: the listing is
+    // read from disk on every invocation, so a fresh mount is the simplest way to see them.
+    await writeFile(join(projectRoot, ".o4c", "plans", "0001.FrontEnd.plan.md"), "# plan", "utf-8");
+    await writeFile(join(projectRoot, ".o4c", "plans", "0001.FrontEnd.checklist.md"), "# list", "utf-8");
+    const full = await setup({ dir: join(dir, "s2"), projectRoot });
+    const before = full.frames.length;
+    await submit(full.stdin, "/plans");
+    // The grouped row, not the bare name: two files of one plan are ONE row naming both
+    // kinds, which is the entire point of the grouping. Windowed from the submit, since
+    // frames is cumulative.
+    await waitFor(() =>
+      full.frames.slice(before).some((f) => f.includes("0001.FrontEnd - plan, checklist")),
+    );
+  });
+});

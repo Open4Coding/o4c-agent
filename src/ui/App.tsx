@@ -19,6 +19,7 @@ const THINK_LEVEL_CONFIG_KEY = 'thinkLevelByModel';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
+import { listPlans, plansReport } from '../session/plansStore.js';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
   DEFAULT_THINK_CAPS,
@@ -1181,6 +1182,16 @@ export function App({
           userLine(input),
           infoLine(text),
         ]);
+      } else if (commandName(input) === '/plans') {
+        // Local and display-only, exactly like /context above - never calls loop.run(), so the
+        // listing is not sent to the model or added to history. This is front-end checklist item
+        // 10's *browsing* half; the writing half already works, through Plan-Write mode's
+        // `write_file` exception, which is scoped to this very directory (modePolicy.ts's
+        // classifyToolAccess). Reads the disk on every invocation rather than caching: a plan the
+        // model just wrote has to show up, and the directory is small.
+        pushBlock([userLine(input)]);
+        const listing = await listPlans(projectRoot);
+        pushBlock([infoLine(plansReport(listing, Boolean(projectRoot)).join('\n'))]);
       } else if (commandName(input).startsWith('/keyboard-')) {
         // The "/keyboard-<os>" family: same table, asked about a system other than this
         // one. Named commands rather than only the `[windows|mac|linux]` argument so they are
