@@ -1,5 +1,6 @@
 import type { Tool } from '../tools/types.js';
 import { lifecycleOf, reachOf, type McpReach, type McpServerConfig } from './serverConfig.js';
+import { allowedInSecureMode, egressClassOfUrl } from '../session/secureMode.js';
 import { closeGraceTimer, connectServer, MCP_CLOSE_GRACE_MS, type ConnectedServer } from './client.js';
 import { proxyTools } from './toolProxy.js';
 import type { McpPromptResult, McpPromptSource } from './promptCommands.js';
@@ -28,12 +29,16 @@ export interface McpServerStatus {
 
 export interface McpHostOptions {
   /**
-   * Secure/air-gapped mode. When set, servers that would send anything off the machine are
+   * Secure/air-gapped mode. When set, servers that would send anything off the network are
    * refused rather than connected - `PATH_FORWARD.md` §1a's zero-egress requirement.
    *
-   * Classified by `reachOf`, i.e. by **egress rather than transport**: a spawned subprocess and a
-   * loopback HTTP application are both local, which is the correction the Blender case forces on
-   * §1a's current stdio-versus-HTTP shorthand.
+   * Classified by **egress rather than transport** (`egressClassOf`, `src/session/secureMode.ts`),
+   * which is the correction the Blender case forced on §1a's original stdio-versus-HTTP shorthand:
+   * a spawned subprocess and a loopback HTTP application are equally local. Note that the boundary
+   * is the *site*, not the machine - a LAN address is permitted, because this project's own
+   * reference setup is a model server on the LAN and a mode that refused it would simply be turned
+   * off. `reachOf` still answers the narrower "does this leave the machine" for the confirmation
+   * dialog; the two questions are different and have separate functions on purpose.
    */
   readonly secureMode?: boolean;
   /** Swapped out in tests so nothing is spawned. */
@@ -68,14 +73,20 @@ export class McpHost {
         if (!server.enabled) {
           return { status: { ...base, state: 'disabled', detail: 'Turned off in config.' } };
         }
-        if (options.secureMode && reachOf(server) === 'remote') {
-          return {
-            status: {
-              ...base,
-              state: 'blocked',
-              detail: 'Secure mode allows only servers reachable without leaving this machine; this one is remote.',
-            },
-          };
+        // A spawned server is always eligible: there is no address to classify, and whatever it
+        // then does with the network is not visible from config (see `reachOf`'s own note - this
+        // gate classifies o4c's egress, the only thing o4c can actually know).
+        if (options.secureMode && server.transport !== 'stdio') {
+          const egress = egressClassOfUrl(server.url ?? '');
+          if (!allowedInSecureMode(egress)) {
+            return {
+              status: {
+                ...base,
+                state: 'blocked',
+                detail: `Secure mode allows only servers on this machine or this network; ${server.url ?? 'this one'} is off-site. A LAN host must be given as an IP address, since a name cannot be checked without a DNS lookup.`,
+              },
+            };
+          }
         }
 
         try {

@@ -1,0 +1,37 @@
+# Line endings. Checklist item 37, added 2026-10-17.
+#
+# Why: the working tree had drifted into a mix - src/test/App.test.tsx, InputBox.test.tsx,
+# contextEntry.test.ts and loopCompaction.test.ts were CRLF while SelectList.test.tsx, loop.test.ts
+# and package.json were LF, and compaction.test.ts was internally mixed (263 CRLF lines and 9 bare
+# LF). The committed blobs were already consistent, because core.autocrlf=true normalises on
+# commit, so this broke nothing at runtime - but it cost real time: an ending-naive edit script
+# rewrote one file's endings wholesale and produced a diff that hid the actual change inside it.
+# One declared answer per file type means a script has something to rely on.
+
+# Let git decide what is text; normalise it to LF in the repository AND in the working tree.
+#
+# `eol=lf` rather than a bare `text=auto` - a deliberate departure from this item's original
+# sketch. `text=auto` alone normalises the committed blob but leaves the checked-out file to each
+# machine's core.autocrlf, which on Windows means CRLF. That is how the drift happened in the first
+# place, and it keeps every `git add` printing "LF will be replaced by CRLF" for files that are
+# already LF on disk. Pinning LF makes the declaration total: one answer per file type, the same on
+# every platform, and the same as what these files already are. Nothing in this toolchain cares -
+# node, tsc, tsx and Ink are all ending-agnostic - and the two cases that genuinely need CRLF are
+# overridden below.
+* text=auto eol=lf
+
+# Windows batch files must be CRLF in the working tree. Not a style preference: cmd.exe mis-parses
+# `call` and `goto` labels in an LF-only .bat and fails *silently*, which already happened once in
+# this project. None are tracked right now; this is here so the first one added is correct without
+# anyone having to remember why.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Patch files stay LF whatever the platform. patch-package parses these against LF sources, and a
+# CRLF-converted patch fails to apply - a failure mode this repo has already been bitten by once
+# (the ink 8.0.0 patch shipped carrying a corrupted literal and only surfaced at launch).
+*.patch text eol=lf
+
+# Shell scripts stay LF: a CRLF shebang line makes the kernel look for an interpreter whose name
+# ends in \r and the script dies with a confusing "not found".
+*.sh text eol=lf

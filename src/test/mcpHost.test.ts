@@ -169,6 +169,41 @@ test('secure mode blocks a remote server but allows a loopback one', async () =>
   assert.ok(search?.detail?.includes('secure mode') || search?.detail?.includes('Secure mode'), search?.detail);
 });
 
+test('secure mode allows a LAN server, and its reach still reads "remote"', async () => {
+  // Added with 21f. The gate moved from "does this leave the machine" to "does this leave the
+  // network", because this project's own model server lives on the LAN (PATH_FORWARD §10) and a
+  // mode that refused it would be switched off rather than obeyed. The two questions stay separate
+  // on purpose: `reach` still says 'remote', which is what the confirmation dialog needs in order
+  // to warn that the call leaves this machine.
+  const servers = configure({ lan: { transport: 'http', url: 'http://192.168.0.128:8080/mcp' } });
+  const attempted: string[] = [];
+  const host = await McpHost.start(servers, {
+    secureMode: true,
+    connect: async (s) => {
+      attempted.push(s.id);
+      return fakeConnection(s, ONE_TOOL);
+    },
+  });
+
+  assert.deepEqual(attempted, ['lan'], 'a LAN server must be reachable in secure mode');
+  assert.equal(host.status()[0].state, 'ready');
+  assert.equal(host.status()[0].reach, 'remote', 'the dialog must still be told the call leaves this machine');
+});
+
+test('secure mode blocks a LAN server given by name rather than by address', async () => {
+  // The documented limitation, asserted so it stays deliberate rather than becoming folklore:
+  // resolving a name would mean DNS on the config-parsing path, so a bare name is treated as
+  // off-site and the refusal says so.
+  const servers = configure({ byname: { transport: 'http', url: 'http://phoebe:8080/mcp' } });
+  const host = await McpHost.start(servers, {
+    secureMode: true,
+    connect: async (s) => fakeConnection(s, ONE_TOOL),
+  });
+
+  assert.equal(host.status()[0].state, 'blocked');
+  assert.ok(host.status()[0].detail?.includes('IP address'), host.status()[0].detail);
+});
+
 test('without secure mode the same remote server connects', async () => {
   const servers = configure({ search: { transport: 'http', url: 'https://search.example.com/mcp' } });
   const host = await McpHost.start(servers, { connect: async (s) => fakeConnection(s, ONE_TOOL) });

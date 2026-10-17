@@ -318,6 +318,26 @@ test('statusReport lists the prompt commands when there are any', () => {
   assert.equal(lines[1], '  fixture - 1 tool, spawned, local');
 });
 
+test('statusReport announces secure mode whether or not it blocked anything', () => {
+  // Added with 21f. An egress boundary the user cannot see is one they will misjudge - a server
+  // that works today and is refused tomorrow, because its host moved off the LAN, needs the
+  // standing condition visible to be diagnosable from the per-server reason alone.
+  const ready: Parameters<typeof statusReport>[0] = [
+    { id: 'fixture', state: 'ready', lifecycle: 'spawn', reach: 'local', toolCount: 1 },
+  ];
+  const on = statusReport(ready, [], true);
+  assert.ok(/Secure mode is ON/.test(on[0]), on[0]);
+  assert.equal(on[1], 'MCP servers:', 'the header is added, not substituted');
+
+  // Off by default, so every existing caller and the ordinary session are unchanged.
+  assert.equal(statusReport(ready, [])[0], 'MCP servers:');
+  assert.equal(statusReport(ready, [], false)[0], 'MCP servers:');
+
+  // And it still reaches a user who has configured nothing at all, which is exactly when a
+  // silently-active boundary would be most confusing.
+  assert.ok(/Secure mode is ON/.test(statusReport([], [], true)[0]));
+});
+
 test('statusReport says where to configure servers when there are none', () => {
   const lines = statusReport([], []);
   // "No servers" is indistinguishable from "o4c cannot do MCP" unless the file is named.

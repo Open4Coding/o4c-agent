@@ -37,6 +37,13 @@ Run `o4c` with no prompt to start an interactive, multi-turn session instead of 
 command — see [`.docs/interactive-repl.md`](.docs/interactive-repl.md) for REPL commands and
 how to run it from a terminal or VS Code.
 
+## MCP servers
+
+o4c can use tools from MCP servers — local plugins, desktop applications reached over loopback, or
+remote services. Nothing is enabled by default. See [`.docs/mcp.md`](.docs/mcp.md) for the config
+format, the per-server grants, and secure/air-gapped mode. `/mcp` inside a session lists what is
+configured and what state each server is in.
+
 ## Developing without spending money
 
 `o4c` defaults to the real Anthropic API, which costs real money per call. While developing/testing

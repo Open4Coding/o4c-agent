@@ -20,6 +20,7 @@ import { RunLogger } from './session/runLog.js';
 import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor, usageFileFor } from './session/projectContext.js';
 import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
+import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
 import { startMcpSession, type McpSession } from './mcp/startup.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
@@ -390,6 +391,27 @@ program
     // this, never the shared config.json.
     const localApiKey =
       typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined;
+    // Secure/air-gapped mode (PATH_FORWARD §1a.2/§1a.3, checklist item 21f). Deliberately NOT read
+    // from `resolvedConfig`, which is the ordinary global -> local -> personal override cascade:
+    // this key is a ratchet, so each scope is read on its own and any `true` wins. A project's
+    // `.o4c/config.json` must be able to tighten the egress boundary and never to switch it off -
+    // the same reason that file is not trusted to name a command for o4c to spawn.
+    const secureMode = secureModeFromScopes(
+      await Promise.all(
+        (['global', 'local', 'personal'] as const).map((scope) => configStore.readScope(scope)),
+      ),
+    );
+    // Refused before the provider is built, and fatally rather than by falling back to something
+    // else: the mode's entire content is "nothing leaves this network", so quietly continuing on a
+    // different provider is the one unacceptable outcome. stderr because Ink does not own the
+    // screen yet.
+    if (secureMode) {
+      const refusal = secureModeProviderRefusal(opts.provider, opts.baseUrl);
+      if (refusal) {
+        console.error(refusal);
+        process.exit(1);
+      }
+    }
     // Manually-configured override - still wins over auto-detection below when set (front-end
     // plan item #8's own scope note: proceed with auto-detected-only for now, no override command
     // yet, but a hand-set config value should still take precedence over whatever gets detected).
@@ -587,9 +609,10 @@ program
     // repo's `.o4c/` is not a preference, it is a command line this process would spawn.
     const mcp = startMcpSession({
       projectRoot: trusted ? projectRoot : undefined,
-      // No setting behind this yet - see docs/plans item 21 step 6, which wires secure mode to a
-      // real config value and amends PATH_FORWARD §1a. Until then every configured server is
-      // allowed, which is today's behaviour for everything else o4c talks to.
+      // Resolved as a ratchet across config scopes above, and the same value already refused a
+      // cloud provider there - gating MCP alone would be theatre while every prompt went to an
+      // API. A blocked server costs only its own tools and says so in the startup notices.
+      secureMode,
       addTools: (tools) => loop.addTools(tools),
     });
     loop.registerPendingTools(mcp.ready);

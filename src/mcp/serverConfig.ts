@@ -146,8 +146,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Every grant, in one list, so adding one cannot be half-added: the parser below both reads
- * and validates against this. */
-const GRANT_KEYS = ['autoApprove', 'slashCommands', 'resources', 'trustReadOnlyHints'] as const;
+ * and validates against this. Exported so `mcpDocs.test.ts` can hold `.docs/mcp.md` to it: a
+ * grant that exists and is undocumented is one nobody will use correctly, and the doc drifting
+ * silently is the normal way that happens. */
+export const GRANT_KEYS = ['autoApprove', 'slashCommands', 'resources', 'trustReadOnlyHints'] as const;
 
 function parseGrants(raw: unknown, id: string, problems: string[]): Required<McpGrants> {
   const grants: Required<McpGrants> = {

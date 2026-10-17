@@ -94,14 +94,28 @@ function noticesFor(statuses: readonly McpServerStatus[]): string[] {
 export function statusReport(
   statuses: readonly McpServerStatus[],
   commands: readonly CommandInfo[],
+  secureMode = false,
 ): readonly string[] {
+  // Stated first, and whether or not it blocked anything: an active egress boundary the user
+  // cannot see is one they will misjudge. A server that works today and is refused tomorrow -
+  // because its host moved off the LAN - needs the mode to be visible for that to be
+  // diagnosable. A blocked server reports its own reason below; this is the standing condition
+  // rather than the per-server event.
+  const header = secureMode
+    ? ['Secure mode is ON: only servers on this machine or this network may be reached.']
+    : [];
+
   if (statuses.length === 0) {
     // Said as a fact plus where to change it, because "no servers" is indistinguishable from
     // "o4c cannot do MCP" unless the file is named.
-    return ['No MCP servers are configured.', 'Add them under "servers" in .o4c/mcp/config.json.'];
+    return [
+      ...header,
+      'No MCP servers are configured.',
+      'Add them under "servers" in .o4c/mcp/config.json.',
+    ];
   }
 
-  const lines = ["MCP servers:"];
+  const lines = [...header, 'MCP servers:'];
   for (const status of statuses) {
     const where = `${status.lifecycle === 'spawn' ? 'spawned' : 'attached'}, ${status.reach}`;
     const head =
@@ -180,7 +194,7 @@ export function startMcpSession(options: McpSessionOptions): McpSession {
       if (!host) throw new Error('No MCP server is running.');
       return flattenPromptMessages(await host.getPrompt(ref.serverId, ref.promptName, args));
     },
-    statusReport: () => statusReport(statuses, promptCommands),
+    statusReport: () => statusReport(statuses, promptCommands, options.secureMode ?? false),
     shutdown: async () => {
       // Waited on, so a shutdown racing a still-connecting server does not leave the host - and
       // its subprocesses - created a moment after we stopped looking. Bounded, because on this
