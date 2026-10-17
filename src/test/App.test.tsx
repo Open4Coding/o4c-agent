@@ -3062,6 +3062,10 @@ test('a big write_file approval dialog shows a short preview with the choices vi
     assert.ok(dialog.includes('more lines'));
     assert.ok(dialog.includes('const row0 ='));
     assert.equal(dialog.includes('const row150 ='), false, 'the body of the file is not dumped into the dialog');
+    // A file being CREATED gets no diff (item 8): 'all 300 lines added' says nothing the
+    // preview does not, and costs the '+284 more lines' tail asserted above. Existing file
+    // -> diff; new file -> preview. Asserted here so that rule stays deliberate.
+    assert.equal(/[+-]\d+ [+-]\d+/.test(dialog), false, 'no diff summary for a new file: ' + dialog);
     assert.ok(dialog.includes('No') && dialog.includes('Yes'), 'the choices are on screen');
     const rows = dialog.split('\n');
     const start = rows.findIndex((l) => l.includes('Allow write_file'));
@@ -3665,5 +3669,40 @@ test("/plans lists the grouped plan files, and names the path when there are non
     await waitFor(() =>
       full.frames.slice(before).some((f) => f.includes("0001.FrontEnd - plan, checklist")),
     );
+  });
+});
+
+// Item 8 / design doc 9.6: the confirmation shows WHAT CHANGES, not only what is being
+// written. Asserted on the markers rather than the colours, because ink-testing-library
+// frames come back as plain text with colour stripped (see theme.ts) - which is also exactly
+// why the renderer puts a +/- on each row instead of relying on colour alone.
+test("the write_file confirmation shows a red/green line diff of the change", async () => {
+  await withTempDir(async (dir) => {
+    const targetPath = join(dir, "diffed.txt");
+    // An existing file, so there is something to diff against.
+    await writeFile(targetPath, "keep\nold line\ntail", "utf-8");
+    const { stdin, lastFrame } = await setup({
+      dir,
+      provider: new WriteFileProvider(targetPath, "keep\nnew line\ntail"),
+    });
+
+    await submit(stdin, "please change the file");
+    await waitFor(() => (lastFrame() ?? "").includes("Allow write_file"));
+
+    const frame = lastFrame() ?? "";
+    // The removal above its replacement, which is item 8 in its own words.
+    assert.ok(frame.includes("-old line"), frame);
+    assert.ok(frame.includes("+new line"), frame);
+    assert.ok(
+      frame.indexOf("-old line") < frame.indexOf("+new line"),
+      "removed must come before added: " + frame,
+    );
+    // The summary replaced the content preview, so the unchanged lines are context, not a
+    // second copy of the whole file.
+    assert.ok(frame.includes("+1 -1"), frame);
+    // Declining leaves the file alone, as always.
+    await tick(200);
+    await submit(stdin, ESCAPE);
+    assert.equal(await readFile(targetPath, "utf-8"), "keep\nold line\ntail");
   });
 });

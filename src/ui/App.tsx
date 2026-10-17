@@ -20,6 +20,8 @@ import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { listPlans, plansReport } from '../session/plansStore.js';
+import { clipDiff, diffLines, diffStats, formatDiffStats, type DiffLine } from './lineDiff.js';
+import { readFile } from 'node:fs/promises';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
   DEFAULT_THINK_CAPS,
@@ -920,15 +922,22 @@ export function App({
   const [confirmDialog, setConfirmDialog] = useState<{
     id: number;
     message: string;
+    /** A write_file diff, already clipped - item 8. Absent for every other tool. */
+    diff?: readonly DiffLine[];
     tool: Tool;
     input: Record<string, unknown>;
     resolve: (confirmed: boolean) => void;
   } | null>(null);
 
   const askConfirm = useCallback(
-    (message: string, tool: Tool, input: Record<string, unknown>): Promise<boolean> => {
+    (
+      message: string,
+      tool: Tool,
+      input: Record<string, unknown>,
+      diff?: readonly DiffLine[],
+    ): Promise<boolean> => {
       return new Promise((resolve) => {
-        setConfirmDialog({ id: nextDialogId++, message, tool, input, resolve });
+        setConfirmDialog({ id: nextDialogId++, message, diff, tool, input, resolve });
       });
     },
     [],
@@ -1033,7 +1042,47 @@ export function App({
       // `tool.mcp` is undefined for every built-in; for a proxied tool it is what puts the
       // server, the egress and the server's own claims about the tool in front of the user
       // before they answer. Nothing here decides anything - see confirmPreview.ts.
-      const ok = await askConfirm(formatConfirmMessage(tool.name, input, undefined, tool.mcp), tool, input);
+      // Item 8 / design doc 9.6: for a write_file, show WHAT CHANGES rather than only the
+      // content being written. Computed here rather than in formatConfirmMessage because it
+      // needs to read the file, and that function is pure and synchronous by design.
+      // Failure to read is not an error: a new file (ENOENT) is the ordinary case and reads
+      // as all-additions, and an unreadable existing file simply gets no diff - the content
+      // preview is still there, so the dialog is never worse than before this existed.
+      let diff: readonly DiffLine[] | undefined;
+      let diffSummary: string | undefined;
+      if (tool.name === 'write_file' && typeof input.path === 'string') {
+        let existing: string | undefined;
+        try {
+          existing = await readFile(input.path, 'utf-8');
+        } catch {
+          // ENOENT (a file being created) or an unreadable one. Either way there is nothing to
+          // diff against, and `undefined` rather than `''` is what keeps those two cases apart
+          // from a file that genuinely is empty.
+          existing = undefined;
+        }
+        // **Only an existing file gets a diff.** For a new one the diff would be "all 300 lines
+        // added", which tells the user nothing the content preview does not, and costs its
+        // "+284 more lines" tail. A diff answers "what changes"; a file being created has no
+        // answer to that, only content. So: existing file -> diff, new file -> the preview that
+        // was already there. Found by the big-write_file dialog test, which asserts on that tail:
+        // the regression was mine and the test was right.
+        const full = existing === undefined ? [] : diffLines(existing, String(input.content ?? ''));
+        const stats = diffStats(full);
+        if (stats.added > 0 || stats.removed > 0) {
+          // Sized from the terminal, like every other part of this dialog: a third of the
+          // window, floored at 4 and capped at 16, so the diff informs the decision without
+          // becoming the frame-taller-than-the-window bug confirmPreview.ts exists to fix.
+          const rows = process.stdout.rows || 24;
+          diff = clipDiff(full, Math.max(4, Math.min(16, Math.floor(rows / 3))));
+          diffSummary = formatDiffStats(stats);
+        }
+      }
+      const ok = await askConfirm(
+        formatConfirmMessage(tool.name, input, undefined, tool.mcp, diffSummary),
+        tool,
+        input,
+        diff,
+      );
       // `declined`, not `deny`: the mode permits this tool and only this call was refused. The loop
       // tells the model which of the two happened, because it changes what the model does next.
       return ok ? 'allow' : 'declined';
@@ -2467,6 +2516,7 @@ export function App({
         <ConfirmDialog
           key={confirmDialog.id}
           message={confirmDialog.message}
+          diff={confirmDialog.diff}
           onResolve={handleConfirmResolve}
           onEscape={abortTurn}
         />

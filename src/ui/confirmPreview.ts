@@ -116,6 +116,12 @@ export function formatConfirmMessage(
   input: Record<string, unknown>,
   size: PreviewSize = currentSize(),
   mcp?: McpToolProvenance,
+  /**
+   * `+3 -1` from `lineDiff.ts`, when the caller computed a diff for this write (item 8, design doc
+   * §9.6). Its presence also means the diff rows themselves are about to be rendered beneath this
+   * message, which changes what belongs in it - see the write_file branch.
+   */
+  diffSummary?: string,
 ): string {
   const budget = lineBudget(size.cols);
   // Under the question rather than above it: the first line is the one guaranteed to be on screen
@@ -125,11 +131,18 @@ export function formatConfirmMessage(
 
   if (toolName === 'write_file' && typeof input.path === 'string' && typeof input.content === 'string') {
     const lines = input.content.split('\n');
+    const head = `Allow write_file(${clipPathTail(input.path, Math.max(20, budget - 40))})? ${plural(input.content.length, 'character')}, ${plural(lines.length, 'line')}`;
+    // With a diff about to be rendered, the content preview is **replaced**, not joined. Showing
+    // both would roughly double the dialog's height for strictly less information - the diff's
+    // changed lines are a subset of the content, and they are the part that answers the question -
+    // and a dialog taller than the window is the exact failure this file was written to fix. The
+    // counts stay, because "how big is this write" is a different question from "what changes".
+    if (diffSummary) return [`${head}, ${diffSummary}`, ...notes].join('\n');
     const shown = Math.min(lines.length, previewLineCount(size.rows));
     const preview = lines.slice(0, shown).map((l) => clipLine(l, budget));
     const hidden = lines.length - shown;
     return [
-      `Allow write_file(${clipPathTail(input.path, Math.max(20, budget - 40))})? ${plural(input.content.length, 'character')}, ${plural(lines.length, 'line')}`,
+      head,
       ...notes,
       ...preview,
       ...(hidden > 0 ? [clipLine(`... (+${plural(hidden, 'more line')})`, budget)] : []),

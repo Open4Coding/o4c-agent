@@ -190,3 +190,22 @@ test("the unverified-claim disclaimer survives a window too narrow for the claim
   const claimLine = msg.split('\n').find((l) => l.includes('claim'));
   assert.ok(claimLine?.startsWith("Server's claim, unverified:"), JSON.stringify(claimLine));
 });
+
+// Item 8 / design doc 9.6: when a diff is going to be rendered under the message, the content
+// preview is replaced rather than joined - both would roughly double the dialog height for
+// strictly less information, and a dialog taller than the window is the bug this file fixes.
+test('a diff summary replaces the content preview and keeps the counts', () => {
+  const input = { path: "/tmp/x.ts", content: "a\nb\nc\nd\ne\nf\ng\nh\ni\nj" };
+
+  const withDiff = formatConfirmMessage("write_file", input, { cols: 100, rows: 40 }, undefined, "+3 -1");
+  assert.ok(withDiff.includes("+3 -1"), withDiff);
+  assert.ok(withDiff.includes("10 lines"), "the size counts must stay: " + withDiff);
+  assert.equal(withDiff.split("\n").length, 1, "no preview rows: " + withDiff);
+  assert.ok(!withDiff.includes("more line"), withDiff);
+
+  // Without one, the old preview is untouched - this is additive, not a replacement of the
+  // existing behaviour for every other path.
+  const noDiff = formatConfirmMessage("write_file", input, { cols: 100, rows: 40 });
+  assert.ok(noDiff.split("\n").length > 1, "the preview still appears: " + noDiff);
+  assert.ok(!noDiff.includes("+3 -1"));
+});
