@@ -1,6 +1,7 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
+import { CoreRegistry, type CoreComponent } from './coreSeam.js';
 
 const INITIAL_TOKEN_RATIO = 1.5;
 const MIN_TOKEN_RATIO = 0.5;
@@ -286,6 +287,30 @@ export class AgentLoop {
     this.pendingTools = ready.catch((error: unknown) => [
       `Tool discovery failed: ${error instanceof Error ? error.message : String(error)}`,
     ]);
+  }
+
+  /** The core tier's registered components - see `registerCore` and `coreSeam.ts`. */
+  private readonly core = new CoreRegistry();
+
+  /**
+   * Registers a core-tier component (design doc §5.7).
+   *
+   * Post-construction and additive, the same shape as `addTools` above and for the same reason:
+   * the loop is built before the session's components are, and nothing here caches across turns.
+   * Registration order is the hook order - `coreSeam.ts` documents what that means - so the
+   * caller is making a decision when it picks the sequence.
+   *
+   * Session-scoped rather than per-run (unlike `RunOptions`' own callbacks) because a component
+   * owns state that outlives one turn: §4's store is the motivating case, and re-registering it
+   * every turn would be the wrong lifetime.
+   */
+  registerCore(component: CoreComponent): void {
+    this.core.register(component);
+  }
+
+  /** Names of the registered core components, in registration order. */
+  coreComponentNames(): readonly string[] {
+    return this.core.names;
   }
 
   private indexEntry(entry: ContextEntry): void {
@@ -817,8 +842,21 @@ export class AgentLoop {
     const configuredMaxIterations = options.maxIterations ?? 25;
     const maxIterations = configuredMaxIterations > 0 ? configuredMaxIterations : Infinity;
     const onEvent = options.onEvent ?? (() => {});
-    const onEntry = options.onEntry ?? (() => {});
+    const callerOnEntry = options.onEntry ?? (() => {});
     const onProviderCall = options.onProviderCall ?? (() => {});
+    /** Reports a core component degrading, on the channel App.tsx keeps a permanent record of. */
+    const warnSeam = (text: string) => onEvent({ type: 'warning', text });
+    // The caller's own `onEntry` runs FIRST and unguarded - it is session persistence, and a
+    // failure there should surface rather than be swallowed behind a component's. Core components
+    // then observe, each one caught (see `CoreRegistry.notifyEntry`). Left as the bare callback
+    // when nothing is registered, so a session without core components is byte-for-byte the old
+    // path.
+    const onEntry = this.core.hasEntryObservers()
+      ? (entry: ContextEntry) => {
+          callerOnEntry(entry);
+          this.core.notifyEntry(entry, warnSeam);
+        }
+      : callerOnEntry;
 
     // Before anything else, including the compaction check: tools discovered asynchronously
     // (MCP servers) have to be in `this.tools` before `toolDefs` is built below, or this turn
@@ -1100,10 +1138,28 @@ export class AgentLoop {
             ),
           )
         : undefined;
+      // §5.7's request-construction hook - the one the four core-tier features actually needed,
+      // and the one MCP could never have provided. A hook returns the list to build FROM; it does
+      // not touch `this.entries`, so a retrieved entry lives for exactly this request (see
+      // `CoreComponent.buildRequest`). Skipped entirely, not merely a no-op pipeline, when nothing
+      // is registered: this runs on every provider round-trip of every turn, and the whole reason
+      // the components are in-process is that this path is hot.
+      const requestEntries = this.core.hasRequestHooks()
+        ? await this.core.buildEntries(
+            {
+              entries: this.entries,
+              contextWindow: options.contextWindow,
+              maxTokens: dynamicMaxTokens,
+            },
+            warnSeam,
+          )
+        : this.entries;
       const request: CompletionRequest = {
         systemPrompt: systemPromptForRequest,
         messages: toWireMessages(
-          this.entries,
+          requestEntries,
+          // A hook is free to drop a continuation entry; `toWireMessages` ignores ids it cannot
+          // find, so that degrades to an ordinary request rather than breaking the projection.
           continuationEntries.map((e) => e.id),
         ),
         tools: toolDefs,
@@ -1312,7 +1368,12 @@ export class AgentLoop {
               ? `You declined this ${call.name} call, so it was not executed. The tool is available and you may ask for it again.`
               : `Blocked by the current mode: ${call.name} was not executed.`;
         } else {
-          output = await tool.execute(call.input);
+          // §5.7's tool-dispatch hook. Reached only on the approved path - every `deny`/`declined`
+          // verdict is answered in the branch above - so a core component can intercept a call but
+          // can never become a route around the approval gate. This is where the Code Graph
+          // answers a `grep` from its index instead of reading files; `runTool` with nothing
+          // registered is a direct call to `execute`, no wrapper allocated.
+          output = await this.core.runTool({ tool, input: call.input }, () => tool.execute(call.input));
         }
         output = await this.boundToolOutput(output, call.name, options);
         onEvent({ type: 'tool_result', toolName: call.name, toolOutput: output });
