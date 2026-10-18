@@ -35,3 +35,14 @@
 # Shell scripts stay LF: a CRLF shebang line makes the kernel look for an interpreter whose name
 # ends in \r and the script dies with a confusing "not found".
 *.sh text eol=lf
+
+# Compiled tree-sitter grammars are binary and must never be touched. `* text=auto` above would
+# rely on git's NUL-byte heuristic to work this out; WASM starts with a `\0asm` magic so the
+# detection does fire, but 25 MB of parsers is not something to leave to a heuristic. An
+# LF-normalised grammar fails to load with an opaque emscripten error - the same symptom as an
+# ABI-incompatible build, which cost real time to diagnose once already.
+*.wasm binary
+
+# Tree-sitter query files are ordinary text and want the repository default (LF), stated so the
+# pairing with *.wasm above is obvious to the next reader.
+*.scm text eol=lf

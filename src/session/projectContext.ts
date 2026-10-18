@@ -56,13 +56,24 @@ export function plansDirFor(projectRoot: string | undefined): string | undefined
 }
 
 /**
- * Where §4's infinite-context SQLite store (`InfiniteContextStore`) lives - project-only, no
- * global fallback, same reasoning as `plansDirFor`: the store indexes one project's own history,
- * so it's meaningless without a trusted project root. `index.db` itself (plus its `-wal`/`-shm`
- * sidecars) is created inside this directory by `InfiniteContextStore`, not here.
+ * Where the core-tier SQLite databases live - project-only, no global fallback, same reasoning
+ * as `plansDirFor`: these index one project's own history and structure, so they are meaningless
+ * without a trusted project root.
+ *
+ * Two separate database files live here: `history.db` (§4's `InfiniteContextStore`) and
+ * `graph.db` (the Code Graph), each created by its own store along with its `-wal`/`-shm`
+ * sidecars. **Separate files, not one**, decided 2026-10-18. The graph is derived and disposable
+ * while the history is primary and irreplaceable, so "clear the index" must not be able to
+ * destroy the history; and WAL permits **one writer per database**, so a bulk reindex sharing a
+ * file would stall a live history append mid-turn. Cross-queries use `ATTACH`, which works
+ * across files, so separating costs nothing.
+ *
+ * This replaced `.o4c/data/infinitecontextwindow/` - that is the **plugin** data-contract path
+ * (`.o4c/data/<plugin-id>/`), which became wrong on its own terms when item 38 made this
+ * machinery core-tier rather than a plugin.
  */
-export function infiniteContextDbDirFor(projectRoot: string | undefined): string | undefined {
-  return projectRoot ? join(projectRoot, '.o4c', 'data', 'infinitecontextwindow') : undefined;
+export function dbDirFor(projectRoot: string | undefined): string | undefined {
+  return projectRoot ? join(projectRoot, '.o4c', 'db') : undefined;
 }
 
 async function directoryExists(path: string): Promise<boolean> {

@@ -3,9 +3,15 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ContextEntry } from '../agent/contextEntry.js';
 
-/** `index.db` itself - the WAL sidecars (`-wal`/`-shm`) appear alongside it during normal use
- * and fold back into this file on checkpoint. See docs/o4c-agent-design.md §4.1/§4.2. */
-export const INFINITE_CONTEXT_DB_FILENAME = 'index.db';
+/** `history.db` itself - the WAL sidecars (`-wal`/`-shm`) appear alongside it during normal use
+ * and fold back into this file on checkpoint. See docs/o4c-agent-design.md §4.1/§4.2.
+ *
+ * Renamed from `index.db` on 2026-10-18, while nothing in production constructed this store and
+ * no such file existed on disk. `index.db` was a misleading name for a *record* store and kept
+ * inviting the Code Graph to share the file - which it must not, because WAL allows one writer
+ * per database and this store takes small live appends mid-turn while the graph does bulk
+ * reindex writes. The graph lives beside it as `graph.db`; see `dbDirFor`. */
+export const INFINITE_CONTEXT_DB_FILENAME = 'history.db';
 
 export interface SessionRecord {
   id: string;
