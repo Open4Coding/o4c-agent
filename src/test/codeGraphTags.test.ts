@@ -375,6 +375,8 @@ test('a function assigned to a const is a definition, including the React HOC fo
     'const funcExpr = function (n: number) { return n; };',
     'const wrapped = useCallback((lines: string[]) => lines, []);',
     'const notAFunction = compute(1, 2);',
+    'const uninstall = installWatchdog(500, () => {}, deps);',
+    'const firstMatch = rows.find((r) => r.ok);',
   ].join('\n');
 
   const defs = (await extractTags(source, 'typescript')).filter((t) => t.kind === 'def').map((t) => t.name);
@@ -384,11 +386,55 @@ test('a function assigned to a const is a definition, including the React HOC fo
   assert.ok(defs.includes('wrapped'), 'useCallback-wrapped arrow should be a definition');
   assert.ok(
     !defs.includes('notAFunction'),
-    'a plain call assigned to a const is a value, not a function definition - matching on the ' +
-      'arrow-function argument is what keeps this precise',
+    'a plain call assigned to a const is a value, not a function definition',
   );
+
+  // The reason this pattern names its wrappers instead of matching on shape. An earlier version
+  // matched any call carrying an arrow-function argument, which swept up both of these - and
+  // then attributed every `uninstall()` in the repository to whichever local const it found.
+  // The acceptance measurement caught it; the assertion keeps it caught.
+  assert.ok(
+    !defs.includes('uninstall'),
+    'a call that happens to take a callback returns a value, not a function definition',
+  );
+  assert.ok(!defs.includes('firstMatch'), 'nor does .find() define a function');
 
   // The same patterns must be in the tsx query, since .tsx is where React code lives.
   const tsxDefs = (await extractTags(source, 'tsx')).filter((t) => t.kind === 'def').map((t) => t.name);
   assert.ok(tsxDefs.includes('plainArrow') && tsxDefs.includes('wrapped'), 'tsx query should match typescript');
+});
+
+test('a callback held in a property or a parameter is a definition', async () => {
+  // Found by the acceptance measurement, not by reading the query: the residual precision
+  // errors were nearly all calls through a function-typed property or parameter. With no
+  // pattern for those, the only candidate left for `emit()` was an unrelated top-level `emit`
+  // in another file, so the graph answered confidently and wrongly.
+  const source = [
+    'interface Opts {',
+    '  toolPolicy?: (tool: string) => void;',
+    '  resolve: (ok: boolean) => void;',
+    '  plainField: number;',
+    '}',
+    'export function strip(emit: (text: string) => void, count: number, onDone?: () => void) {',
+    '  emit("x");',
+    '  onDone?.();',
+    '  return count;',
+    '}',
+  ].join('\n');
+
+  const defs = (await extractTags(source, 'typescript')).filter((t) => t.kind === 'def').map((t) => t.name);
+
+  assert.ok(defs.includes('toolPolicy'), `optional callback property missing from [${defs.join(', ')}]`);
+  assert.ok(defs.includes('resolve'), 'callback property should be a definition');
+  assert.ok(defs.includes('emit'), 'callback parameter should be a definition');
+  assert.ok(defs.includes('onDone'), 'optional callback parameter should be a definition');
+
+  // The restriction to function types is the whole reason this is safe to add. Capturing every
+  // property and parameter would bury the definition table in field and argument names and make
+  // far more call sites ambiguous than it resolved.
+  assert.ok(!defs.includes('plainField'), 'a non-function property is not a function definition');
+  assert.ok(!defs.includes('count'), 'a non-function parameter is not a function definition');
+
+  const tsxDefs = (await extractTags(source, 'tsx')).filter((t) => t.kind === 'def').map((t) => t.name);
+  assert.ok(tsxDefs.includes('emit') && !tsxDefs.includes('count'), 'tsx query should match typescript');
 });

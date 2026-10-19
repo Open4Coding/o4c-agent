@@ -62,10 +62,41 @@
   name: (identifier) @name.definition.function
   value: [(arrow_function) (function_expression)]) @definition.function
 
-; The React higher-order-component case: `const f = useCallback(() => {}, [])`. Matching on
-; the presence of an arrow-function argument keeps this precise - `const x = compute(1, 2)`
-; has a call_expression value too and must NOT be captured as a function definition.
-(variable_declarator
-  name: (identifier) @name.definition.function
-  value: (call_expression
-    arguments: (arguments (arrow_function)))) @definition.function
+; The React higher-order-component case: `const f = useCallback(() => {}, [])`.
+;
+; Narrowed to named wrappers on 2026-10-18 after the acceptance measurement caught the broader
+; version red-handed. Matching on the mere PRESENCE of an arrow-function argument also matched
+; `const uninstall = installGcWatchdog(500, () => {}, deps)` and `const call = rows.find((e) =>
+; e.kind === 'x')` - both of which bind a VALUE, not a function definition - and every call to
+; `uninstall()` anywhere in the repository was then attributed to that local const. It was the
+; single largest remaining source of wrong answers, and it was a pattern I had added myself one
+; step earlier. Naming the wrappers is less clever and actually correct.
+(
+  (variable_declarator
+    name: (identifier) @name.definition.function
+    value: (call_expression
+      function: (identifier) @_wrapper
+      arguments: (arguments (arrow_function)))) @definition.function
+  (#match? @_wrapper "^(useCallback|useMemo|memo|forwardRef)$")
+)
+
+; Callback-typed properties and parameters, added 2026-10-18 from the acceptance measurement.
+; The residual precision errors were almost all of one shape: `emit()`, `onEntry()`,
+; `toolPolicy()`, `resolve()` and `onToken()` are called through a property or a parameter that
+; holds a function, and with no pattern matching those the only candidate left was an unrelated
+; top-level definition sharing the name - so the graph answered confidently and wrongly.
+;
+; Restricted to `function_type` deliberately. Capturing every interface property would flood the
+; definition table with field names and make far more names ambiguous; capturing only the ones
+; that hold a function adds exactly the callers that were missing.
+(property_signature
+  name: (property_identifier) @name.definition.function
+  type: (type_annotation (function_type))) @definition.function
+
+(required_parameter
+  pattern: (identifier) @name.definition.function
+  type: (type_annotation (function_type))) @definition.function
+
+(optional_parameter
+  pattern: (identifier) @name.definition.function
+  type: (type_annotation (function_type))) @definition.function

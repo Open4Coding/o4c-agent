@@ -2,13 +2,20 @@
  * Definition and reference extraction - the raw material the ranking engine consumes.
  *
  * This is deliberately the whole of it. The Code Graph's job is to **rank what matters inside a
- * token budget**, not to answer "what calls this function": the externally-graded benchmark in
- * `docs/research/code-graph/18.repowise.md` shows the best tool in the field recovering 32% of a
- * real call graph, and one recovering 2.6%. A `callers` tool over a graph like that is not
- * approximately right, it is silently wrong - the model asks what calls `validateToken`, gets
- * nothing, and deletes it. Personalized PageRank over the same noisy graph degrades gracefully,
- * because its output was never a completeness claim. So: extract tags, rank with them, and never
- * present them as a complete picture.
+ * token budget**, not to answer "what calls this function". The externally-graded benchmark in
+ * `docs/research/code-graph/18.repowise.md` reports call-graph recall ranging from 0.026 to 0.967
+ * across repositories, and its author explicitly forbids comparing cells across rows - so the
+ * usable finding there is the **variance**, not any single figure, and nothing is available at
+ * query time to say which end of the range you are at. A `callers` tool answering over a graph
+ * like that is not approximately right, it is silently wrong: the model asks what calls
+ * `validateToken`, gets nothing, and deletes it. Personalized PageRank over the same noisy graph
+ * degrades gracefully, because its output was never a completeness claim. So: extract tags, rank
+ * with them, and never present them as a complete picture.
+ *
+ * What *this* extractor manages is measured rather than estimated, in
+ * `.docs/code-graph-acceptance.md`: graded against the TypeScript compiler, 99.4-99.7% precision
+ * and 81.8-92.6% recall over plain and member call sites with in-repo targets. That is one
+ * language at the call shapes the queries claim, and it says nothing about the other fourteen.
  */
 
 import { languageForPath } from './languages.js';
