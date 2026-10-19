@@ -364,3 +364,31 @@ test('isKnownLanguage and languageById agree with the bundled set', () => {
   assert.equal(languageById('rust')?.extensions[0], '.rs');
   assert.equal(languageById('cobol'), undefined);
 });
+
+test('a function assigned to a const is a definition, including the React HOC form', async () => {
+  // Found by sampling unresolved call sites: aider's javascript query has this pattern and its
+  // typescript one does not, so `const f = () => {}` was invisible. In modern TypeScript and
+  // React that is most functions - `pushBlock` in src/ui/App.tsx had 75 call sites and no
+  // definition at all.
+  const source = [
+    'const plainArrow = (n: number) => n * n;',
+    'const funcExpr = function (n: number) { return n; };',
+    'const wrapped = useCallback((lines: string[]) => lines, []);',
+    'const notAFunction = compute(1, 2);',
+  ].join('\n');
+
+  const defs = (await extractTags(source, 'typescript')).filter((t) => t.kind === 'def').map((t) => t.name);
+
+  assert.ok(defs.includes('plainArrow'), `arrow function missing from [${defs.join(', ')}]`);
+  assert.ok(defs.includes('funcExpr'), 'function expression should be a definition');
+  assert.ok(defs.includes('wrapped'), 'useCallback-wrapped arrow should be a definition');
+  assert.ok(
+    !defs.includes('notAFunction'),
+    'a plain call assigned to a const is a value, not a function definition - matching on the ' +
+      'arrow-function argument is what keeps this precise',
+  );
+
+  // The same patterns must be in the tsx query, since .tsx is where React code lives.
+  const tsxDefs = (await extractTags(source, 'tsx')).filter((t) => t.kind === 'def').map((t) => t.name);
+  assert.ok(tsxDefs.includes('plainArrow') && tsxDefs.includes('wrapped'), 'tsx query should match typescript');
+});

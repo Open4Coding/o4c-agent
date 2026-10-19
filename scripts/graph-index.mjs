@@ -20,12 +20,14 @@ const graphMod = (name) => pathToFileURL(join(DIST, 'graph', name)).href;
 
 let GraphStore, GRAPH_DB_FILENAME, extractTagsForPath, languageForPath;
 let rankDefinitions, fitToBudget, estimateTextTokens, skipReasonFor;
+let resolveCallEdges, resolveName;
 try {
   ({ GraphStore, GRAPH_DB_FILENAME } = await import(graphMod('graphStore.js')));
   ({ extractTagsForPath } = await import(graphMod('tags.js')));
   ({ languageForPath } = await import(graphMod('languages.js')));
   ({ rankDefinitions, fitToBudget } = await import(graphMod('ranker.js')));
   ({ skipReasonFor } = await import(graphMod('indexFilter.js')));
+  ({ resolveCallEdges, resolveName } = await import(graphMod('resolve.js')));
   ({ estimateTextTokens } = await import(
     pathToFileURL(join(DIST, 'agent', 'contextEntry.js')).href
   ));
@@ -167,6 +169,21 @@ for (const budget of [1000, 4000, 16000]) {
     fit.probes + ' probes');
 }
 
+// ---- Resolution. The first honest look at how much of the graph can be resolved at all.
+{
+  const t2 = performance.now();
+  const r = resolveCallEdges(store);
+  const ms = performance.now() - t2;
+  const pct = (n) => ((n / Math.max(r.counts.callSites, 1)) * 100).toFixed(1) + '%';
+  console.log('');
+  console.log('resolve time      ' + ms.toFixed(0) + ' ms');
+  console.log('call sites        ' + r.counts.callSites);
+  console.log('  resolved        ' + String(r.counts.resolved).padStart(6) + '  ' + pct(r.counts.resolved));
+  console.log('  ambiguous       ' + String(r.counts.ambiguous).padStart(6) + '  ' + pct(r.counts.ambiguous) + '  (call_reference, never asserted)');
+  console.log('  unresolved      ' + String(r.counts.unresolved).padStart(6) + '  ' + pct(r.counts.unresolved) + '  (library/stdlib, or a gap)');
+  console.log('edges emitted     ' + r.counts.edges);
+}
+
 if (searchTerm) {
   console.log('');
   console.log('searchDefinitions(' + JSON.stringify(searchTerm) + ')');
@@ -175,6 +192,14 @@ if (searchTerm) {
   for (const h of hits) {
     console.log('  ' + h.name.padEnd(28) + h.kind.padEnd(10) + h.path + ':' + h.line);
   }
+
+  const verdict = resolveName(store, searchTerm);
+  console.log('');
+  console.log('resolveName(' + JSON.stringify(searchTerm) + ') -> ' + verdict.verdict);
+  console.log('  ' + verdict.note);
+  console.log('  scanned: ' + verdict.scanned.filesIndexed + ' files, ' +
+    verdict.scanned.definitionsIndexed + ' definitions, ' +
+    verdict.scanned.candidatesFound + ' candidates');
 
   const defs = store.definitionsOf(searchTerm);
   if (defs.length) {
