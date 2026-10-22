@@ -10,7 +10,10 @@
  * **It reuses `walkFiles` from `src/tools/searchUtils.ts`** rather than walking its own way. The
  * graph exists to answer questions about the files `grep_files` and `glob_files` can see, so
  * sharing one walker means the two can never disagree about what the project contains. The cost
- * is that the graph inherits that walker's skip list, which is the right default.
+ * is that the graph inherits that walker's skip list, which is the right default - and since
+ * 2026-10-22 that includes `.gitignore`, which the acceptance measurement asked for: 32 untracked
+ * scratch files in this repository's own `.tmp-repro/` were being indexed like source and
+ * contributed 27 definitions of `write` between them.
  *
  * **It skips the parse, not the read, when a file is unchanged.** Freshness is a hash of the
  * bytes (`GraphStore.freshness`), so the file has to be read to know. Reading is cheap; the
@@ -127,7 +130,7 @@ export async function indexProject(
   };
 
   const seen = new Set<string>();
-  const entries = await walkFiles(root);
+  const { entries } = await walkFiles(root);
 
   for (const entry of entries) {
     if (entry.isDirectory) continue;

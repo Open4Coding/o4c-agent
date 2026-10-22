@@ -8,7 +8,8 @@ export const globTool: Tool = {
   description:
     'Find files and directories matching a glob pattern (directories are shown with a trailing /). ' +
     'Supports * (any chars except /), ** (recursive directories), and ? (a single char). Use pattern ' +
-    '"*" to list the immediate contents of a directory. Returns matching paths relative to the given base directory.',
+    '"*" to list the immediate contents of a directory. Returns matching paths relative to the given base directory. ' +
+    'Files excluded by .gitignore are not listed.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -22,10 +23,18 @@ export const globTool: Tool = {
     const baseDir = String(input.path ?? '.');
     try {
       const regex = globToRegExp(pattern);
-      const entries = await walkFiles(baseDir);
-      const matches = entries.filter((e) => regex.test(e.path));
+      const walked = await walkFiles(baseDir);
+      const matches = walked.entries.filter((e) => regex.test(e.path));
 
-      if (matches.length === 0) return `No files matched "${pattern}" under "${baseDir}".`;
+      if (matches.length === 0) {
+        // Same reasoning as `grep_files`: an empty listing is the only point where the number of
+        // paths `.gitignore` removed changes what the result means.
+        const unsearched =
+          walked.ignored > 0
+            ? ` ${walked.ignored} path(s) are excluded by .gitignore.`
+            : '';
+        return `No files matched "${pattern}" under "${baseDir}".${unsearched}`;
+      }
 
       const truncated = matches.length > MAX_RESULTS;
       const shown = matches.slice(0, MAX_RESULTS).map((e) => (e.isDirectory ? `${e.path}/` : e.path));

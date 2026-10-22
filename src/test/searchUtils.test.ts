@@ -49,7 +49,7 @@ test('walkFiles lists directories alongside files, with no trailing slash on the
     await writeFile(join(dir, 'top.txt'), 'hello');
     await writeFile(join(dir, 'sub', 'nested.txt'), 'world');
 
-    const entries = await walkFiles(dir);
+    const { entries } = await walkFiles(dir);
     const byPath = new Map(entries.map((e) => [e.path, e.isDirectory]));
 
     assert.equal(byPath.get('sub'), true);

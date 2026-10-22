@@ -33,6 +33,7 @@ const { languageForPath } = await import(g('languages.js'));
 const { skipReasonFor } = await import(g('indexFilter.js'));
 const { resolveCallEdges } = await import(g('resolve.js'));
 const { isAssertedCall } = await import(g('edgeKind.js'));
+const { walkFiles } = await import(pathToFileURL(join(O4C, 'dist', 'tools', 'searchUtils.js')).href);
 const { grade, rate, formatRate, pct } = await import(g('grading.js'));
 
 // The second repository is a clone outside this one, so its location is not knowable from here.
@@ -52,7 +53,11 @@ if (existsSync(join(SECOND_REPO, 'tsconfig.json'))) {
   console.log('Pass one as the first argument to restore the cross-repository cells.\n');
 }
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'lib', '.o4c', 'coverage']);
+// No skip list of its own any more. Until 2026-10-22 this file walked the tree itself and skipped
+// `lib`, `.o4c`, `coverage` and every dotted directory, which meant the graded figures were taken
+// over a *different* file set than the product indexes - and the difference was invisible from
+// either side. It now uses the product's own `walkFiles`, which is what makes "indexes a
+// repository exactly as o4c would" below a statement rather than an aspiration.
 
 /** A test file by path, on both sides of the comparison, by the same rule. */
 function isTestPath(path) {
@@ -60,19 +65,6 @@ function isTestPath(path) {
     /(^|\/)(test|tests|__tests__)\//.test(path) ||
     /\.(test|spec)\.[cm]?[jt]sx?$/.test(path)
   );
-}
-
-async function walk(dir, out = []) {
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        await walk(join(dir, entry.name), out);
-      }
-    } else if (entry.isFile()) {
-      out.push(join(dir, entry.name));
-    }
-  }
-  return out;
 }
 
 /** Indexes a repository exactly as o4c would, and returns the resolver's own output. */
@@ -83,8 +75,11 @@ async function indexRepo(root) {
   let skipped = 0;
   let noGrammar = 0;
 
-  for (const absolute of await walk(root)) {
-    const path = relative(root, absolute).split('\\').join('/');
+  const walked = await walkFiles(root);
+  for (const entry of walked.entries) {
+    if (entry.isDirectory) continue;
+    const path = entry.path;
+    const absolute = join(root, path);
     const language = languageForPath(path);
     if (!language) {
       noGrammar++;

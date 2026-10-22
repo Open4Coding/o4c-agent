@@ -9,7 +9,8 @@ export const grepTool: Tool = {
   name: 'grep_files',
   description:
     'Search file contents for a regular expression pattern. Returns matching lines as "path:line: content". ' +
-    'Optionally restrict the search to files matching a glob pattern.',
+    'Optionally restrict the search to files matching a glob pattern. ' +
+    'Files excluded by .gitignore are not searched; use run_shell with grep to search those too.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -32,7 +33,8 @@ export const grepTool: Tool = {
     }
 
     try {
-      let entries = await walkFiles(baseDir);
+      const walked = await walkFiles(baseDir);
+      let entries = walked.entries;
       if (glob) {
         const globRegex = globToRegExp(glob);
         entries = entries.filter((e) => globRegex.test(e.path));
@@ -56,7 +58,17 @@ export const grepTool: Tool = {
         }
       }
 
-      if (results.length === 0) return `No matches for "${pattern}" under "${baseDir}".`;
+      if (results.length === 0) {
+        // The one place the ignore count is worth its tokens. A model reads "no matches" as
+        // "this does not exist anywhere", and that inference is wrong when the answer was in a
+        // file `.gitignore` hid. On a search that *did* match, the same line would be noise on
+        // every call, so it is not printed there.
+        const unsearched =
+          walked.ignored > 0
+            ? ` ${walked.ignored} path(s) were not searched because .gitignore excludes them.`
+            : '';
+        return `No matches for "${pattern}" under "${baseDir}".${unsearched}`;
+      }
       return results.join('\n') + (results.length >= MAX_RESULTS ? '\n... (results truncated)' : '');
     } catch (err) {
       return `Error searching "${pattern}" under "${baseDir}": ${(err as Error).message}`;

@@ -37,9 +37,9 @@ reporting filter on the caller's path changes, so the cells differ by exactly on
 
 | Excluded | Count (o4c / repomix) | Why |
 |---|---|---|
-| `new X()` | 591 / 651 | The TypeScript query captures it as `name.reference.class`, which `isAssertedCall` already excludes. Grading it would measure a claim the graph does not make. |
+| `new X()` | 598 / 651 | The TypeScript query captures it as `name.reference.class`, which `isAssertedCall` already excludes. Grading it would measure a claim the graph does not make. |
 | `a["b"]()`, `(f ?? g)()` | 47 / 144 | No query pattern captures these shapes, so they are not claims either. |
-| Targets outside the repository | 9,550 / 16,011 | A call into `node_modules` or the standard library is not something the graph is wrong about; it is outside what the graph indexes. These are the `outOfUniverse` bucket — counted as neither right nor wrong. |
+| Targets outside the repository | 9,733 / 16,011 | A call into `node_modules` or the standard library is not something the graph is wrong about; it is outside what the graph indexes. These are the `outOfUniverse` bucket — counted as neither right nor wrong. |
 
 The constructor exclusion is defensible but it also **flatters recall**, so the figures block
 reports recall again over a denominator widened by every in-repo constructor call, counting all of
@@ -63,14 +63,24 @@ This matters for reading the step-5 comparison below: **repomix's denominators a
 the two runs** (3,966 and 1,219 oracle edges both times) because that repository was untouched, so
 its deltas are exact. o4c's are not, and are quoted only where the raw count is the point.
 
-There is a second, less respectable reason the o4c cells wobble. Nothing in o4c reads
-`.gitignore` — neither `walkFiles` nor this harness — so the 32 untracked scratch files in
-`.tmp-repro/`, left over from a terminal-debugging session, are indexed like source. They
-contribute 27 definitions of `write` between them, which makes an already ambiguous name far worse
-and costs the o4c cells recall that a clean checkout would not lose. The harness deliberately does
-**not** skip them, because it must index exactly what the product indexes; teaching the walker
-about `.gitignore` is a real change with its own consequences for `grep_files` and `glob_files`,
-and it is on the list rather than smuggled in here.
+### The harness and the product now walk the same files
+
+Until 2026-10-22 this harness walked the tree with a skip list of its own — `node_modules`, `.git`,
+`dist`, `lib`, `.o4c`, `coverage`, and every dotted directory — while the product's `walkFiles`
+skipped only the first three. So "indexes a repository exactly as o4c would" was not true, and
+nothing on either side would have revealed it. The harness now calls `walkFiles`, so the graded
+file set is the shipped one by construction.
+
+That correction matters for a claim I made in this document earlier the same day and got wrong.
+o4c's working tree carries 32 untracked scratch files under `.tmp-repro/` which the *product* was
+indexing like source — they contribute 27 definitions of `write` between them, which is a real
+cost to the Code Graph in use. I wrote that this also cost the graded cells recall. It did not:
+the old harness skipped every dotted directory, so those files were never in the measurement at
+all. The product has since been taught to read `.gitignore` (`src/tools/gitignore.ts`), which
+removes them from both sides, and the graded figures barely moved — 93.0% and 91.8% recall in the
+two with-tests cells before and after. A contaminant that only ever affected the product shows up
+in how the tool behaves, not in its score, which is exactly why the two walkers had to be the
+same one.
 
 ---
 
@@ -80,8 +90,8 @@ and it is on the list rather than smuggled in here.
 
 | Cell | Precision | Recall | Recall incl. constructors | F1 |
 |---|---|---|---|---|
-| o4c-agent, with tests | **99.7%** (6031/6047, 95% CI 99.6%-99.8%) | **93.0%** (6031/6488, 95% CI 92.3%-93.6%) | 88.2% (6031/6839) | 0.962 |
-| o4c-agent, without tests | **99.3%** (1185/1193, 95% CI 98.7%-99.7%) | **93.7%** (1185/1265, 95% CI 92.2%-94.9%) | 91.9% (1185/1289) | 0.964 |
+| o4c-agent, with tests | **99.7%** (6112/6128, 95% CI 99.6%-99.8%) | **93.0%** (6112/6569, 95% CI 92.4%-93.6%) | 88.3% (6112/6922) | 0.963 |
+| o4c-agent, without tests | **99.3%** (1205/1213, 95% CI 98.7%-99.7%) | **93.8%** (1205/1285, 95% CI 92.3%-95.0%) | 91.9% (1205/1311) | 0.965 |
 | repomix, with tests | **99.7%** (3642/3654, 95% CI 99.4%-99.8%) | **91.8%** (3642/3966, 95% CI 90.9%-92.6%) | 87.4% (3642/4166) | 0.956 |
 | repomix, without tests | **99.7%** (1152/1155, 95% CI 99.2%-99.9%) | **94.5%** (1152/1219, 95% CI 93.1%-95.6%) | 83.0% (1152/1388) | 0.971 |
 
@@ -89,7 +99,7 @@ Precision is over *graded* edges — those whose call site the oracle ruled on. 
 in-repo oracle edge, and its denominator includes edges the graph answered **wrongly**, so a wrong
 answer is penalised twice: once in precision and once in recall.
 
-Target line numbers agree on 100.0% (6029/6031), 99.8% (1183/1185), 100.0% (3641/3642) and
+Target line numbers agree on 100.0% (6110/6112), 99.8% (1203/1205), 100.0% (3641/3642) and
 99.9% (1151/1152) of the recovered edges respectively. That is not a headline figure but it is
 useful corroboration: if the two sides were accidentally agreeing on files for some structural
 reason, line numbers would not line up as well.
@@ -194,8 +204,8 @@ again from the inside:
 
 | Resolved only because of… | o4c | repomix |
 |---|---|---|
-| an import statement | 46 | 360 |
-| the call's shape | **185** | 66 |
+| an import statement | 43 | 360 |
+| the call's shape | **184** | 66 |
 
 ### It took three kinds, and two of them was actively worse
 
@@ -249,9 +259,9 @@ syntax.
 
 `resolve.ts` prefers a definition in the referencing file when a name is shared, and its own
 comment said the acceptance test would decide whether that was justified. Measured across the four
-cells it was **right 1,875 times and wrong 15** — a ratio of 125 to 1. It keeps.
+cells it was **right 1,817 times and wrong 15** — a ratio of 121 to 1. It keeps.
 
-That is 1,875 answers that would otherwise have been declined as `low_confidence`, bought for 15
+That is 1,817 answers that would otherwise have been declined as `low_confidence`, bought for 15
 wrong ones. The ratio improved without the rule changing, because the call-shape exclusion now
 removes some wrong same-file candidates before this rule can prefer them. Note it is a ratio, not a free win: the 19 are real errors, and they are concentrated
 in exactly the case the next section describes.

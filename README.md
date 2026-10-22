@@ -7,11 +7,12 @@ The core agent loop for open4coding, invoked as `o4c`.
 - Prompt -> LLM call -> tool-call parsing -> tool execution -> repeat until done.
 - Anthropic (Claude) provider, designed so other providers can be added without touching the loop.
 - Tools: `read_file`, `write_file`, `run_shell`, `glob_files`, `grep_files`, `code_graph`, plus any
-  tool proxied from a configured MCP server.
+  tool proxied from a configured MCP server. `glob_files` and `grep_files` skip what `.gitignore`
+  excludes; `run_shell` does not, so it remains the way to search build output.
 
-Plugin architecture (protocol-over-process-boundary) is deliberately deferred to v0.2, once this
-core loop is proven end-to-end. See `docs/PATH_FORWARD.md` in the research workspace for the
-full roadmap and rationale.
+Plugins run as MCP servers over a process boundary - the client half shipped in `src/mcp/`.
+Exposing o4c's *own* tools as an MCP server is still deferred, since nothing consumes it yet.
+See `docs/PATH_FORWARD.md` in the research workspace for the full roadmap and rationale.
 
 ## Setup
 
