@@ -35,6 +35,16 @@ export interface GraphLanguage {
   readonly id: string;
   /** Lower-case file extensions, leading dot included. */
   readonly extensions: readonly string[];
+  /**
+   * Whether this language's tag query captures `o.f()` differently from `f()`.
+   *
+   * A property of the bundled **query file**, not of the language, which is why it is recorded
+   * here beside the query's basename rather than inferred at resolution. Most of the bundled
+   * queries use one capture for every invocation: Java emits `name.reference.method` for both
+   * shapes and Python emits `name.reference.call` for both, so for those the stored kind says
+   * nothing about the shape and resolution must read nothing into it.
+   */
+  readonly distinguishesCallShape?: true;
 }
 
 /**
@@ -54,14 +64,14 @@ export interface GraphLanguage {
  */
 export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
   // rank 1
-  { id: 'javascript', extensions: ['.js', '.mjs', '.cjs', '.jsx'] },
+  { id: 'javascript', extensions: ['.js', '.mjs', '.cjs', '.jsx'], distinguishesCallShape: true },
   // rank 4
   { id: 'python', extensions: ['.py', '.pyi'] },
   // rank 5 - a shell script's call graph really is its command invocations
   { id: 'bash', extensions: ['.sh', '.bash', '.zsh'] },
   // rank 6
-  { id: 'typescript', extensions: ['.ts', '.mts', '.cts'] },
-  { id: 'tsx', extensions: ['.tsx'] },
+  { id: 'typescript', extensions: ['.ts', '.mts', '.cts'], distinguishesCallShape: true },
+  { id: 'tsx', extensions: ['.tsx'], distinguishesCallShape: true },
   // rank 7
   { id: 'c_sharp', extensions: ['.cs'] },
   // rank 8
