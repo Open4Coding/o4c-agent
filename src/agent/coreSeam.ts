@@ -76,12 +76,19 @@ export interface CoreComponent {
    *   never seen, and they live for exactly one request - which is the correct lifetime for a
    *   retrieval result and is unexpressible if the hook mutates shared state instead.
    *
-   * **Known limitation, stated rather than papered over**: `visibleTokenEstimate` and therefore
-   * the compaction triggers are computed from `AgentLoop.entries`, not from what a hook returns.
-   * A hook that injects retrieved history is spending tokens the compaction math does not know
-   * about, which is why `contextWindow` and `maxTokens` are on `RequestBuild` - a hook budgets
-   * itself. Teaching compaction about injected entries is a real piece of work and it belongs to
-   * whichever feature first needs it, not to the seam.
+   * **The accounting measures this projection, as of 2026-10-22.** It did not when the seam was
+   * built: the compaction triggers and the pre-send hard stop read `visibleTokenEstimate`, the
+   * whole visible history, so a hook that *hid* entries was ignored by the very machinery that
+   * decides whether to compact - and compaction would then spend a provider call summarising
+   * material the hook had already stopped sending. `AgentLoop.refreshRequestProjection` runs this
+   * pipeline before anything reads an estimate and caches the result per entry version; see
+   * `src/test/seamAccounting.test.ts`.
+   *
+   * What that does **not** solve is a hook that *adds* entries. The estimate will see them, which
+   * is a strict improvement, but nothing stops a retrieval component from injecting more than the
+   * window can hold in the first place - which is why `contextWindow` and `maxTokens` are on
+   * `RequestBuild`. A hook still budgets itself; the difference is that it is no longer invisible
+   * to the accounting if it gets it wrong.
    */
   buildRequest?(build: RequestBuild): readonly ContextEntry[] | Promise<readonly ContextEntry[]>;
 

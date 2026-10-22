@@ -223,10 +223,15 @@ test('a request hook is given the context window and this request\'s max tokens'
 
   await loop.run('hello', { contextWindow: 100_000 });
 
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0].contextWindow, 100_000);
-  // A hook cannot budget retrieval without knowing what the response is already allowed.
-  assert.equal(typeof seen[0].maxTokens, 'number');
+  // Twice per turn since the token accounting started measuring this projection: once for the
+  // pre-turn compaction decision and once for the request, with the user's own message landing
+  // between them. `seamAccounting.test.ts` pins that count and explains it.
+  assert.equal(seen.length, 2);
+  assert.ok(seen.every((s) => s.contextWindow === 100_000));
+  // A hook cannot budget retrieval without knowing what the response is already allowed. This is
+  // the per-response *ceiling* rather than the figure the request will carry - see
+  // `refreshRequestProjection` for why that is the conservative half of a circular dependency.
+  assert.ok(seen.every((s) => typeof s.maxTokens === 'number'));
 });
 
 // ---------------------------------------------------------------------------------------------

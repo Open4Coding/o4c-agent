@@ -50,6 +50,7 @@ import { parseOsArg } from './osKeyboardNotes.js';
 import { detectCurrentOs, type OsKey } from './platform.js';
 import type { Line, LineKind } from './types.js';
 import { RESPONSE_TAG, THINK_TAG, infoLine, labelled, userLine } from './labels.js';
+import { parseWindowSetting, describeWindowSetting } from './windowSetting.js';
 import {
   initialTextWindow,
   makeBlock,
@@ -1206,6 +1207,7 @@ export function App({
         };
         const totalTokens = usage.input + usage.output;
         const visible = loop.getVisibleTokenEstimate();
+        const windowSetting = loop.slidingWindowSettings();
         // The fill graph - only when contextWindow is known (config.json's opt-in key, per
         // StatusBar's own reasoning: no per-model max-context registry exists yet, so this
         // never guesses a number). estimateTokens() is a chars/4 heuristic (contextEntry.ts),
@@ -1226,6 +1228,15 @@ export function App({
           `  Output tokens: ${usage.output}`,
           `  Total tokens:  ${totalTokens}`,
           `  Messages in history: ${loop.getMessages().length}`,
+          // Only when it is on. A window makes the model stop seeing part of the conversation,
+          // so the one place that reports context has to say so - but a line saying "off" on
+          // every /context would be noise for the default every session runs in.
+          ...(windowSetting
+            ? [
+                `  Sending only the recent ${describeWindowSetting(windowSetting)} - ` +
+                  'older messages are kept but not sent (/window off).',
+              ]
+            : []),
         ].join('\n');
         pushBlock([
           userLine(input),
@@ -1337,6 +1348,50 @@ export function App({
           void runLogger.log({ type: 'system', sub_type: 'info', command: '/think', level: chosen });
         } else {
           pushBlock([infoLine('Thinking level unchanged.')]);
+        }
+      } else if (input === '/window' || input.startsWith('/window ')) {
+        pushBlock([userLine(input)]);
+        // Local and immediate: a window changes only what the next request *sends*, so there is
+        // nothing to call the model about and nothing to undo. See `AgentLoop.setSlidingWindow`.
+        const typed = input.slice('/window'.length).trim().toLowerCase();
+        const current = loop.slidingWindowSettings();
+
+        if (!typed) {
+          pushBlock([
+            infoLine(
+              current
+                ? `Context window limit is on (${describeWindowSetting(current)}). ` +
+                  '/window off turns it off; nothing was deleted.'
+                : 'Context window limit is off - the whole conversation is sent. ' +
+                  'Set one with /window 40000 or /window 50%.',
+            ),
+          ]);
+        } else if (typed === 'off' || typed === '0') {
+          loop.setSlidingWindow(undefined);
+          pushBlock([infoLine('Context window limit off - the next request carries the whole conversation again.')]);
+          void runLogger.log({ type: 'system', sub_type: 'info', command: '/window', setting: 'off' });
+        } else {
+          const parsed = parseWindowSetting(typed);
+          if (!parsed) {
+            pushBlock([
+              infoLine(
+                `"${typed}" is not a window size - give a token count (/window 40000), ` +
+                  'a share of the context window (/window 50%), or off.',
+              ),
+            ]);
+          } else {
+            loop.setSlidingWindow(parsed);
+            // Said plainly, because this is the one command that makes the model stop seeing
+            // part of the conversation. A silent success here would look like a bug later.
+            pushBlock([
+              infoLine(
+                `Context window limit on (${describeWindowSetting(parsed)}). ` +
+                  'Older messages stay in history and in the session file - they are simply not sent. ' +
+                  '/window off restores them.',
+              ),
+            ]);
+            void runLogger.log({ type: 'system', sub_type: 'info', command: '/window', setting: typed });
+          }
         }
       } else if (input === '/set' || input === '/config') {
         // Submitted rather than chosen from the dropdown. The dropdown owns Enter while it is open,

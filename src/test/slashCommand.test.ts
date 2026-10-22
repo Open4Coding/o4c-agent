@@ -52,6 +52,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/keyboard-linux',
     '/mode',
     '/think',
+    '/window',
     '/colorview',
     '/help',
     '/exit',

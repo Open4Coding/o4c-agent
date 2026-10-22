@@ -1,11 +1,20 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
-import { CoreRegistry, type CoreComponent } from './coreSeam.js';
+import { CoreRegistry, type CoreComponent, type SeamWarning } from './coreSeam.js';
+import { slidingWindowControl, type SlidingWindowControl, type SlidingWindowOptions } from './slidingWindow.js';
 
 const INITIAL_TOKEN_RATIO = 1.5;
 const MIN_TOKEN_RATIO = 0.5;
 const MAX_TOKEN_RATIO = 3;
+/**
+ * Absolute ceiling on what one response may generate, whatever the window size.
+ *
+ * Named because two places need the same number: the per-request `maxTokens` below, and the
+ * `maxTokens` figure a `buildRequest` hook is told about. See the long comment at the request's
+ * own `dynamicMaxTokens` for the two live incidents that produced this value.
+ */
+const MAX_RESPONSE_TOKENS = 32768;
 
 import {
   aiCompactionEntry,
@@ -195,6 +204,38 @@ export class AgentLoop {
    * would currently send - §2.3's eventual compaction trigger reads this. Maintained incrementally
    * (indexEntry/deindexEntry) so checking it every turn is O(1), not a rescan of the whole log. */
   private visibleTokenEstimate = 0;
+  /**
+   * Bumped whenever the visible entry set changes, so a cached request projection can tell whether
+   * it is still current.
+   *
+   * A counter and not a timestamp, for the same reason `files.index_seq` is one in the Code Graph
+   * store: `Date.now()` on Windows advances in steps of up to 16 ms, and two changes inside one
+   * tick are exactly the case that has to be distinguishable.
+   */
+  private entryVersion = 0;
+  /**
+   * What the seam's `buildRequest` pipeline produced for the request about to go out, and its
+   * token estimate - the thing the compaction triggers and the hard stop now measure.
+   *
+   * This closes the limitation `coreSeam.ts` recorded when the seam was built: the accounting used
+   * to read `visibleTokenEstimate`, i.e. the whole visible history, rather than what a hook
+   * actually returns. With a sliding window active that was not a cosmetic difference - compaction
+   * would have fired on history the window had already dropped, spending an LLM call to destroy
+   * detail that was not being sent anyway (and destroying the reversibility that is the point of
+   * the window), while the pre-send hard stop would have refused requests that were in fact well
+   * within the budget.
+   *
+   * Cached per entry version rather than recomputed per read, because a hook may be expensive - a
+   * retrieval component runs a search - and the accounting reads the estimate up to six times in a
+   * turn. `undefined` means "no hook is registered", in which case every reader falls back to
+   * `visibleTokenEstimate` and the whole mechanism is inert. That is what makes this change a
+   * provable no-op for every session that registers no request hook.
+   */
+  /** Created and registered by `setSlidingWindow` on first use - see there for why not earlier. */
+  private slidingWindow: SlidingWindowControl | undefined;
+  private requestProjection:
+    | { readonly version: number; readonly entries: readonly ContextEntry[]; readonly estimate: number }
+    | undefined;
   private usage: CumulativeUsage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
   /** The real, API-reported prompt-token count from the most recent request, and what
    * `visibleTokenEstimate` was at that exact moment - together let `hybridPromptTokenEstimate()`
@@ -205,7 +246,16 @@ export class AgentLoop {
    * read, not guessed - and Codex's `get_total_token_usage()`, both doing the same thing
    * independently. `undefined` until the first real response of the process's lifetime. */
   private lastRealPromptTokens: number | undefined;
-  private visibleEstimateAtLastRealCount = 0;
+  /**
+   * The *projected* estimate at the moment of that real count - `visibleTokenEstimate` when no
+   * request hook is registered, which is every session that does not turn one on.
+   *
+   * It has to be the projected figure rather than the visible one, or the delta would be measured
+   * from a different baseline than it is added to: with a window active, `realCount` describes a
+   * small request while the baseline described the whole history, and the difference is not a
+   * delta of anything.
+   */
+  private baseEstimateAtLastRealCount = 0;
   /** Last reported decode rate, for the status bar - see `getTokensPerSecond()`. */
   private lastTokensPerSecond: number | undefined;
   /**
@@ -313,7 +363,41 @@ export class AgentLoop {
     return this.core.names;
   }
 
+  /**
+   * Turns the sliding context window on with these settings, or off with `undefined`.
+   *
+   * The component is registered **on first use**, not at construction, and that is a deliberate
+   * trade rather than laziness. `hasRequestHooks()` is what lets a session with no core components
+   * skip the projection pipeline entirely, and a window that is merely *available* must not cost
+   * every session an entry-list pass per turn to find out it is switched off. The consequence is
+   * that this component joins the pipeline after anything registered earlier in the session, which
+   * matters only once a second request hook exists - and `registerCore`'s own documentation
+   * already says the wiring order is a decision the wiring site makes.
+   *
+   * Nothing is mutated when it goes on or off: a window only changes what is *sent*, so turning it
+   * off restores the full context on the next request. That is the property that makes it the
+   * thing to roll back to, and it is why this is a one-line switch rather than an operation.
+   */
+  setSlidingWindow(options: SlidingWindowOptions | undefined): void {
+    if (!this.slidingWindow) {
+      if (!options) return; // Off and never used: nothing to register and nothing to turn off.
+      this.slidingWindow = slidingWindowControl(options);
+      this.registerCore(this.slidingWindow.component);
+      return;
+    }
+    this.slidingWindow.set(options);
+  }
+
+  /** The live sliding-window settings, or `undefined` when it is off. */
+  slidingWindowSettings(): SlidingWindowOptions | undefined {
+    return this.slidingWindow?.current();
+  }
+
   private indexEntry(entry: ContextEntry): void {
+    // Every change to the entry set passes through here or through `deindexEntry` - including a
+    // compaction flipping `agent_visible`, which does deindex/mutate/reindex precisely so this
+    // bookkeeping stays correct - so this is the one place the version needs bumping.
+    this.entryVersion++;
     this.entriesById.set(entry.id, entry);
     if (entry.agent_visible !== false) {
       this.visibleTokenEstimate += estimateTokens(entry);
@@ -321,6 +405,7 @@ export class AgentLoop {
   }
 
   private deindexEntry(entry: ContextEntry): void {
+    this.entryVersion++;
     this.entriesById.delete(entry.id);
     if (entry.agent_visible !== false) {
       this.visibleTokenEstimate -= estimateTokens(entry);
@@ -337,6 +422,8 @@ export class AgentLoop {
     this.entries = [];
     this.entriesById.clear();
     this.visibleTokenEstimate = 0;
+    // Explicitly, because this drops the entries without deindexing them one by one.
+    this.entryVersion++;
     this.usage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
   }
 
@@ -386,6 +473,8 @@ export class AgentLoop {
     this.entries = [...entries];
     this.entriesById = new Map();
     this.visibleTokenEstimate = 0;
+    // Explicitly: loading an empty session indexes nothing, so the loop below would not bump it.
+    this.entryVersion++;
     for (const entry of this.entries) this.indexEntry(entry);
     this.usage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
   }
@@ -470,12 +559,73 @@ export class AgentLoop {
    * verified from. Falls back to the plain estimate (history + overhead) before the first real
    * response of the process's lifetime. */
   private hybridPromptTokenEstimate(modeInstruction?: string): number {
+    const base = this.baseTokenEstimate();
     if (this.lastRealPromptTokens !== undefined) {
-      const delta = this.visibleTokenEstimate - this.visibleEstimateAtLastRealCount;
+      const delta = base - this.baseEstimateAtLastRealCount;
       // Only growth is scaled up, and never below 1x: a shrink (compaction) stays at chars/4, which keeps the estimate high.
       return this.lastRealPromptTokens + Math.ceil(delta > 0 ? Math.max(1, this.tokenRatio) * delta : delta);
     }
-    return Math.ceil(this.tokenRatio * (this.visibleTokenEstimate + this.overheadTokenEstimate(modeInstruction)));
+    return Math.ceil(this.tokenRatio * (base + this.overheadTokenEstimate(modeInstruction)));
+  }
+
+  /**
+   * The entry-content estimate every other figure is built from: the seam's projection when a
+   * request hook is registered, and the whole visible history otherwise.
+   *
+   * Synchronous on purpose. `maybeMicroCompact` is deliberately synchronous - having no provider
+   * call to make is the entire point of that tier - so the projection is refreshed explicitly by
+   * `refreshRequestProjection()` at the few points in `run()` where the entry set may have moved,
+   * and read without awaiting everywhere else.
+   */
+  private baseTokenEstimate(): number {
+    return this.requestProjection?.version === this.entryVersion
+      ? this.requestProjection.estimate
+      : this.visibleTokenEstimate;
+  }
+
+  /**
+   * Runs the seam's `buildRequest` pipeline and caches the result for this entry version.
+   *
+   * Called before the accounting reads anything, again after a compaction has moved the entries,
+   * and once per provider round-trip - so a turn with no compaction runs the pipeline exactly once
+   * per request, which is what it did before this existed.
+   *
+   * The `maxTokens` a hook is told about is the per-response **ceiling**, not the value the request
+   * will carry. The real figure depends on the prompt estimate, which depends on the projection,
+   * which is what is being computed here; and of the two ways out of that circle, telling a hook
+   * the largest generation budget it might face is the conservative one, because a hook budgeting
+   * its own injections against `contextWindow - maxTokens` must assume the worst case for output
+   * rather than the best.
+   */
+  private async refreshRequestProjection(
+    options: { contextWindow?: number },
+    warn: SeamWarning,
+  ): Promise<void> {
+    if (!this.core.hasRequestHooks()) {
+      this.requestProjection = undefined;
+      return;
+    }
+    if (this.requestProjection?.version === this.entryVersion) return;
+
+    const version = this.entryVersion;
+    const entries = await this.core.buildEntries(
+      {
+        entries: this.entries,
+        contextWindow: options.contextWindow,
+        maxTokens: options.contextWindow
+          ? Math.min(MAX_RESPONSE_TOKENS, Math.floor(options.contextWindow / 4))
+          : undefined,
+      },
+      warn,
+    );
+    let estimate = 0;
+    for (const entry of entries) {
+      if (entry.agent_visible !== false) estimate += estimateTokens(entry);
+    }
+    // Stamped with the version captured *before* the await: a hook is async, and an entry appended
+    // while it ran would make this projection describe a list that no longer exists. Stamping it
+    // old means the next read recomputes instead of trusting it, which is the safe direction.
+    this.requestProjection = { version, entries, estimate };
   }
 
   /**
@@ -960,6 +1110,10 @@ export class AgentLoop {
           options.signal,
           options.modeInstruction,
         );
+        // The compaction above changed the entry set, so the cached projection is stale by
+        // construction; without this the progress check below would compare the new estimate
+        // against a projection taken before the compaction.
+        await this.refreshRequestProjection(options, warnSeam);
         const after = this.hybridPromptTokenEstimate(options.modeInstruction);
         if (after >= before) return; // no progress this round - stop retrying, let hardStopMessage decide
       }
@@ -967,6 +1121,9 @@ export class AgentLoop {
 
     if (options.contextWindow) {
       const compactionSettings = options.compactionSettings ?? compactionSettingsForWindow(options.contextWindow);
+      // Before anything reads an estimate: the triggers below measure what the seam will actually
+      // send, and with a request hook registered that is not the same as the visible history.
+      await this.refreshRequestProjection(options, warnSeam);
       this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
       await this.maybeCompact(
         options.contextWindow,
@@ -1098,10 +1255,21 @@ export class AgentLoop {
       // streamFilter.ts's own doc comment for why this needs to be stateful across chunks).
       const thinkFilter = createThinkTagStripper((text, kind) => onEvent({ type: 'delta', text, kind }));
       let streamed = false;
+      // §5.7's request-construction hook - the one the four core-tier features actually needed,
+      // and the one MCP could never have provided. A hook returns the list to build FROM; it does
+      // not touch `this.entries`, so a retrieved entry lives for exactly this request (see
+      // `CoreComponent.buildRequest`). Run before the estimate is read, because since 2026-10-22
+      // the estimate is of this projection rather than of the whole history; skipped entirely,
+      // not merely a no-op pipeline, when nothing is registered.
+      await this.refreshRequestProjection(options, warnSeam);
+      const requestEntries = this.requestProjection?.entries ?? this.entries;
       // Snapshotted right before the request goes out - response.usage.inputTokens (below) will
       // report what was actually sent as of exactly this moment, so this is the estimate value
-      // that real count corresponds to. See hybridPromptTokenEstimate()'s own doc comment.
-      const visibleEstimateAtSendTime = this.visibleTokenEstimate;
+      // that real count corresponds to. See hybridPromptTokenEstimate()'s own doc comment. The
+      // projected figure, not the visible one: it has to describe the same request the real count
+      // will describe, or the ratio calibration and the delta anchor are both measuring one thing
+      // against another.
+      const baseEstimateAtSendTime = this.baseTokenEstimate();
       // Real bug found via direct reproduction (2026-10-03): without this, max_tokens stayed a
       // single static value (half the context window, set once at startup) for every request
       // regardless of prompt size - confirmed live, a single response ran 9+ minutes generating
@@ -1133,27 +1301,11 @@ export class AgentLoop {
               // 32,768 at 229K) while staying well under the half-window value that caused the
               // original runaway - and this ceiling is only a backstop anyway: the remaining-budget
               // term below is the real constraint as context fills.
-              Math.min(32768, Math.floor(options.contextWindow / 4)),
+              Math.min(MAX_RESPONSE_TOKENS, Math.floor(options.contextWindow / 4)),
               options.contextWindow - this.hybridPromptTokenEstimate(options.modeInstruction) - hardStopReserveTokens(options.contextWindow),
             ),
           )
         : undefined;
-      // §5.7's request-construction hook - the one the four core-tier features actually needed,
-      // and the one MCP could never have provided. A hook returns the list to build FROM; it does
-      // not touch `this.entries`, so a retrieved entry lives for exactly this request (see
-      // `CoreComponent.buildRequest`). Skipped entirely, not merely a no-op pipeline, when nothing
-      // is registered: this runs on every provider round-trip of every turn, and the whole reason
-      // the components are in-process is that this path is hot.
-      const requestEntries = this.core.hasRequestHooks()
-        ? await this.core.buildEntries(
-            {
-              entries: this.entries,
-              contextWindow: options.contextWindow,
-              maxTokens: dynamicMaxTokens,
-            },
-            warnSeam,
-          )
-        : this.entries;
       const request: CompletionRequest = {
         systemPrompt: systemPromptForRequest,
         messages: toWireMessages(
@@ -1178,12 +1330,12 @@ export class AgentLoop {
         onProviderCall({ request, response });
         thinkFilter.flush();
         if (response.usage) {
-          const plainEstimateAtSend = visibleEstimateAtSendTime + this.overheadTokenEstimate(options.modeInstruction);
+          const plainEstimateAtSend = baseEstimateAtSendTime + this.overheadTokenEstimate(options.modeInstruction);
           if (plainEstimateAtSend > 0) {
             this.tokenRatio = Math.min(MAX_TOKEN_RATIO, Math.max(MIN_TOKEN_RATIO, response.usage.inputTokens / plainEstimateAtSend));
           }
           this.lastRealPromptTokens = response.usage.inputTokens;
-          this.visibleEstimateAtLastRealCount = visibleEstimateAtSendTime;
+          this.baseEstimateAtLastRealCount = baseEstimateAtSendTime;
           // Only overwritten when a response actually reported a rate, so the footer keeps showing
           // the last real figure across a compaction call or a provider that reports none, rather
           // than blanking mid-turn.

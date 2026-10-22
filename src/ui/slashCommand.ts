@@ -104,6 +104,13 @@ export const COMMANDS: CommandInfo[] = [
     select: 'run',
   },
   {
+    name: '/window',
+    select: 'run',
+    description:
+      'Send only the recent part of the conversation: /window 40000, /window 50%, or /window off. ' +
+      'Nothing is deleted - turning it off restores the full context.',
+  },
+  {
     name: '/colorview',
     // Runs on Enter: it takes no argument, it just prints the chart.
     select: 'run',

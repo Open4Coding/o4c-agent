@@ -85,18 +85,51 @@ export function windowEntries(
  * `CoreComponent.name`.
  */
 export function slidingWindowComponent(options: SlidingWindowOptions = {}): CoreComponent {
+  const control = slidingWindowControl(options);
+  return control.component;
+}
+
+/**
+ * A component whose window can be turned on and off while the session runs.
+ *
+ * Runtime-switchable rather than a startup flag, because of what this feature *is*: design doc
+ * §2.4 calls it a strategy-level operation - something a session steps back to when it is under
+ * pressure - and a thing you roll back to has to be reachable from where you are. It is also what
+ * makes the reversibility real rather than theoretical: turning it off restores the full context
+ * on the very next request, because nothing was ever changed.
+ */
+export interface SlidingWindowControl {
+  readonly component: CoreComponent;
+  /** The live settings, or `undefined` when the window is off. */
+  current(): SlidingWindowOptions | undefined;
+  /** Turns it on with these settings, or off with `undefined`. */
+  set(next: SlidingWindowOptions | undefined): void;
+}
+
+export function slidingWindowControl(initial?: SlidingWindowOptions): SlidingWindowControl {
+  let active = initial;
+
   return {
-    name: 'sliding-window',
-    buildRequest: ({ entries, contextWindow }: RequestBuild) => {
-      const budget =
-        options.budgetTokens ??
-        (contextWindow === undefined
-          ? undefined
-          : Math.floor(contextWindow * (options.fraction ?? DEFAULT_WINDOW_FRACTION)));
-      // No budget means no basis for a decision. Returning `entries` unchanged is the right
-      // no-op: this component existing must never make a session worse than not having it.
-      if (budget === undefined) return entries;
-      return windowEntries(entries, budget);
+    current: () => active,
+    set: (next) => {
+      active = next;
+    },
+    component: {
+      name: 'sliding-window',
+      buildRequest: ({ entries, contextWindow }: RequestBuild) => {
+        // Off is the common case for a component that is registered on first use and then left
+        // registered, so this is checked before anything else is computed.
+        if (!active) return entries;
+        const budget =
+          active.budgetTokens ??
+          (contextWindow === undefined
+            ? undefined
+            : Math.floor(contextWindow * (active.fraction ?? DEFAULT_WINDOW_FRACTION)));
+        // No budget means no basis for a decision. Returning `entries` unchanged is the right
+        // no-op: this component existing must never make a session worse than not having it.
+        if (budget === undefined) return entries;
+        return windowEntries(entries, budget);
+      },
     },
   };
 }
