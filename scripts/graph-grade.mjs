@@ -28,7 +28,7 @@ const O4C = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const g = (name) => pathToFileURL(join(O4C, 'dist', 'graph', name)).href;
 
 const { GraphStore, GRAPH_DB_FILENAME } = await import(g('graphStore.js'));
-const { extractTagsForPath } = await import(g('tags.js'));
+const { extractFileForPath } = await import(g('tags.js'));
 const { languageForPath } = await import(g('languages.js'));
 const { skipReasonFor } = await import(g('indexFilter.js'));
 const { resolveCallEdges } = await import(g('resolve.js'));
@@ -95,9 +95,11 @@ async function indexRepo(root) {
       skipped++;
       continue;
     }
-    const tags = await extractTagsForPath(source, path);
-    if (!tags) continue;
-    store.indexFile({ path, language: language.id, source, tags });
+    // `extractFileForPath`, not `extractTagsForPath`: the store this grades must carry import
+    // bindings, or the run would silently measure the pre-step-5 resolver.
+    const extracted = await extractFileForPath(source, path);
+    if (!extracted) continue;
+    store.indexFile({ path, language: language.id, source, tags: extracted.tags, imports: extracted.imports });
     indexed++;
   }
 
@@ -307,7 +309,8 @@ for (const repo of REPOS) {
   console.log(`         ${indexed.resolved.counts.callSites} call sites, ` +
     `${indexed.resolved.counts.resolved} resolved, ` +
     `${indexed.resolved.counts.ambiguous} ambiguous, ` +
-    `${indexed.resolved.counts.unresolved} unresolved`);
+    `${indexed.resolved.counts.unresolved} unresolved` +
+    `, ${indexed.resolved.counts.viaImport} of the resolved via an import`);
 
   for (const [cellName, includeCaller] of [
     ['with tests', () => true],

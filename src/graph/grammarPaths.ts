@@ -54,3 +54,15 @@ export function wasmPathFor(languageId: string): string {
 export function queryPathFor(languageId: string): string {
   return join(grammarDir(), 'queries', `${languageId}.scm`);
 }
+
+/**
+ * Absolute path to a language's **import** query, which most languages do not have.
+ *
+ * Separate from the tag query because the two answer different questions, and because the tag
+ * queries carry measured precision figures that an unrelated edit should not put back in play -
+ * see the header of `typescript.imports.scm`. A missing file is the normal case and means "this
+ * language contributes no import bindings", never an error.
+ */
+export function importQueryPathFor(languageId: string): string {
+  return join(grammarDir(), 'queries', `${languageId}.imports.scm`);
+}

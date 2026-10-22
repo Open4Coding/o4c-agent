@@ -19,7 +19,7 @@
 import { readFile } from 'node:fs/promises';
 import { Parser, Language, Query } from 'web-tree-sitter';
 import { languageById } from './languages.js';
-import { wasmPathFor, queryPathFor } from './grammarPaths.js';
+import { wasmPathFor, queryPathFor, importQueryPathFor } from './grammarPaths.js';
 
 /**
  * A grammar or query could not be loaded.
@@ -44,6 +44,7 @@ let initPromise: Promise<void> | undefined;
 
 const languages = new Map<string, Promise<Language>>();
 const queries = new Map<string, Promise<Query>>();
+const importQueries = new Map<string, Promise<Query | undefined>>();
 const parsers = new Map<string, Parser>();
 
 /** Initialises the WASM runtime. Idempotent, and safe to call concurrently. */
@@ -90,6 +91,40 @@ export async function loadQuery(languageId: string): Promise<Query> {
 }
 
 /**
+ * Loads (or returns the cached) import query, or `undefined` when the language has none.
+ *
+ * The missing-file case is cached as `undefined` rather than retried, because it is the common
+ * case - thirteen of the fifteen bundled languages - and retrying would mean a failed `open` per
+ * file per pass.
+ *
+ * A file that exists but will not compile throws. That is a broken shipped asset, not a language
+ * without imports, and `codeGraphImports.test.ts` compiles every one of them precisely so this
+ * branch stays unreachable in a release. Silently treating it as "no imports" would turn a
+ * deployment mistake into a quiet loss of recall.
+ */
+export async function loadImportQuery(languageId: string): Promise<Query | undefined> {
+  const cached = importQueries.get(languageId);
+  if (cached) return cached;
+
+  const loading = (async () => {
+    let source: string;
+    try {
+      source = await readFile(importQueryPathFor(languageId), 'utf-8');
+    } catch {
+      return undefined;
+    }
+    const language = await loadLanguage(languageId);
+    return new Query(language, source);
+  })().catch((err: unknown) => {
+    importQueries.delete(languageId);
+    throw err instanceof GrammarUnavailableError ? err : new GrammarUnavailableError(languageId, err);
+  });
+
+  importQueries.set(languageId, loading);
+  return loading;
+}
+
+/**
  * A parser with this language already set, reused across calls.
  *
  * One parser per language rather than one per call: parsing is synchronous once the grammar is
@@ -125,5 +160,7 @@ export function resetGrammarCache(): void {
   parsers.clear();
   for (const query of queries.values()) void query.then((q) => q.delete()).catch(() => {});
   queries.clear();
+  for (const query of importQueries.values()) void query.then((q) => q?.delete()).catch(() => {});
+  importQueries.clear();
   languages.clear();
 }

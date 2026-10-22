@@ -19,7 +19,8 @@
  */
 
 import { languageForPath } from './languages.js';
-import { loadQuery, parserFor, GrammarUnavailableError } from './loadLanguage.js';
+import { loadQuery, loadImportQuery, parserFor, GrammarUnavailableError } from './loadLanguage.js';
+import { collectImports, type ImportBinding } from './imports.js';
 
 /** Whether an occurrence defines a name or merely mentions one. */
 export type TagKind = 'def' | 'ref';
@@ -52,15 +53,27 @@ export interface Tag {
 const DEFINITION_PREFIX = 'name.definition.';
 const REFERENCE_PREFIX = 'name.reference.';
 
+/** Everything one parse of one file yields. */
+export interface FileExtraction {
+  readonly tags: readonly Tag[];
+  /** Empty for a language with no import query, which is most of them. */
+  readonly imports: readonly ImportBinding[];
+}
+
 /**
- * Extracts every definition and reference from one file's source.
+ * Extracts every definition, reference and import binding from one file's source.
+ *
+ * One parse for all three. The tag query and the import query are separate files - see
+ * `grammarPaths.ts` for why - but running them over two trees would double the cost of the only
+ * expensive step in an index pass for no gain whatsoever.
  *
  * Throws `GrammarUnavailableError` when the language has no usable grammar. Callers map that to
- * the `degraded` verdict; they must not map it to an empty tag list.
+ * the `degraded` verdict; they must not map it to an empty result.
  */
-export async function extractTags(source: string, languageId: string): Promise<Tag[]> {
+export async function extractFile(source: string, languageId: string): Promise<FileExtraction> {
   const parser = await parserFor(languageId);
   const query = await loadQuery(languageId);
+  const importQuery = await loadImportQuery(languageId);
 
   const tree = parser.parse(source);
   if (!tree) throw new GrammarUnavailableError(languageId, new Error('parser returned no tree'));
@@ -82,12 +95,23 @@ export async function extractTags(source: string, languageId: string): Promise<T
         line: capture.node.startPosition.row + 1,
       });
     }
-    return tags;
+    return {
+      tags,
+      imports: importQuery ? collectImports(tree.rootNode, importQuery) : [],
+    };
   } finally {
     // WASM memory is not garbage-collected for us; a tree left undeleted is a leak, and this
     // runs over every file in a repository.
     tree.delete();
   }
+}
+
+/**
+ * Just the tags, for the callers that have no use for import bindings - the ranker's fixtures and
+ * the per-grammar load test among them.
+ */
+export async function extractTags(source: string, languageId: string): Promise<Tag[]> {
+  return [...(await extractFile(source, languageId)).tags];
 }
 
 /**
@@ -101,4 +125,20 @@ export async function extractTagsForPath(source: string, path: string): Promise<
   const language = languageForPath(path);
   if (!language) return undefined;
   return extractTags(source, language.id);
+}
+
+/**
+ * `extractFile` for a path, with the same third state as `extractTagsForPath`.
+ *
+ * For the indexing scripts, which build a store the resolver will be measured over and so must
+ * record imports as well as tags - a script that indexed only tags would make the measurement
+ * silently report the pre-step-5 behaviour.
+ */
+export async function extractFileForPath(
+  source: string,
+  path: string,
+): Promise<FileExtraction | undefined> {
+  const language = languageForPath(path);
+  if (!language) return undefined;
+  return extractFile(source, language.id);
 }

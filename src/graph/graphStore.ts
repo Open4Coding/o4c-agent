@@ -12,6 +12,11 @@
  * is never recorded as a call - the single cheapest precision win available, per lidx's measured
  * false-positive breakdown.
  *
+ * Import bindings per file as well, since step 5: `local name -> module specifier`, stored as
+ * written and resolved at query time (`imports.ts`). They exist to let the resolver break ties a
+ * bare name cannot, which the acceptance measurement identified as four fifths of the remaining
+ * recall gap.
+ *
  * What is *not* stored: resolved call edges. Extraction sees one file at a time and cannot know
  * how many definitions of a name the repository holds, so resolution belongs to the ranking
  * stage. This is also the honest position given that externally-graded recall for resolved call
@@ -29,6 +34,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import type { Tag } from './tags.js';
+import type { ImportBinding } from './imports.js';
 import { edgeKindForCapture, type EdgeKind } from './edgeKind.js';
 import { entityUid, contentHash, fileHash, normalisePath, kindFromCapture } from './entityId.js';
 import { searchTextFor } from './identifierSplit.js';
@@ -36,8 +42,14 @@ import { searchTextFor } from './identifierSplit.js';
 /** `graph.db` itself; its `-wal`/`-shm` sidecars sit beside it. See `dbDirFor`. */
 export const GRAPH_DB_FILENAME = 'graph.db';
 
-/** Schema version, bumped when a migration would be needed. A mismatch triggers a rebuild. */
-export const GRAPH_SCHEMA_VERSION = 1;
+/**
+ * Schema version, bumped when a migration would be needed. A mismatch triggers a rebuild.
+ *
+ * 2 adds the `imports` table. No migration is written because none is worth writing: the graph is
+ * derived from files on disk and rebuilding it costs seconds, which is also why a bump discards
+ * rather than migrates.
+ */
+export const GRAPH_SCHEMA_VERSION = 2;
 
 /**
  * Per-file index state.
@@ -129,6 +141,22 @@ CREATE TABLE IF NOT EXISTS refs (
 CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name);
 CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file_id);
 CREATE INDEX IF NOT EXISTS idx_refs_edge ON refs(edge_kind);
+
+-- The module column is the specifier exactly as written, not a resolved path. Resolving it needs
+-- the importing file's own path and is pure string work (see imports.ts), so doing it at query
+-- time costs nothing and avoids a second derived column that could fall out of step with the
+-- first. (No backticks in here: this whole block is a template literal.)
+CREATE TABLE IF NOT EXISTS imports (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  local_name TEXT NOT NULL,
+  module TEXT NOT NULL,
+  line INTEGER NOT NULL
+) STRICT;
+
+-- The resolver's question is always "in this file, where did this name come from", so the index
+-- is on the pair rather than on either column.
+CREATE INDEX IF NOT EXISTS idx_imports_file_name ON imports(file_id, local_name);
 `;
 
 /**
@@ -159,6 +187,8 @@ export interface FileIndexInput {
   /** The file's full source, for the file fingerprint and per-entity content hashes. */
   readonly source: string;
   readonly tags: readonly Tag[];
+  /** Optional, and absent for most languages: only some have an import query. */
+  readonly imports?: readonly ImportBinding[];
 }
 
 export class GraphStore {
@@ -276,6 +306,13 @@ export class GraphStore {
           edgeKindForCapture(tag.capture),
           tag.line,
         );
+      }
+
+      const insertImport = this.db.prepare(
+        `INSERT INTO imports(file_id, local_name, module, line) VALUES(?, ?, ?, ?)`,
+      );
+      for (const binding of input.imports ?? []) {
+        insertImport.run(fileId, binding.localName, binding.module, binding.line);
       }
 
       this.db.exec('COMMIT');
@@ -399,6 +436,45 @@ export class GraphStore {
   }
 
   /**
+   * Every import binding in one file.
+   *
+   * For the bulk resolver, which walks file by file and wants one query per file rather than one
+   * per call site.
+   */
+  importsIn(path: string): ImportBinding[] {
+    const rows = this.db
+      .prepare(
+        `SELECT i.local_name, i.module, i.line
+         FROM imports i JOIN files f ON f.id = i.file_id
+         WHERE f.path = ? ORDER BY i.line`,
+      )
+      .all(normalisePath(path)) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      localName: String(r.local_name),
+      module: String(r.module),
+      line: Number(r.line),
+    }));
+  }
+
+  /**
+   * The module one name was imported from in one file, or `undefined`.
+   *
+   * Returns `undefined` when the name is imported twice from different modules, which is not
+   * legal in a single scope but is what a half-indexed or oddly-generated file can look like.
+   * Picking one would be a guess, and a guess here defeats the purpose of consulting imports.
+   */
+  importedModule(path: string, localName: string): string | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT i.module
+         FROM imports i JOIN files f ON f.id = i.file_id
+         WHERE f.path = ? AND i.local_name = ? LIMIT 2`,
+      )
+      .all(normalisePath(path), localName) as Array<{ module: string }>;
+    return rows.length === 1 ? String(rows[0].module) : undefined;
+  }
+
+  /**
    * Name search over definitions, camel/snake aware because `search_text` was pre-split.
    *
    * Falls back to a `LIKE` scan when FTS5 is unavailable, so the feature degrades in speed
@@ -448,6 +524,7 @@ export class GraphStore {
     this.db.exec('DELETE FROM files;');
     this.db.exec('DELETE FROM defs;');
     this.db.exec('DELETE FROM refs;');
+    this.db.exec('DELETE FROM imports;');
   }
 
   /** Folds the WAL back into the main file. Tidiness, not correctness - WAL is durable alone. */

@@ -29,7 +29,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 
 import type { GraphStore } from './graphStore.js';
-import { extractTags } from './tags.js';
+import { extractFile } from './tags.js';
 import { languageForPath } from './languages.js';
 import { skipReasonFor, type SkipReason } from './indexFilter.js';
 import { resetGrammarCache } from './loadLanguage.js';
@@ -86,8 +86,8 @@ export async function indexSource(
 
   if (store.freshness(repoRelativePath, source) === 'fresh') return 'unchanged';
 
-  const tags = await extractTags(source, language.id);
-  store.indexFile({ path: repoRelativePath, language: language.id, source, tags });
+  const { tags, imports } = await extractFile(source, language.id);
+  store.indexFile({ path: repoRelativePath, language: language.id, source, tags, imports });
   return 'indexed';
 }
 

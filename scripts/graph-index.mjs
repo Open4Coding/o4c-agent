@@ -18,12 +18,12 @@ const HERE = resolve(import.meta.dirname, '..');
 const DIST = join(HERE, 'dist');
 const graphMod = (name) => pathToFileURL(join(DIST, 'graph', name)).href;
 
-let GraphStore, GRAPH_DB_FILENAME, extractTagsForPath, languageForPath;
+let GraphStore, GRAPH_DB_FILENAME, extractFileForPath, languageForPath;
 let rankDefinitions, fitToBudget, estimateTextTokens, skipReasonFor;
 let resolveCallEdges, resolveName;
 try {
   ({ GraphStore, GRAPH_DB_FILENAME } = await import(graphMod('graphStore.js')));
-  ({ extractTagsForPath } = await import(graphMod('tags.js')));
+  ({ extractFileForPath } = await import(graphMod('tags.js')));
   ({ languageForPath } = await import(graphMod('languages.js')));
   ({ rankDefinitions, fitToBudget } = await import(graphMod('ranker.js')));
   ({ skipReasonFor } = await import(graphMod('indexFilter.js')));
@@ -88,12 +88,18 @@ for (const abs of files) {
       skipped++;
       continue;
     }
-    const tags = await extractTagsForPath(source, rel);
-    if (!tags) {
+    const extracted = await extractFileForPath(source, rel);
+    if (!extracted) {
       skipped++;
       continue;
     }
-    store.indexFile({ path: rel, language: lang.id, source, tags });
+    store.indexFile({
+      path: rel,
+      language: lang.id,
+      source,
+      tags: extracted.tags,
+      imports: extracted.imports,
+    });
     indexed++;
     byLanguage.set(lang.id, (byLanguage.get(lang.id) ?? 0) + 1);
   } catch (err) {

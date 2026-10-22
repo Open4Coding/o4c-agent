@@ -21,16 +21,28 @@
  *
  * ## What this cannot do
  *
- * Resolution is by **name**, not by type. Overloads, interface dispatch, generics and anything
- * reached through a value are invisible. lidx's compiler-graded diagnostics put bare-name
+ * Resolution is by **name**, plus one piece of structural evidence: what the referencing file
+ * imported (step 5, `imports.ts`). It is still not by *type*. Overloads, interface dispatch,
+ * generics and anything reached through a value are invisible. lidx's compiler-graded diagnostics put bare-name
  * resolution precision at 0.86 for Go, 0.82 for TypeScript and 0.48 for Rust
  * (`docs/research/code-graph/0001.INDEPENDENT-GRADING.md` §4), and bare-name matching is exactly
  * what happens here. That is the reason ambiguity gets its own edge kind rather than a guess.
+ *
+ * ## The order evidence is weighed
+ *
+ * 1. **A definition in the referencing file.** Lexical scope is what the language itself would
+ *    pick, and the acceptance measurement scored this 1,782 right to 19 wrong.
+ * 2. **An import statement naming one candidate.** Added in step 5.
+ * 3. **A single candidate in the whole index.**
+ *
+ * Nothing below that resolves. Import evidence is used only to *choose* among candidates, never
+ * to rule one out - see the header of `imports.ts` for why that asymmetry is not laziness.
  */
 
 import type { DefinitionRow, GraphStore } from './graphStore.js';
 import { isAssertedCall, type EdgeKind } from './edgeKind.js';
 import { normalisePath } from './entityId.js';
+import { importedTarget, type ImportBinding } from './imports.js';
 
 /**
  * How much weight an answer can bear.
@@ -157,6 +169,22 @@ export function resolveName(
     };
   }
 
+  // Several candidates and no same-file definition: ask what this file imported. This is the
+  // step-5 addition, and it is the only thing standing between a correct answer and a declined
+  // one for four fifths of the misses the acceptance measurement found.
+  const viaImport = home ? importedCandidate(store, home, name, candidates) : undefined;
+  if (viaImport) {
+    return {
+      name,
+      verdict: 'ok',
+      definitions: [viaImport.definition, ...ordered.filter((d) => d !== viaImport.definition)],
+      note:
+        `Imported from "${viaImport.module}", which is ${viaImport.definition.path}:` +
+        `${viaImport.definition.line}. ${candidates.length - 1} other file(s) define the same name.`,
+      scanned,
+    };
+  }
+
   return {
     name,
     verdict: 'low_confidence',
@@ -166,6 +194,37 @@ export function resolveName(
       'Resolution here is by name, not by type, so overloads and interface dispatch are not followed.',
     scanned,
   };
+}
+
+/** A candidate an import statement singles out, with the specifier that did it. */
+interface ImportedCandidate {
+  readonly definition: DefinitionRow;
+  readonly module: string;
+}
+
+/**
+ * The candidate the importing file's own import statement names, if it names exactly one.
+ *
+ * Two files can satisfy the same specifier only in the narrow sense that `./host` could be
+ * `host.ts` or `host.js`; `importedTarget` orders those and takes the first. What this *does*
+ * decline is a target file holding **several** definitions of the name - a function and a type of
+ * the same name, say. The import settles the file but not the line, and a line is what a caller
+ * is about to be handed, so the honest answer there is still `low_confidence`.
+ */
+function importedCandidate(
+  store: GraphStore,
+  fromPath: string,
+  name: string,
+  candidates: readonly DefinitionRow[],
+): ImportedCandidate | undefined {
+  const module = store.importedModule(fromPath, name);
+  if (!module) return undefined;
+
+  const target = importedTarget(fromPath, module, candidates.map((c) => c.path));
+  if (!target) return undefined;
+
+  const inTarget = candidates.filter((c) => c.path === target);
+  return inTarget.length === 1 ? { definition: inTarget[0], module } : undefined;
 }
 
 /** Same-file candidates first, then by path and line, so the order is stable. */
@@ -207,6 +266,13 @@ export interface ResolveEdgesResult {
     readonly resolved: number;
     /** Call sites with several candidates. */
     readonly ambiguous: number;
+    /**
+     * Of the resolved ones, how many only resolved because of an import statement.
+     *
+     * Reported so the step-5 change can be judged rather than assumed: this number is exactly
+     * the set of answers that would have been declined as ambiguous before it.
+     */
+    readonly viaImport: number;
     /** Call sites with no in-repo definition - a library call, or a miss. */
     readonly unresolved: number;
     readonly edges: number;
@@ -230,6 +296,7 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
   let resolved = 0;
   let ambiguous = 0;
   let unresolved = 0;
+  let viaImport = 0;
 
   // One pass over the definition table, so each name is looked up once rather than per call site.
   const definitionsByName = new Map<string, DefinitionRow[]>();
@@ -242,6 +309,10 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
   }
 
   for (const file of store.files()) {
+    // One query per file rather than one per call site: a file with 200 calls asks about its own
+    // imports once.
+    const imports = importMap(store.importsIn(file.path));
+
     for (const ref of store.referencesIn(file.path)) {
       if (!isAssertedCall(ref.edgeKind)) continue;
       callSites++;
@@ -257,6 +328,20 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
         resolved++;
         edges.push(edge(file.path, ref.line, ref.name, sameFile[0], 'call'));
         continue;
+      }
+
+      const module = candidates.length > 1 ? imports.get(ref.name) : undefined;
+      const target = module
+        ? importedTarget(file.path, module, candidates.map((c) => c.path))
+        : undefined;
+      if (target) {
+        const inTarget = candidates.filter((c) => c.path === target);
+        if (inTarget.length === 1) {
+          resolved++;
+          viaImport++;
+          edges.push(edge(file.path, ref.line, ref.name, inTarget[0], 'call'));
+          continue;
+        }
       }
 
       if (candidates.length === 1) {
@@ -276,8 +361,28 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
 
   return {
     edges,
-    counts: { callSites, resolved, ambiguous, unresolved, edges: edges.length },
+    counts: { callSites, resolved, ambiguous, unresolved, viaImport, edges: edges.length },
   };
+}
+
+/**
+ * One file's import bindings as `local name -> module`.
+ *
+ * A name bound to two different modules in one file is dropped rather than resolved to either.
+ * That is not legal TypeScript in a single scope, so it means something has gone wrong - a
+ * generated file, or an index that is mid-update - and the one thing import evidence must not do
+ * is guess.
+ */
+function importMap(bindings: readonly ImportBinding[]): Map<string, string> {
+  const map = new Map<string, string>();
+  const conflicted = new Set<string>();
+  for (const binding of bindings) {
+    const existing = map.get(binding.localName);
+    if (existing !== undefined && existing !== binding.module) conflicted.add(binding.localName);
+    else map.set(binding.localName, binding.module);
+  }
+  for (const name of conflicted) map.delete(name);
+  return map;
 }
 
 function edge(
