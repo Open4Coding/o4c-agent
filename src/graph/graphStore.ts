@@ -320,6 +320,32 @@ export class GraphStore {
     }));
   }
 
+  /**
+   * One file's index record, or `undefined` if it was never indexed.
+   *
+   * Exists because `freshness` needs the file's current bytes and there are callers that do not
+   * have them - a ranged `read_file` returns a slice, not the file - but still need to tell "this
+   * file is not in the index" from "this file is indexed and defines nothing". Those are the two
+   * the four-state verdict must never be allowed to collapse.
+   */
+  indexedFile(path: string): IndexedFile | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT path, language, file_hash, size, indexed_at, def_count, ref_count FROM files WHERE path = ?',
+      )
+      .get(normalisePath(path)) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      path: String(row.path),
+      language: String(row.language),
+      fileHash: String(row.file_hash),
+      size: Number(row.size),
+      indexedAt: Number(row.indexed_at),
+      defCount: Number(row.def_count),
+      refCount: Number(row.ref_count),
+    };
+  }
+
   /** Files defining a name. The list length is itself a signal - aider damps names defined in many files. */
   definitionsOf(name: string): DefinitionRow[] {
     const rows = this.db

@@ -22,6 +22,7 @@ import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
 import { startMcpSession, type McpSession } from './mcp/startup.js';
+import { startCodeGraph } from './graph/startup.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
 
@@ -621,6 +622,28 @@ program
     // flush in runRepl. Synchronous because 'exit' permits nothing else; the graceful close is
     // attempted first, below, on the paths that can await.
     process.on('exit', () => mcp.killAllNow());
+
+    // The Code Graph - build step 4, in the core tier rather than the MCP tier (design doc §5.1's
+    // revision: it has to change what a tool call *returns*, which a server cannot express).
+    //
+    // `registerCore` order is hook order and the wiring site is where that decision gets made, so
+    // to state it: this is the only core component registered today, and when the others land
+    // (items 13, 23, 40) the graph belongs **innermost** of the `aroundTool` wrappers - it
+    // annotates a tool's own output, and wrapping it around a component that substitutes its own
+    // answer would have it annotate that instead.
+    //
+    // `trusted ? projectRoot : undefined`, the same rule ConfigStore and MCP get above. The first
+    // index pass is not awaited; until it lands every answer reports `incomplete`.
+    const graph = startCodeGraph({
+      projectRoot: trusted ? projectRoot : undefined,
+      addTools: (tools) => loop.addTools(tools),
+    });
+    if (graph) {
+      loop.registerCore(graph.component);
+      // On 'exit' rather than in each branch's teardown: the close is synchronous, so one hook
+      // covers the REPL, one-shot mode and the restart paths' own process.exit() alike.
+      process.on('exit', () => graph.close());
+    }
 
     // Installed before either branch below (interactive REPL or one-shot) so both are covered -
     // this is a process-wide concern, not specific to the TUI. See gcWatchdog.ts's own doc comment
