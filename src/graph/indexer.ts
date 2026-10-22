@@ -120,6 +120,9 @@ export async function indexProject(
 ): Promise<IndexRunResult> {
   const read = options.readSource ?? ((path: string) => readFile(path, 'utf-8'));
   const started = Date.now();
+  // Captured before the walk: every write after this point - from this pass, or from `read_file`
+  // and `write_file` on the main thread while it runs - gets a higher sequence.
+  const startSequence = store.currentSequence();
   const outcomes = new Map<FileOutcome, number>();
   const failures: string[] = [];
   let indexed = 0;
@@ -179,9 +182,19 @@ export async function indexProject(
   // Anything the index still holds that this walk did not account for is gone, renamed, or now
   // excluded. Leaving it would serve definitions from a file that no longer exists, which is the
   // one failure the model has no way to detect.
+  //
+  // Except for a file indexed *since this pass began*. That is not a stale row, it is a newer
+  // one: `read_file` and `write_file` index the bytes they are holding, and this pass runs in a
+  // worker alongside them, so its walk can predate a file that now exists. Without this check a
+  // file created mid-pass would be swept out and stay missing until the next full pass.
+  //
+  // Compared by sequence, not by timestamp. The first version used `indexedAt` against the pass's
+  // start time and failed intermittently, because `Date.now()` on Windows advances in steps of up
+  // to 16 ms, so a file indexed in the same tick as the start compares equal to it rather than
+  // earlier - and was then never swept.
   let removed = 0;
   for (const file of store.files()) {
-    if (!seen.has(file.path)) {
+    if (!seen.has(file.path) && file.indexSeq <= startSequence) {
       store.removeFile(file.path);
       removed++;
     }

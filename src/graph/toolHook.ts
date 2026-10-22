@@ -35,7 +35,8 @@ import { join } from 'node:path';
 
 import type { CoreComponent, ToolCallContext } from '../agent/coreSeam.js';
 import type { GraphStore } from './graphStore.js';
-import { indexProject, indexSource, repoRelative, type IndexRunResult } from './indexer.js';
+import { indexSource, repoRelative, type IndexRunResult } from './indexer.js';
+import { runIndexPassInProcess, type RunIndexPass } from './indexPass.js';
 import {
   nameProjection,
   renderFileProjection,
@@ -106,9 +107,19 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   private running: Promise<void> | undefined;
   private rerunRequested = false;
 
+  /**
+   * `runPass` is how a full pass gets off the UI thread.
+   *
+   * Injected rather than chosen here, so that the component stays testable without spawning a
+   * worker per test - and so the production wiring (`startup.ts`) is the one place that decides.
+   * The default is in-process, which is both the fallback and what every test gets unless it asks
+   * for otherwise. Single-file indexing after a read or a write is never handed to a worker: it is
+   * one parse, and it has to be finished before the tool's output is returned.
+   */
   constructor(
     private readonly store: GraphStore,
     private readonly root: string,
+    private readonly runPass: RunIndexPass = runIndexPassInProcess,
   ) {}
 
   status(): CodeGraphStatus {
@@ -138,7 +149,7 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
     do {
       this.rerunRequested = false;
       try {
-        this.lastRun = await indexProject(this.store, this.root);
+        this.lastRun = await this.runPass(this.store, this.root);
         this.lastError = undefined;
         this.phase = 'ready';
       } catch (err) {

@@ -45,11 +45,11 @@ export const GRAPH_DB_FILENAME = 'graph.db';
 /**
  * Schema version, bumped when a migration would be needed. A mismatch triggers a rebuild.
  *
- * 2 adds the `imports` table. No migration is written because none is worth writing: the graph is
- * derived from files on disk and rebuilding it costs seconds, which is also why a bump discards
- * rather than migrates.
+ * 2 adds the `imports` table; 3 adds `files.index_seq`. No migration is written because none is
+ * worth writing: the graph is derived from files on disk and rebuilding it costs seconds, which is
+ * also why a bump discards rather than migrates.
  */
-export const GRAPH_SCHEMA_VERSION = 2;
+export const GRAPH_SCHEMA_VERSION = 3;
 
 /**
  * Per-file index state.
@@ -68,6 +68,17 @@ export interface IndexedFile {
   readonly indexedAt: number;
   readonly defCount: number;
   readonly refCount: number;
+  /**
+   * Monotonic write counter, used to tell "indexed before this pass began" from "indexed while it
+   * was running" - the question the end-of-pass sweep has to answer now that a worker and the
+   * main thread both write.
+   *
+   * A counter rather than `indexedAt`, because `Date.now()` on Windows advances in steps of up to
+   * 16 ms. A file indexed in the same tick as a pass start compares equal to it, and the first
+   * version of the sweep guard used the timestamp and failed intermittently for exactly that
+   * reason.
+   */
+  readonly indexSeq: number;
 }
 
 /** A definition as read back. */
@@ -105,7 +116,8 @@ CREATE TABLE IF NOT EXISTS files (
   size INTEGER NOT NULL,
   indexed_at INTEGER NOT NULL,
   def_count INTEGER NOT NULL,
-  ref_count INTEGER NOT NULL
+  ref_count INTEGER NOT NULL,
+  index_seq INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
@@ -196,13 +208,20 @@ export class GraphStore {
   /** False when the embedded SQLite was built without FTS5; name search then falls back. */
   readonly ftsAvailable: boolean;
 
-  constructor(dbPath: string) {
-    mkdirSync(dirname(dbPath), { recursive: true });
-    this.db = new DatabaseSync(dbPath);
+  constructor(readonly path: string) {
+    mkdirSync(dirname(path), { recursive: true });
+    this.db = new DatabaseSync(path);
     // WAL so a reindex and a serve can overlap: readers are not blocked by the writer.
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA synchronous = NORMAL;');
     this.db.exec('PRAGMA foreign_keys = ON;');
+    // Two writers now exist: the indexing worker and, on a read or a write tool, this thread.
+    // `DatabaseSync` is synchronous, so this timeout is also a worst-case stall on whichever
+    // thread loses the race - which is why it is a few hundred milliseconds and not the seconds
+    // a server would use. A per-file transaction is milliseconds long, so riding one out is all
+    // that is needed; losing anyway costs one file's rows, which `freshness` then reports as
+    // stale rather than as absent.
+    this.db.exec('PRAGMA busy_timeout = 400;');
     this.db.exec(SCHEMA);
 
     this.ftsAvailable = this.tryCreateFts();
@@ -232,6 +251,22 @@ export class GraphStore {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The write counter's current value, to be captured before a pass starts.
+   *
+   * Anything written after this point has a higher sequence, which is how the sweep tells a row
+   * that is merely older than the pass from one written during it by another writer.
+   */
+  currentSequence(): number {
+    return Number(this.meta('index_seq') ?? '0');
+  }
+
+  private nextSequence(): number {
+    const next = this.currentSequence() + 1;
+    this.setMeta('index_seq', String(next));
+    return next;
   }
 
   private meta(key: string): string | undefined {
@@ -264,12 +299,23 @@ export class GraphStore {
       const defs = input.tags.filter((t) => t.kind === 'def');
       const refs = input.tags.filter((t) => t.kind === 'ref');
 
+      // Allocated inside the transaction, so two writers cannot be handed the same number.
+      const seq = this.nextSequence();
       this.db
         .prepare(
-          `INSERT INTO files(path, language, file_hash, size, indexed_at, def_count, ref_count)
-           VALUES(?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO files(path, language, file_hash, size, indexed_at, def_count, ref_count, index_seq)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(path, input.language, hash, input.source.length, Date.now(), defs.length, refs.length);
+        .run(
+          path,
+          input.language,
+          hash,
+          input.source.length,
+          Date.now(),
+          defs.length,
+          refs.length,
+          seq,
+        );
       const fileId = Number(
         (this.db.prepare('SELECT id FROM files WHERE path = ?').get(path) as { id: number }).id,
       );
@@ -344,17 +390,12 @@ export class GraphStore {
   /** Every indexed file. */
   files(): IndexedFile[] {
     const rows = this.db
-      .prepare('SELECT path, language, file_hash, size, indexed_at, def_count, ref_count FROM files ORDER BY path')
+      .prepare(
+        `SELECT path, language, file_hash, size, indexed_at, def_count, ref_count, index_seq
+         FROM files ORDER BY path`,
+      )
       .all() as Array<Record<string, unknown>>;
-    return rows.map((r) => ({
-      path: String(r.path),
-      language: String(r.language),
-      fileHash: String(r.file_hash),
-      size: Number(r.size),
-      indexedAt: Number(r.indexed_at),
-      defCount: Number(r.def_count),
-      refCount: Number(r.ref_count),
-    }));
+    return rows.map(toIndexedFile);
   }
 
   /**
@@ -368,19 +409,11 @@ export class GraphStore {
   indexedFile(path: string): IndexedFile | undefined {
     const row = this.db
       .prepare(
-        'SELECT path, language, file_hash, size, indexed_at, def_count, ref_count FROM files WHERE path = ?',
+        `SELECT path, language, file_hash, size, indexed_at, def_count, ref_count, index_seq
+         FROM files WHERE path = ?`,
       )
       .get(normalisePath(path)) as Record<string, unknown> | undefined;
-    if (!row) return undefined;
-    return {
-      path: String(row.path),
-      language: String(row.language),
-      fileHash: String(row.file_hash),
-      size: Number(row.size),
-      indexedAt: Number(row.indexed_at),
-      defCount: Number(row.def_count),
-      refCount: Number(row.ref_count),
-    };
+    return row ? toIndexedFile(row) : undefined;
   }
 
   /** Files defining a name. The list length is itself a signal - aider damps names defined in many files. */
@@ -535,6 +568,19 @@ export class GraphStore {
   close(): void {
     this.db.close();
   }
+}
+
+function toIndexedFile(r: Record<string, unknown>): IndexedFile {
+  return {
+    path: String(r.path),
+    language: String(r.language),
+    fileHash: String(r.file_hash),
+    size: Number(r.size),
+    indexedAt: Number(r.indexed_at),
+    defCount: Number(r.def_count),
+    refCount: Number(r.ref_count),
+    indexSeq: Number(r.index_seq),
+  };
 }
 
 function toDefinition(r: Record<string, unknown>): DefinitionRow {

@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 import { GRAPH_DB_FILENAME, GraphStore } from './graphStore.js';
 import { CodeGraphComponent } from './toolHook.js';
+import { createWorkerPass } from './indexPass.js';
 import { createCodeGraphTool } from '../tools/codeGraph.js';
 import { dbDirFor } from '../session/projectContext.js';
 import type { Tool } from '../tools/types.js';
@@ -41,8 +42,8 @@ export interface CodeGraphSession {
  *
  * The pass is **not** awaited, for the same reason MCP discovery is not: the first prompt should
  * be answerable immediately, and until the pass lands every projection reports `incomplete`, so
- * the window is stated rather than hidden. Indexing on the main thread is the known cost here and
- * it is what checklist item 3 (the worker) exists to remove.
+ * the window is stated rather than hidden. Since 2026-10-22 it also runs in a worker, so the
+ * window costs the index's freshness and no longer costs the UI its frame rate.
  */
 export function startCodeGraph(options: CodeGraphSessionOptions): CodeGraphSession | undefined {
   const dbDir = dbDirFor(options.projectRoot);
@@ -58,7 +59,10 @@ export function startCodeGraph(options: CodeGraphSessionOptions): CodeGraphSessi
     return undefined;
   }
 
-  const component = new CodeGraphComponent(store, options.projectRoot);
+  // Full passes run in a worker. Measured on openai/codex (5,893 files): 42.9 s of parsing that
+  // blocked this thread for 27.7 s in total, with a worst stall of 416 ms. See `indexWorker.ts`.
+  const pass = createWorkerPass();
+  const component = new CodeGraphComponent(store, options.projectRoot, pass);
   options.addTools([createCodeGraphTool(component)]);
   const ready = component.reindex();
 
@@ -72,6 +76,10 @@ export function startCodeGraph(options: CodeGraphSessionOptions): CodeGraphSessi
     // than in a startup line nobody reads. `component.status()` is there for `/context` to show
     // when there is a place to show it (checklist item 3's territory, with the worker).
     close(): void {
+      // The worker first: a pass in flight is writing to the file about to be checkpointed, and
+      // the index is derived, so abandoning a half-finished pass costs nothing but the next
+      // session's first pass having more to do.
+      pass.terminate();
       try {
         store.checkpoint();
       } catch {
