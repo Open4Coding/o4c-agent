@@ -40,6 +40,21 @@ export function parseWindowSetting(input: string): SlidingWindowOptions | undefi
   return value >= MIN_WINDOW_TOKENS ? { budgetTokens: Math.round(value) } : undefined;
 }
 
+/**
+ * The setting as a `--window` argument, which is how it survives o4c's per-turn process reload.
+ *
+ * Deliberately the inverse of `parseWindowSetting` rather than a second format:
+ * `parseWindowSetting(windowArgFor(x))` must equal `x`, and a test asserts it. The reload is the
+ * reason this exists at all - a window held only in the process would switch itself off one turn
+ * after being set, which is worse than never having had one, because the session would look like
+ * it was still protecting itself.
+ */
+export function windowArgFor(options: SlidingWindowOptions | undefined): string | undefined {
+  if (!options) return undefined;
+  if (options.budgetTokens !== undefined) return String(options.budgetTokens);
+  return `${(options.fraction ?? DEFAULT_WINDOW_FRACTION) * 100}%`;
+}
+
 /** How the setting reads back to the user, in the same terms they could have typed. */
 export function describeWindowSetting(options: SlidingWindowOptions): string {
   if (options.budgetTokens !== undefined) {

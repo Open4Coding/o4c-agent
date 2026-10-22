@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 
 import { AgentLoop } from '../agent/loop.js';
 import { userInputEntry, aiResponseEntry, type ContextEntry } from '../agent/contextEntry.js';
-import { MIN_WINDOW_TOKENS, describeWindowSetting, parseWindowSetting } from '../ui/windowSetting.js';
+import {
+  MIN_WINDOW_TOKENS,
+  describeWindowSetting,
+  parseWindowSetting,
+  windowArgFor,
+} from '../ui/windowSetting.js';
+import { buildRestartArgs } from '../restartHandoff.js';
 import { FakeProvider } from './fakeProvider.js';
 
 /**
@@ -42,6 +48,34 @@ test('nonsense and uselessly small windows are refused rather than honoured', ()
   // instead of silently sending almost nothing.
   assert.equal(parseWindowSetting(String(MIN_WINDOW_TOKENS - 1)), undefined);
   assert.deepEqual(parseWindowSetting(String(MIN_WINDOW_TOKENS)), { budgetTokens: MIN_WINDOW_TOKENS });
+});
+
+test('a setting survives the per-turn process reload', () => {
+  // o4c reloads itself after most turns and carries state across as argv, so the setting has to
+  // round-trip through a string. A window that quietly switched itself off one turn after being
+  // set would be worse than never having had one: the session would look like it was still
+  // protecting itself. `--mode` exists for exactly this reason and this follows it.
+  for (const setting of [{ budgetTokens: 40000 }, { fraction: 0.5 }, { fraction: 0.125 }]) {
+    const arg = windowArgFor(setting);
+    assert.ok(arg, 'a live setting always has an argument form');
+    assert.deepEqual(parseWindowSetting(arg), setting, `round trip through "${arg}"`);
+  }
+  assert.equal(windowArgFor(undefined), undefined, 'off carries no flag at all');
+});
+
+test('the restart arguments carry the window alongside the mode', () => {
+  const args = buildRestartArgs({
+    model: 'm',
+    provider: 'p',
+    baseUrl: 'http://localhost:1',
+    mode: 'auto',
+    window: '40000',
+  });
+  assert.ok(args.includes('--window'));
+  assert.equal(args[args.indexOf('--window') + 1], '40000');
+
+  const off = buildRestartArgs({ model: 'm', provider: 'p', baseUrl: 'http://localhost:1' });
+  assert.ok(!off.includes('--window'), 'and omit it when there is no window');
 });
 
 test('a setting reads back in the terms it was given in', () => {

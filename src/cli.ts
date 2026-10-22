@@ -6,6 +6,7 @@ import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { RESTART_EXIT_CODE, buildRestartArgs, runSupervisor, writeHandoff } from './restartHandoff.js';
+import { parseWindowSetting, windowArgFor } from './ui/windowSetting.js';
 import { MODES, type Mode } from './ui/modePolicy.js';
 import { parseSessionView, type SessionView } from './ui/formatEntries.js';
 import { AnthropicProvider } from './providers/anthropic.js';
@@ -119,8 +120,13 @@ interface RestartableOpts {
  * IT restarts too) has no such race and costs nothing - this process has nothing left to do but
  * wait anyway.
  */
-function spawnRestart(opts: RestartableOpts, resumeId: string | undefined, mode: string | undefined): number {
-  const args = buildRestartArgs({ ...opts, resumeId, mode });
+function spawnRestart(
+  opts: RestartableOpts,
+  resumeId: string | undefined,
+  mode: string | undefined,
+  window: string | undefined,
+): number {
+  const args = buildRestartArgs({ ...opts, resumeId, mode, window });
   const result = spawnSync(process.execPath, [process.argv[1], ...args], {
     stdio: 'inherit',
     env: { ...process.env, O4C_FRESH_SCREEN: '1' },
@@ -216,9 +222,14 @@ async function runRepl(
       });
     }
   }
-  let pendingRestart: { resumeId: string | undefined; mode: Mode | undefined } | undefined;
+  let pendingRestart:
+    | { resumeId: string | undefined; mode: Mode | undefined; window: string | undefined }
+    | undefined;
   const restart = (resumeId?: string, mode?: Mode) => {
-    pendingRestart = { resumeId, mode };
+    // The window setting is read from the loop rather than passed in, because it lives there and
+    // every `restart()` caller would otherwise have to remember to forward it - which is exactly
+    // the kind of thing that gets forgotten and then silently turns the feature off.
+    pendingRestart = { resumeId, mode, window: windowArgFor(loop.slidingWindowSettings()) };
   };
   const { waitUntilExit } = render(
     React.createElement(App, {
@@ -292,10 +303,18 @@ async function runRepl(
     if (handoffFile) {
       // Running under the supervisor (see restartHandoff.ts): hand it the next launch's args and exit
       // with the restart code, so the chain of live processes never grows.
-      writeHandoff(handoffFile, buildRestartArgs({ ...opts, resumeId: pendingRestart.resumeId, mode: pendingRestart.mode }));
+      writeHandoff(
+        handoffFile,
+        buildRestartArgs({
+          ...opts,
+          resumeId: pendingRestart.resumeId,
+          mode: pendingRestart.mode,
+          window: pendingRestart.window,
+        }),
+      );
       process.exit(RESTART_EXIT_CODE);
     }
-    process.exit(spawnRestart(opts, pendingRestart.resumeId, pendingRestart.mode));
+    process.exit(spawnRestart(opts, pendingRestart.resumeId, pendingRestart.mode, pendingRestart.window));
   }
   // Without an explicit exit, a lingering open handle (most likely a keep-alive socket from an
   // in-flight or just-finished fetch to the local model server) can keep the event loop alive
@@ -325,10 +344,14 @@ program
   .option('--resume <sessionId>', 'resume a saved session by id (used internally by /resume)')
   .option('--mode <mode>', 'start in this mode: manual, auto, acceptEdits or plan (used internally when the session reloads)')
   .option(
+    '--window <size>',
+    'send only the recent part of the conversation: a token count or a percentage (used internally when the session reloads)',
+  )
+  .option(
     '--profile <name>',
     'named preset (~/.o4c/profiles/<name>.json) to seed this project\'s config.json from on first trust - only has an effect the one time a project is first trusted; ignored on an already-trusted project. See "o4c-agent-design.md" §1.5/§5.',
   )
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; profile?: string; mode?: string }) => {
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; profile?: string; mode?: string; window?: string }) => {
     const prompt = promptParts.join(' ');
 
     // Interactive launches run under a thin supervisor: this process becomes the launcher, and the real
@@ -599,6 +622,12 @@ program
     }
 
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
+    // Restored before the first turn, because o4c reloads itself after most of them and
+    // `--window` is how the setting gets across - the same mechanism `--mode` uses, for the
+    // same reason. An unparseable value is ignored rather than refused: it can only come from
+    // a hand-typed flag, and starting with no window is the safe reading.
+    const initialWindow = opts.window ? parseWindowSetting(String(opts.window)) : undefined;
+    if (initialWindow) loop.setSlidingWindow(initialWindow);
 
     // MCP servers. Here, between the two branches below, because the REPL and one-shot mode need
     // exactly the same thing: the same tools appended to the same loop, and the same cleanup.

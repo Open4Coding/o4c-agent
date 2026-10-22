@@ -13,6 +13,14 @@ export interface RestartRequest {
   /** The Auto/Manual/... mode to start in - carried across the restart so a reload never silently
    * drops the user back to Manual. */
   mode?: string;
+  /**
+   * The `/window` setting as the user typed it (`40000`, `50%`), carried for the same reason as
+   * `mode` and found the same way: o4c reloads itself after most turns, so anything held only in
+   * the process is gone one turn after it was set. A sliding window that quietly switched itself
+   * off would be worse than one that never existed, because the session would look like it was
+   * still protecting itself.
+   */
+  window?: string;
 }
 
 /** The argv (after the script path) a restarted o4c is launched with. */
@@ -21,6 +29,7 @@ export function buildRestartArgs(request: RestartRequest): string[] {
   if (request.image) args.push('--image', request.image);
   if (request.resumeId) args.push('--resume', request.resumeId);
   if (request.mode) args.push('--mode', request.mode);
+  if (request.window) args.push('--window', request.window);
   return args;
 }
 
