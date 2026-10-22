@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { GraphStore, GRAPH_DB_FILENAME } from '../graph/graphStore.js';
-import { extractTags } from '../graph/tags.js';
+import { extractFile } from '../graph/tags.js';
 import { indexSource } from '../graph/indexer.js';
 import { nameProjection, renderFileProjection, renderNameProjection } from '../graph/projection.js';
 import { CodeGraphComponent } from '../graph/toolHook.js';
@@ -43,7 +43,10 @@ async function withStore(fn: (store: GraphStore) => Promise<void>): Promise<void
 }
 
 async function addTs(store: GraphStore, path: string, source: string): Promise<void> {
-  store.indexFile({ path, language: 'typescript', source, tags: await extractTags(source, 'typescript') });
+  // `extractFile`, not `extractTags`: the import bindings are part of what the resolver consults,
+  // so a helper that dropped them would quietly test a weaker resolver than the one that ships.
+  const { tags, imports } = await extractFile(source, 'typescript');
+  store.indexFile({ path, language: 'typescript', source, tags, imports });
 }
 
 /** A built-in tool as the seam sees it - only `name` is consulted. */
@@ -112,15 +115,56 @@ test('a type annotation is not reported as a call site', async () => {
   });
 });
 
-test('long lists are capped rather than dumped', async () => {
+test('a candidate list is capped while it is still a list worth reading', async () => {
   await withStore(async (store) => {
+    for (let i = 0; i < 5; i++) await addTs(store, `src/d${i}.ts`, 'export function render() {}\n');
+
+    const text = renderNameProjection(store, 'render');
+    assert.match(text, /src\/d0\.ts:1 \(function\)/);
+    assert.equal(text.split('\n').length, 2, 'the header and the candidates, and nothing else');
+  });
+});
+
+test('a crowded field is counted, not listed', async () => {
+  await withStore(async (store) => {
+    // Nine definitions is past the point where a list helps. Measured on a 5,893-file repository
+    // the real numbers are far worse - `render` has 254 definitions and `new` has 1,925 - and
+    // printing the first six in path order spent ~90 tokens on entries chosen by alphabet rather
+    // than by relevance.
     for (let i = 0; i < 9; i++) await addTs(store, `src/d${i}.ts`, 'export function render() {}\n');
     for (let i = 0; i < 9; i++) await addTs(store, `src/c${i}.ts`, 'function go() { render(); }\n');
 
     const text = renderNameProjection(store, 'render');
-    assert.match(text, /· \+3 more$/m, 'candidates beyond the cap are counted');
+    assert.equal(text.split('\n').length, 1, 'the header carries the whole answer');
+    assert.match(text, /9 files define "render"/, 'and the count is in it');
+    assert.ok(!text.includes('src/d0.ts'), 'no six-of-nine candidate list');
+    // The call sites are dropped for a second reason, which outlives the token argument: they are
+    // looked up by name, so with nine definitions the list would mix references to nine different
+    // functions under one heading.
+    assert.ok(!text.includes('call sites'), 'no unattributable call-site list');
+  });
+});
+
+test('one definition is what licenses listing its call sites', async () => {
+  await withStore(async (store) => {
+    await addTs(store, 'src/only.ts', 'export function render() {}\n');
+    for (let i = 0; i < 9; i++) await addTs(store, `src/c${i}.ts`, 'function go() { render(); }\n');
+
+    const text = renderNameProjection(store, 'render');
     assert.match(text, /9 call sites:/, 'the total is exact even when the list is not');
-    assert.match(text, /\+3 more files/);
+    assert.match(text, /\+3 more files/, 'and the list itself is capped');
+  });
+});
+
+test('a crowded field that still resolves prints the one answer', async () => {
+  await withStore(async (store) => {
+    for (let i = 0; i < 9; i++) await addTs(store, `src/d${i}.ts`, 'export function render() {}\n');
+    await addTs(store, 'src/caller.ts', "import { render } from './d3.js';\nrender();\n");
+
+    const text = renderNameProjection(store, 'render', { fromPath: 'src/caller.ts' });
+    assert.match(text, /· ok ·/);
+    assert.match(text, /src\/d3\.ts:1 \(function\)/, 'the resolved candidate is worth a line');
+    assert.ok(!text.includes('src/d0.ts'), 'the other eight are not');
   });
 });
 

@@ -203,8 +203,18 @@ export interface FileIndexInput {
   readonly imports?: readonly ImportBinding[];
 }
 
+/** What `stats()` reports. */
+export interface GraphStats {
+  readonly files: number;
+  readonly defs: number;
+  readonly refs: number;
+  readonly calls: number;
+}
+
 export class GraphStore {
   private readonly db: DatabaseSync;
+  /** See `stats()`: the counts are on the per-annotation path and cost 25 ms uncached at scale. */
+  private cachedStats: { version: number; stats: GraphStats } | undefined;
   /** False when the embedded SQLite was built without FTS5; name search then falls back. */
   readonly ftsAvailable: boolean;
 
@@ -288,6 +298,7 @@ export class GraphStore {
    * the model as though they still existed.
    */
   indexFile(input: FileIndexInput): void {
+    this.cachedStats = undefined;
     const path = normalisePath(input.path);
     const hash = fileHash(input.source);
     const lines = input.source.split('\n');
@@ -370,6 +381,7 @@ export class GraphStore {
 
   /** Forgets a file entirely - for a deletion, or a path that no longer matches the filter. */
   removeFile(path: string): void {
+    this.cachedStats = undefined;
     this.db.prepare('DELETE FROM files WHERE path = ?').run(normalisePath(path));
   }
 
@@ -541,19 +553,45 @@ export class GraphStore {
     return rows.map(toDefinition);
   }
 
-  /** Row counts, for `/context` and for the acceptance harness. */
-  stats(): { files: number; defs: number; refs: number; calls: number } {
+  /**
+   * Row counts, for `/context`, for the acceptance harness, and - the reason this is cached - for
+   * the evidence line behind every `absent` verdict.
+   *
+   * These are four unindexed `COUNT(*)`s, which is nothing on a small project and **25 ms** on a
+   * large one: measured at 103k definitions and 635k references, one `code_graph` annotation cost
+   * 25 ms against 0.5-0.8 ms on a 411-file repository, and `resolveName` calls this on every
+   * single answer. Caching it is not an optimisation of a cold path.
+   *
+   * Invalidated from two directions, because there are two writers. A write through *this* handle
+   * clears the cache directly; a write through the indexing worker's handle is caught by
+   * `PRAGMA data_version`, which SQLite changes exactly when another connection commits - and
+   * explicitly does **not** change for commits on the same connection, which is why both halves
+   * are needed.
+   */
+  stats(): GraphStats {
+    const version = this.dataVersion();
+    if (this.cachedStats && this.cachedStats.version === version) return this.cachedStats.stats;
+
     const one = (sql: string) => Number((this.db.prepare(sql).get() as { n: number }).n);
-    return {
+    const stats: GraphStats = {
       files: one('SELECT COUNT(*) AS n FROM files'),
       defs: one('SELECT COUNT(*) AS n FROM defs'),
       refs: one('SELECT COUNT(*) AS n FROM refs'),
       calls: one("SELECT COUNT(*) AS n FROM refs WHERE edge_kind = 'call'"),
     };
+    this.cachedStats = { version, stats };
+    return stats;
+  }
+
+  /** Changes whenever another connection commits. Cheap enough to read on every `stats()`. */
+  private dataVersion(): number {
+    const row = this.db.prepare('PRAGMA data_version').get() as { data_version: number } | undefined;
+    return Number(row?.data_version ?? 0);
   }
 
   /** Empties the index, keeping the schema. The graph is derived, so this is always safe. */
   clear(): void {
+    this.cachedStats = undefined;
     this.db.exec('DELETE FROM files;');
     this.db.exec('DELETE FROM defs;');
     this.db.exec('DELETE FROM refs;');

@@ -38,6 +38,13 @@ import { languageForPath } from './languages.js';
 export const PROJECTION_PREFIX = '[code graph]';
 
 /** Candidate definitions listed before the list is summarised instead. */
+/**
+ * Candidates listed before the count takes over entirely.
+ *
+ * Doubles as the point past which a candidate list is dropped rather than truncated: see
+ * `nameProjection`. A truncated list of six out of 254, ordered by path, is tokens the model
+ * cannot act on.
+ */
 const MAX_CANDIDATES_SHOWN = 6;
 /** Files whose call sites are listed. Beyond this the count carries the information. */
 const MAX_CALL_FILES_SHOWN = 6;
@@ -93,15 +100,32 @@ export function nameProjection(
 ): { readonly verdict: ResolutionVerdict; readonly text: string } {
   const resolution = resolveName(store, name, options.fromPath, options);
   const lines = [`${PROJECTION_PREFIX} ${name} · ${resolution.verdict} · ${resolution.note}`];
+  const candidates = resolution.definitions;
 
-  if (resolution.definitions.length > 1) {
-    lines.push(`  ${describeCandidates(resolution.definitions)}`);
+  // A candidate list only helps while it is a list the reader could work through. Measured on a
+  // 5,893-file repository, `render` has 254 definitions and `new` has 1,925: printing the first
+  // six in path order spends ~90 tokens on `bazel/...` and `.codex/...` entries chosen by
+  // alphabet rather than by relevance, and the count in the note already says everything those
+  // six were going to say. Beyond the cap, the count is the whole answer.
+  if (candidates.length > 1 && candidates.length <= MAX_CANDIDATES_SHOWN) {
+    lines.push(`  ${describeCandidates(candidates)}`);
+  } else if (candidates.length > MAX_CANDIDATES_SHOWN && resolution.verdict === 'ok') {
+    // Resolved despite a crowded field: the one answer is worth printing, the other 253 are not.
+    lines.push(`  ${candidates[0].path}:${candidates[0].line} (${candidates[0].kind})`);
   }
 
-  // Asserted calls only. A type annotation is evidence for ranking and is not a call site, and
-  // labelling one as such here would be the same mistake `edgeKind.ts` exists to prevent.
-  const callSites = store.referencesTo(name).filter((r) => isAssertedCall(r.edgeKind));
-  if (callSites.length > 0) lines.push(`  ${describeCallSites(callSites)}`);
+  // Call sites are looked up **by name**, so they are only attributable while the name has one
+  // definition in the index. For a shared name the list would mix references to different things
+  // under one heading - `render`'s 1,065 call sites across 298 files belong to 254 different
+  // definitions - which is worse than silence and would cost ~140 tokens to say. It is also the
+  // expensive half of this projection: suppressing it took the `render` annotation from 13.3 ms
+  // to well under a millisecond, because the query is never run.
+  if (candidates.length === 1) {
+    // Asserted calls only. A type annotation is evidence for ranking and is not a call site, and
+    // labelling one as such here would be the same mistake `edgeKind.ts` exists to prevent.
+    const callSites = store.referencesTo(name).filter((r) => isAssertedCall(r.edgeKind));
+    if (callSites.length > 0) lines.push(`  ${describeCallSites(callSites)}`);
+  }
 
   return { verdict: resolution.verdict, text: lines.join('\n') };
 }
