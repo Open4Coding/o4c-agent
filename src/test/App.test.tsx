@@ -774,28 +774,54 @@ test('/clear bypasses the FIFO queue even while a turn is busy, instead of firin
     // The real bug this reproduces: a /clear typed while busy appeared to reset the screen with
     // no user action at all, because the actual trigger and its effect were separated in time.
     assert.equal(anyFrameIncludes(frames, 'Queued #1: /clear'), false);
-    assert.deepEqual(restartCalls, [undefined]);
+    assert.ok(anyFrameIncludes(frames, 'Clear the session and start fresh?'), 'it asks at once');
   });
 });
 
-test('/clear mid-turn aborts the in-flight turn first, not just bypassing the queue', async () => {
+test('/clear asks first, and Enter on the default No leaves the session alone', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, restartCalls } = await setup({ dir });
+
+    await submit(stdin, '/clear');
+    await waitFor(() => anyFrameIncludes(frames, 'Clear the session and start fresh?'));
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'Clear cancelled'));
+
+    assert.deepEqual(restartCalls, []);
+  });
+});
+
+test('/clear mid-turn, confirmed: aborts the turn, saves the session once, then restarts', async () => {
   await withTempDir(async (dir) => {
     const provider = new AbortAwareHangingProvider();
-    const { stdin, restartCalls } = await setup({ dir, provider });
+    const { stdin, frames, restartCalls, store } = await setup({ dir, provider });
 
     await submit(stdin, 'this will hang until aborted');
     await tick(50);
     assert.equal(provider.aborted, false);
 
     await submit(stdin, '/clear');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Clear the session and start fresh?'));
+    assert.equal(provider.aborted, false, 'nothing is stopped until the user says Yes');
+    stdin.write(DOWN); // No -> Yes
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => restartCalls.length > 0);
 
-    // Real reported symptom this prevents: without aborting first, the busy turn's still-arriving
+    // Real reported symptom the abort prevents: without it, the busy turn's still-arriving
     // delta/think events kept updating the live status bar's token count for however long it took
     // to settle on its own - all while this process was already mid-exit - so /clear during a
     // long think appeared to leave a large, growing count on screen instead of resetting to 0.
     assert.equal(provider.aborted, true);
     assert.deepEqual(restartCalls, [undefined]);
+
+    // The unfinished turn was saved before the restart - and only once, although the aborted
+    // turn's own autosave and /clear's save both ran on a session that had no id yet.
+    await tick(100);
+    const sessions = await store.readManifest();
+    assert.equal(sessions.length, 1);
+    const saved = await store.load(sessions[0].id);
+    assert.ok(JSON.stringify(saved).includes('this will hang until aborted'));
   });
 });
 
@@ -1157,10 +1183,10 @@ test('Enter in the command palette selects and submits the highlighted command, 
     await type(stdin, '/cl');
     await waitFor(() => anyFrameIncludes(frames, '/clear'));
     stdin.write(ENTER);
-    await tick(50);
 
-    // /clear hands off to a restart (no resumeId) rather than resetting state in-place.
-    assert.deepEqual(restartCalls, [undefined]);
+    // Submitted: /clear's confirmation is up, and nothing restarts until it is answered.
+    await waitFor(() => anyFrameIncludes(frames, 'Clear the session and start fresh?'));
+    assert.deepEqual(restartCalls, []);
   });
 });
 
@@ -1567,7 +1593,7 @@ test('/help-<unknown> shows an error instead of a blank or crashed response', as
 
 test('a real turn autosaves the session, and /clear hands off to a restart with no resumeId', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, store, restartCalls } = await setup({ dir });
+    const { stdin, frames, store, restartCalls } = await setup({ dir });
 
     await submit(stdin, 'first session message');
 
@@ -1579,7 +1605,11 @@ test('a real turn autosaves the session, and /clear hands off to a restart with 
     const firstId = manifestAfterFirst[0].id;
 
     await submit(stdin, '/clear');
-    await tick(50);
+    await waitFor(() => anyFrameIncludes(frames, 'Clear the session and start fresh?'));
+    stdin.write(DOWN); // No -> Yes
+    await tick(100);
+    stdin.write(ENTER);
+    await waitFor(() => restartCalls.length > 0);
 
     // No resumeId - the freshly spawned process starts blank, with a brand-new session id on its
     // next autosave, rather than overwriting this one.

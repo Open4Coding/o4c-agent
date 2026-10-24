@@ -11,6 +11,7 @@ import {
   splitThinkBlock,
   toWireMessages,
   userInputEntry,
+  withoutUnansweredToolCalls,
 } from '../agent/contextEntry.js';
 import type { Message } from '../providers/types.js';
 
@@ -359,4 +360,24 @@ test('toWireMessages: an unreadable tool call is dropped with its result, instea
 
   const toolIds = messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId);
   assert.deepEqual(toolIds, ['ok1'], 'the orphaned result for the unreadable call must not be sent');
+});
+
+test('withoutUnansweredToolCalls drops only a call still waiting for its result', () => {
+  const user = userInputEntry('do two things');
+  const done = aiToolCallEntry({ id: 'c1', name: 'read_file', input: { path: 'a.ts' } }, false);
+  const doneResult = aiToolCallResponseEntry('c1', 'contents', false);
+  const pending = aiToolCallEntry({ id: 'c2', name: 'run_shell', input: { command: 'dir' } }, true);
+
+  const kept = withoutUnansweredToolCalls([user, done, doneResult, pending]);
+
+  assert.deepEqual(
+    kept.map((e) => e.id),
+    [user.id, done.id, doneResult.id],
+    'the finished round and the message stay; the call with no result goes',
+  );
+  // What makes it safe to resume: every call that reaches the wire has its result.
+  const wire = toWireMessages(kept);
+  const calls = wire.flatMap((m) => m.toolCalls ?? []).map((c) => c.id);
+  const results = wire.filter((m) => m.role === 'tool').map((m) => m.toolCallId);
+  assert.deepEqual(calls, results);
 });

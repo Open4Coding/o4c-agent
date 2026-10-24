@@ -55,7 +55,10 @@ export interface CommandInfo {
 // palette exists only while typing and never shows descriptions for more than the currently
 // narrowed set, where `/help` is meant to be read as a single reference, in full, at once.
 export const COMMANDS: CommandInfo[] = [
-  { name: '/clear', description: 'Clear the current session and start fresh (still resumable via /resume).' },
+  {
+    name: '/clear',
+    description: 'Clear the current session and start fresh. Asks first; the session is saved and stays resumable via /resume.',
+  },
   { name: '/resume', description: 'Browse and resume one of the last 20 saved sessions.' },
   {
     name: '/context',

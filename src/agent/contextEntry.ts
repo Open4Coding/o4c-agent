@@ -473,3 +473,22 @@ export function liftLegacyMessages(messages: readonly Message[]): ContextEntry[]
     return out;
   });
 }
+
+/**
+ * The entries minus any tool call that has no result yet.
+ *
+ * For saving a turn that is being cut off (`/clear` mid-turn): an aborted turn is normally rolled
+ * back whole, because a call without its result is a malformed conversation a provider rejects,
+ * and a resumed session would start from it. Dropping only the unanswered calls keeps everything
+ * else the turn had already done - the user's message, every completed tool round.
+ */
+export function withoutUnansweredToolCalls(entries: readonly ContextEntry[]): ContextEntry[] {
+  const answered = new Set(
+    entries
+      .filter((e) => e.type === 'ai' && e.sub_type === 'toolcallresponse')
+      .map((e) => e.tool_call_id ?? e.id),
+  );
+  return entries.filter(
+    (e) => !(e.type === 'ai' && e.sub_type === 'toolcall' && !answered.has(e.tool_call_id ?? e.id)),
+  );
+}

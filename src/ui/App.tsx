@@ -89,7 +89,7 @@ import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } f
 import { buildSplashText } from './splash.js';
 import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
-import type { ContextEntry } from '../agent/contextEntry.js';
+import { withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -867,6 +867,41 @@ export function App({
   );
   // True while the "Stop now?" check is showing: Esc during a running turn asks before it stops anything.
   const [stopConfirm, setStopConfirm] = useState(false);
+  // True while /clear's "start fresh?" check is showing (No selected by default, like Stop now?).
+  const [clearConfirm, setClearConfirm] = useState(false);
+
+  // Every session save goes through this one queue, so two saves never run at once - two first
+  // saves of a session would each file a separate one. The entries are taken when the save is asked
+  // for (`snapshot`, or the loop's history as it stands); the id when its turn in the queue comes.
+  // Resolves to the session id, or undefined when there was nothing to save.
+  //
+  // `final` closes the session: later saves are skipped. /clear needs both halves. It saves before
+  // aborting, because an aborted turn is rolled back out of the loop's history entirely; and the
+  // aborted turn's own autosave, which runs after that rollback, must not overwrite the save.
+  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const sessionClosedRef = useRef(false);
+  const saveSessionNow = useCallback(
+    (snapshot?: readonly ContextEntry[], final = false): Promise<string | undefined> => {
+      if (sessionClosedRef.current) return Promise.resolve(currentSessionIdRef.current);
+      if (final) sessionClosedRef.current = true;
+      const entries = snapshot ?? [...loop.getEntries()];
+      const inputHistory = [...inputHistoryRef.current];
+      const run = saveQueueRef.current
+        .catch(() => {})
+        .then(async () => {
+          if (entries.length === 0) return undefined;
+          const id = await sessionStore.save(entries, currentSessionIdRef.current, inputHistory);
+          currentSessionIdRef.current = id;
+          // A brand-new session gets its id at its first save, and the usage store needs it before
+          // this process exits, or the session subtotal is filed under no id (see usageStore.ts).
+          usageStore?.setSessionId(id);
+          return id;
+        });
+      saveQueueRef.current = run;
+      return run;
+    },
+    [loop, sessionStore, usageStore],
+  );
   // The turn that was running when the check opened - Yes only stops THAT turn, never a later one a queued
   // message started while the box sat open.
   const stopTargetRef = useRef<AbortController | null>(null);
@@ -2123,19 +2158,11 @@ export function App({
           // the provider), so it's worth persisting rather than losing on a crash or network error.
           // Proceeds even when stale (see above) - the data's real regardless of whether anyone's
           // still watching for it.
-          const entries = loop.getEntries();
-          if (entries.length > 0) {
+          if (loop.getEntries().length > 0) {
             try {
-              currentSessionIdRef.current = await sessionStore.save(
-                entries,
-                currentSessionIdRef.current,
-                inputHistoryRef.current,
-              );
-              turnSaved = true;
-              // A brand new session only gets its id here, at its first save. The store needs
-              // it before the reload below exits, or this session's subtotal would be filed
-              // under no id at all and restart from zero on the next process.
-              usageStore?.setSessionId(currentSessionIdRef.current);
+              // Through the shared queue, not a direct save: /clear can abort this turn and save
+              // at the same moment, and two concurrent first saves would file two sessions.
+              turnSaved = (await saveSessionNow()) !== undefined;
             } catch (saveErr) {
               if (!stale) pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
             }
@@ -2143,6 +2170,11 @@ export function App({
 
           if (stale) return;
         }
+
+        // /clear closed this session while the turn was running and is restarting fresh. Nothing
+        // after this point may run: a per-turn reload here would call restart() with this
+        // session's id and, landing after /clear's own restart(), resume the session it cleared.
+        if (sessionClosedRef.current) return;
 
         // Reload the session in a fresh process: the fix for a long thinking/coding turn that ends in a
         // clear or partial screen. Everything the live view held (streamed think text, narration, the
@@ -2173,7 +2205,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow],
   );
 
   const handleModePickerSelect = useCallback(
@@ -2345,6 +2377,57 @@ export function App({
     [abortTurn],
   );
 
+  // /clear's confirmation. Yes stops any running turn, saves the whole session (it stays resumable
+  // via /resume), then restarts fresh. The save is awaited before the restart: the per-turn
+  // autosave only runs when a turn completes, so without it a /clear mid-turn - or after commands
+  // that only added input history - would drop whatever came after the last completed turn.
+  const handleClearResolve = useCallback(
+    (yes: boolean) => {
+      setClearConfirm(false);
+      if (!yes) {
+        pushBlock([infoLine('Clear cancelled - the session is unchanged.')]);
+        return;
+      }
+      // Best-effort abort of any in-flight turn first (same as Escape/Ctrl+C) - not just
+      // politeness. Without this, a busy turn's still-arriving delta/think events keep
+      // updating the live status bar's token count and the in-flight text for however long it
+      // takes the abort signal (or the request's own timeout) to actually land, all while this
+      // process is mid-exit. Real, reported symptom this produces: /clear during a long think
+      // still showing a large, growing token count afterward - not the new fresh process
+      // inheriting anything (a genuinely new AgentLoop starts at 0), but Windows Terminal's own
+      // ESC[2J limitation (see resizeReflowFix.ts's doc comment: it scrolls the stale frame into
+      // scrollback rather than truly erasing it) leaving that last, larger frame from the dying
+      // old process visible above the new one's fresh banner. Stopping the old turn from
+      // rendering anything further shrinks this window as much as possible.
+      //
+      // Saved BEFORE the abort, from a snapshot: an aborted turn rolls itself out of the loop's
+      // history entirely, so saving afterwards would lose this turn's message and every tool round
+      // it finished. Only a tool call still waiting for its result is left out - a resumed session
+      // carrying one would be rejected by the provider. `final` stops the aborted turn's own
+      // autosave from overwriting this with the rolled-back history.
+      const saved = saveSessionNow(withoutUnansweredToolCalls(loop.getEntries()), true);
+      abortTurn();
+      // A failed save does not clear: the point of saving first is that clearing loses nothing.
+      void saved.then(
+        () => {
+          restart(undefined, modeRef.current);
+          setTimeout(() => exit(), 0);
+        },
+        (saveErr) => {
+          // The session goes on, so later turns must be able to save it again.
+          sessionClosedRef.current = false;
+          pushBlock([
+            {
+              kind: 'error',
+              text: `Not cleared - saving the session failed: ${formatError(saveErr)}`,
+            },
+          ]);
+        },
+      );
+    },
+    [loop, abortTurn, saveSessionNow, pushBlock, restart, exit],
+  );
+
   // The check has nothing left to stop once the turn is over: close it so a stale box never lingers.
   useEffect(() => {
     if (!isProcessing) setStopConfirm(false);
@@ -2418,20 +2501,8 @@ export function App({
       // this, and running it through there would wrongly clear isProcessing out from under a
       // still-busy turn.
       if (input === '/clear') {
-        // Best-effort abort of any in-flight turn first (same as Escape/Ctrl+C) - not just
-        // politeness. Without this, a busy turn's still-arriving delta/think events keep
-        // updating the live status bar's token count and the in-flight text for however long it
-        // takes the abort signal (or the request's own timeout) to actually land, all while this
-        // process is mid-exit. Real, reported symptom this produces: /clear during a long think
-        // still showing a large, growing token count afterward - not the new fresh process
-        // inheriting anything (a genuinely new AgentLoop starts at 0), but Windows Terminal's own
-        // ESC[2J limitation (see resizeReflowFix.ts's doc comment: it scrolls the stale frame into
-        // scrollback rather than truly erasing it) leaving that last, larger frame from the dying
-        // old process visible above the new one's fresh banner. Stopping the old turn from
-        // rendering anything further shrinks this window as much as possible.
-        abortControllerRef.current?.abort();
-        restart(undefined, modeRef.current);
-        setTimeout(() => exit(), 0);
+        // Asks first, No selected - see handleClearResolve for what Yes does.
+        setClearConfirm(true);
         return;
       }
 
@@ -2520,6 +2591,7 @@ export function App({
     !viewPicker &&
     !thinkScopePicker &&
     !stopConfirm &&
+    !clearConfirm &&
     !serverWait &&
     familyMatches.length > 0;
 
@@ -2560,6 +2632,7 @@ export function App({
     !viewPicker &&
     !thinkScopePicker &&
     !stopConfirm &&
+    !clearConfirm &&
     !serverWait &&
     !familyOpen &&
     paletteMatches.length > 0;
@@ -2598,7 +2671,7 @@ export function App({
       {isThinking && <Spinner />}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !stopConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker}
+        active={!confirmDialog && !stopConfirm && !clearConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker}
         suppressNav={paletteOpen || familyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
@@ -2633,7 +2706,14 @@ export function App({
           yesNote="this stops the current process"
           onResolve={handleStopResolve}
         />
-      ) : serverWait ? (
+      ) : clearConfirm ? (
+        <ConfirmDialog
+          key="clear-confirm"
+          message="Clear the session and start fresh?"
+          yesNote="the session is saved first and stays resumable via /resume"
+          onResolve={handleClearResolve}
+        />
+      ) :serverWait ? (
         <ServerDownPicker
           status={serverWait.status}
           checks={serverWait.checks}
