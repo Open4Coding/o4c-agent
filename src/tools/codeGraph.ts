@@ -28,7 +28,10 @@ export function createCodeGraphTool(lookup: CodeGraphLookup): Tool {
       'is worth (ok / low_confidence / absent / degraded). With "path": what that file defines ' +
       'and how many other files reference it. Resolution is by name, not by type, so overloads ' +
       'and interface dispatch are not followed, and only languages with a bundled grammar are ' +
-      'covered - an empty answer is reported as such, never as silence.',
+      'covered - an empty answer is reported as such, never as silence. An "ok" answer already ' +
+      'lists the call sites grouped by file: "+N" after line numbers means N more lines in that ' +
+      'file, "+N more files" means files not shown. Use it directly; grep only for the files it ' +
+      'says it did not show, or for mentions that are not calls (strings, comments).',
     inputSchema: {
       type: 'object',
       properties: {
