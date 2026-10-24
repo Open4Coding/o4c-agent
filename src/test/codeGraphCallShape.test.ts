@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { GraphStore, GRAPH_DB_FILENAME, type DefinitionRow } from '../graph/graphStore.js';
 import { extractFile } from '../graph/tags.js';
 import { callShapeFor, chooseTarget, resolveCallEdges } from '../graph/resolve.js';
+import { nameProjection } from '../graph/projection.js';
 
 /**
  * Telling `f()` from `o.f()`, and the three kinds that distinction needs.
@@ -190,5 +191,74 @@ test('the counts separate the two rules, so each can be judged alone', async () 
     assert.equal(counts.viaCallShape, 1);
     assert.equal(counts.viaImport, 1);
     assert.equal(counts.ambiguous, 0);
+  });
+});
+
+// ------------------------------------------------------------------ type-only namesakes
+
+const CALL = { isCall: true } as const;
+
+test('a call cannot reach a TypeScript type alias or interface', () => {
+  // The stub that sent a "who calls this" question back to grep: `type f = any` beside the real
+  // function. No call reaches a type, so the function is the answer.
+  const chosen = chooseTarget([definition('src/stub/f.ts', 'type'), definition('src/f.ts', 'function')], CALL);
+  assert.equal(chosen?.route, 'callable');
+  assert.equal(chosen?.definition.path, 'src/f.ts');
+  assert.equal(
+    chooseTarget([definition('src/a.ts', 'interface'), definition('src/b.tsx', 'function')], CALL)?.definition.path,
+    'src/b.tsx',
+  );
+});
+
+test('a bare name question does not apply the type-only rule', () => {
+  // The name may be used as a type, so picking the function would be a claim the index cannot back.
+  assert.equal(chooseTarget([definition('src/stub/f.ts', 'type'), definition('src/f.ts', 'function')]), undefined);
+});
+
+test('the type-only rule is per language and never empties the list', () => {
+  // Go's `T(x)` is a conversion recorded as a call, so a Go type stays a candidate.
+  assert.equal(chooseTarget([definition('a.go', 'type'), definition('b.go', 'function')], CALL), undefined);
+  // Only types: the rule narrows nothing rather than declining or choosing.
+  assert.equal(chooseTarget([definition('src/a.ts', 'type'), definition('src/b.ts', 'interface')], CALL), undefined);
+  assert.equal(chooseTarget([definition('src/a.ts', 'type')], CALL)?.route, 'unique');
+});
+
+test('two callable definitions stay ambiguous beside a type', () => {
+  const candidates = [definition('src/a.ts', 'function'), definition('src/b.ts', 'function'), definition('src/c.ts', 'type')];
+  assert.equal(chooseTarget(candidates, CALL), undefined);
+});
+
+test('call edges resolve past a type-only namesake', async () => {
+  await withStore(async (store) => {
+    await addTs(store, 'src/stub/f.ts', 'export type helper = any;\n');
+    await addTs(store, 'src/f.ts', 'export function helper(): void {}\n');
+    await addTs(store, 'src/use.ts', 'function go(): void { helper(); }\n');
+    const { edges, counts } = resolveCallEdges(store);
+    const edge = edges.find((e) => e.name === 'helper');
+    assert.equal(edge?.kind, 'call');
+    assert.equal(edge?.toPath, 'src/f.ts');
+    assert.equal(counts.viaCallable, 1);
+    assert.equal(counts.ambiguous, 0);
+  });
+});
+
+test('the projection lists call sites past a type-only namesake', async () => {
+  await withStore(async (store) => {
+    await addTs(store, 'src/stub/f.ts', 'export type helper = any;\n');
+    await addTs(store, 'src/f.ts', 'export function helper(): void {}\n');
+    await addTs(store, 'src/use.ts', "import { helper } from './f.js';\nhelper();\n");
+    const { verdict, text } = nameProjection(store, 'helper');
+    assert.equal(verdict, 'low_confidence', 'the name itself is still shared with a type');
+    assert.match(text, /only src\/f\.ts:1 can be called - the others are types/);
+    assert.match(text, /src\/use\.ts:2/, 'the call site is listed');
+  });
+});
+
+test('nothing is attributed when there are no calls to attribute', async () => {
+  // An interface the query also files as a class: no call sites, so no "can be called" claim.
+  await withStore(async (store) => {
+    await addTs(store, 'src/t.ts', 'export interface Shape { kind: string }\n');
+    await addTs(store, 'src/u.ts', 'export function f(s: Shape): Shape { return s; }\n');
+    assert.doesNotMatch(nameProjection(store, 'Shape').text, /can be called|call site/);
   });
 });

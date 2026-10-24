@@ -30,7 +30,7 @@
  */
 
 import type { DefinitionRow, FileFreshness, GraphStore, ReferenceRow } from './graphStore.js';
-import { resolveName, type ResolutionVerdict, type ResolveOptions } from './resolve.js';
+import { isCallable, resolveName, type ResolutionVerdict, type ResolveOptions } from './resolve.js';
 import { isAssertedCall } from './edgeKind.js';
 import { languageForPath } from './languages.js';
 
@@ -119,12 +119,20 @@ export function nameProjection(
   // under one heading - `render`'s 1,065 call sites across 298 files belong to 254 different
   // definitions - which is worse than silence and would cost ~140 tokens to say. It is also the
   // expensive half of this projection: suppressing it took the `render` annotation from 13.3 ms
-  // to well under a millisecond, because the query is never run.
-  if (candidates.length === 1) {
+  // to well under a millisecond, because the query is never run. A type-only definition does not
+  // count against that: no call can reach it, so every call site belongs to the one that can.
+  const callable = candidates.filter(isCallable);
+  if (callable.length === 1) {
     // Asserted calls only. A type annotation is evidence for ranking and is not a call site, and
     // labelling one as such here would be the same mistake `edgeKind.ts` exists to prevent.
     const callSites = store.referencesTo(name).filter((r) => isAssertedCall(r.edgeKind));
-    if (callSites.length > 0) lines.push(`  ${describeCallSites(callSites)}`);
+    if (callSites.length > 0) {
+      if (candidates.length > 1) {
+        // The verdict is about the name, which a type shares; the calls are not in doubt.
+        lines.push(`  only ${callable[0].path}:${callable[0].line} can be called - the others are types`);
+      }
+      lines.push(`  ${describeCallSites(callSites)}`);
+    }
   }
 
   return { verdict: resolution.verdict, text: lines.join('\n') };

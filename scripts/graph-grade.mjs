@@ -306,7 +306,8 @@ for (const repo of REPOS) {
     `${indexed.resolved.counts.ambiguous} ambiguous, ` +
     `${indexed.resolved.counts.unresolved} unresolved` +
     `, ${indexed.resolved.counts.viaImport} of the resolved via an import` +
-    `, ${indexed.resolved.counts.viaCallShape} via the call's shape`);
+    `, ${indexed.resolved.counts.viaCallShape} via the call's shape` +
+    `, ${indexed.resolved.counts.viaCallable} past a type-only namesake`);
 
   for (const [cellName, includeCaller] of [
     ['with tests', () => true],

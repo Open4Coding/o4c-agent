@@ -45,6 +45,13 @@ export interface GraphLanguage {
    * nothing about the shape and resolution must read nothing into it.
    */
   readonly distinguishesCallShape?: true;
+  /**
+   * Definition kinds no call can reach: a TypeScript `type` alias or `interface` exists only at
+   * compile time, so `f()` never refers to one. Listed per language because it is not true
+   * everywhere - Go's `T(x)` is a conversion its query records as a call, and a Python class is
+   * called to construct it.
+   */
+  readonly typeOnlyKinds?: readonly string[];
 }
 
 /**
@@ -70,8 +77,13 @@ export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
   // rank 5 - a shell script's call graph really is its command invocations
   { id: 'bash', extensions: ['.sh', '.bash', '.zsh'] },
   // rank 6
-  { id: 'typescript', extensions: ['.ts', '.mts', '.cts'], distinguishesCallShape: true },
-  { id: 'tsx', extensions: ['.tsx'], distinguishesCallShape: true },
+  {
+    id: 'typescript',
+    extensions: ['.ts', '.mts', '.cts'],
+    distinguishesCallShape: true,
+    typeOnlyKinds: ['type', 'interface'],
+  },
+  { id: 'tsx', extensions: ['.tsx'], distinguishesCallShape: true, typeOnlyKinds: ['type', 'interface'] },
   // rank 7
   { id: 'c_sharp', extensions: ['.cs'] },
   // rank 8

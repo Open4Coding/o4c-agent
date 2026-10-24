@@ -43,7 +43,7 @@ import type { DefinitionRow, GraphStore } from './graphStore.js';
 import { isAssertedCall, type EdgeKind } from './edgeKind.js';
 import { normalisePath } from './entityId.js';
 import { importedTarget, type ImportBinding } from './imports.js';
-import { languageById } from './languages.js';
+import { languageById, languageForPath } from './languages.js';
 
 /**
  * How much weight an answer can bear.
@@ -191,6 +191,11 @@ function noteFor(chosen: ChosenTarget, candidateCount: number): string {
         `of this name, and the reference is a ${chosen.shape === 'member' ? 'method' : 'plain'} call. ` +
         `${others} other file(s) define the same name.`
       );
+    case 'callable':
+      return (
+        `${chosen.definition.path}:${chosen.definition.line} is the only definition a call can reach; ` +
+        `${others} other ${others === 1 ? 'definition is a type' : 'definitions are types'} of the same name.`
+      );
   }
 }
 
@@ -200,7 +205,7 @@ function noteFor(chosen: ChosenTarget, candidateCount: number): string {
  * Which rule picked a target. Tried in this order, and reported so a measurement can weigh each
  * rule separately rather than crediting the ladder as a whole.
  */
-export type ResolutionRoute = 'call-shape' | 'same-file' | 'import' | 'unique';
+export type ResolutionRoute = 'callable' | 'call-shape' | 'same-file' | 'import' | 'unique';
 
 /** `f()` versus `o.f()` - only known for a language whose query distinguishes them. */
 export type CallShape = 'bare' | 'member';
@@ -221,6 +226,12 @@ export interface ChooseOptions {
   readonly importedModule?: string;
   /** The call site's shape, when the language's query records it. */
   readonly callShape?: CallShape;
+  /**
+   * The reference is known to be a call, so a type-only candidate cannot be its target. Not set
+   * for a bare name question (`resolveName`): there the name may be used as a type, and choosing
+   * the function would be a claim the index cannot back.
+   */
+  readonly isCall?: boolean;
 }
 
 /**
@@ -232,8 +243,8 @@ export interface ChooseOptions {
  * quite run.
  *
  * Every rule here is **positive**: each may choose among the candidates the index already holds,
- * and none may rule a candidate out. The call-shape narrowing therefore falls back to the full
- * list when it would empty it, and a missing or unknown shape narrows nothing.
+ * and none may rule a candidate out. The type-only and call-shape narrowings therefore fall back
+ * to the full list when they would empty it, and a missing or unknown shape narrows nothing.
  */
 export function chooseTarget(
   candidates: readonly DefinitionRow[],
@@ -241,10 +252,12 @@ export function chooseTarget(
 ): ChosenTarget | undefined {
   if (candidates.length === 0) return undefined;
 
-  const narrowed = narrowByCallShape(candidates, options.callShape);
+  const callable = options.isCall ? narrowToCallable(candidates) : candidates;
+  const narrowed = narrowByCallShape(callable, options.callShape);
   if (narrowed.length === 1) {
-    return narrowed.length === candidates.length
-      ? { definition: narrowed[0], route: 'unique' }
+    if (narrowed.length === candidates.length) return { definition: narrowed[0], route: 'unique' };
+    return callable.length === 1
+      ? { definition: narrowed[0], route: 'callable' }
       : { definition: narrowed[0], route: 'call-shape', shape: options.callShape };
   }
 
@@ -294,6 +307,22 @@ export function chooseTarget(
  * The fallback to the full list is what keeps the rule positive, and a language whose query does
  * not distinguish the two shapes passes `undefined` and narrows nothing.
  */
+function narrowToCallable(candidates: readonly DefinitionRow[]): readonly DefinitionRow[] {
+  const kept = candidates.filter(isCallable);
+  return kept.length > 0 ? kept : candidates;
+}
+
+/**
+ * Whether any call could reach this definition. False only for a kind the file's language marks
+ * type-only (`languages.ts`), so a `type X = any` stub sharing a function's name stops making the
+ * function's every call site unattributable. That stub is not hypothetical: a 2,782-file
+ * repository measured on 2026-10-24 carries 747 files of them, and one sent a "who calls this"
+ * question on it back to grep and file reads.
+ */
+export function isCallable(definition: DefinitionRow): boolean {
+  return !languageForPath(definition.path)?.typeOnlyKinds?.includes(definition.kind);
+}
+
 function narrowByCallShape(
   candidates: readonly DefinitionRow[],
   shape: CallShape | undefined,
@@ -372,6 +401,11 @@ export interface ResolveEdgesResult {
      * ambiguous while `f()` and `o.f()` were stored identically.
      */
     readonly viaCallShape: number;
+    /**
+     * Of the resolved ones, how many only resolved because every other candidate was a type no
+     * call can reach. Same purpose again, for the type-only change.
+     */
+    readonly viaCallable: number;
     /** Call sites with no in-repo definition - a library call, or a miss. */
     readonly unresolved: number;
     readonly edges: number;
@@ -397,6 +431,7 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
   let unresolved = 0;
   let viaImport = 0;
   let viaCallShape = 0;
+  let viaCallable = 0;
 
   // One pass over the definition table, so each name is looked up once rather than per call site.
   const definitionsByName = new Map<string, DefinitionRow[]>();
@@ -427,12 +462,14 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
         fromPath: file.path,
         importedModule: imports.get(ref.name),
         callShape: callShapeFor(file.language, ref.kind),
+        isCall: true,
       });
 
       if (chosen) {
         resolved++;
         if (chosen.route === 'import') viaImport++;
         if (chosen.route === 'call-shape') viaCallShape++;
+        if (chosen.route === 'callable') viaCallable++;
         edges.push(edge(file.path, ref.line, ref.name, chosen.definition, 'call'));
         continue;
       }
@@ -455,6 +492,7 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
       unresolved,
       viaImport,
       viaCallShape,
+      viaCallable,
       edges: edges.length,
     },
   };
