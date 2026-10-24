@@ -31,7 +31,7 @@ import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
 import { startMcpSession, type McpSession } from './mcp/startup.js';
-import { startCodeGraph } from './graph/startup.js';
+import { startCodeGraph, type CodeGraphSession } from './graph/startup.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
 
@@ -184,6 +184,7 @@ async function runRepl(
   serverHooks?: { status: ServerStatus; probe: () => Promise<ServerProbe>; onRecovered: (probe: ServerProbe) => void },
   showTabHint?: boolean,
   mcp?: McpSession,
+  graph?: CodeGraphSession,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -277,6 +278,7 @@ async function runRepl(
       mcpPromptCommands: mcp && mcp.ready.then(() => mcp.promptCommands()),
       mcpStatusReport: mcp?.statusReport,
       expandMcpPrompt: mcp?.expandPrompt,
+      codeGraph: graph,
     }),
     {
       // Opt-in, off by default (confirmed in ink's own source: does nothing unless set). 'auto'
@@ -419,7 +421,10 @@ program
     const { trusted, projectRoot } = await ensureTrusted(cwd, undefined, undefined, opts.profile);
     recordLifecycle(lifecycleDir, 'trusted', { trusted, projectRoot });
     const projectContext = trusted ? await resolveO4cMd(cwd, projectRoot) : '';
-    const systemPrompt = [SYSTEM_PROMPT, platformPromptLine(), projectContext].filter(Boolean).join('\n\n');
+    // Named explicitly: told only "their current directory", the model invented a plausible-looking
+    // path when asked where it was (seen live 2026-10-24) and could do the same in a tool call.
+    const cwdLine = `Working directory: ${cwd}`;
+    const systemPrompt = [SYSTEM_PROMPT, cwdLine, platformPromptLine(), projectContext].filter(Boolean).join('\n\n');
 
     // An explicit CLI flag always wins; otherwise fall back to the resolved config.json (global
     // -> local -> personal, see configStore.ts), and only then to the option's own hardcoded
@@ -703,6 +708,10 @@ program
     const graph = startCodeGraph({
       projectRoot: trusted ? projectRoot : undefined,
       addTools: (tools) => loop.addTools(tools),
+      removeTools: (names) => loop.removeTools(names),
+      // Read from config rather than carried as a restart flag like --window: `/graph` saves it,
+      // so the per-turn reload and the next session both pick it up with no extra plumbing.
+      exposed: resolvedConfig.codeGraph !== false,
     });
     if (graph) {
       loop.registerCore(graph.component);
@@ -793,6 +802,7 @@ program
           : undefined,
         showTabHint,
         mcp,
+        graph,
       );
       return;
     }
@@ -805,6 +815,11 @@ program
       });
 
       process.stdout.write(`\n--- final ---\n${finalAnswer}\n`);
+      // On stderr so it never mixes into an answer a script is reading from stdout.
+      const used = loop.getUsage();
+      process.stderr.write(
+        `--- usage --- requests ${used.requestCount} · input ${used.inputTokens} · output ${used.outputTokens}\n`,
+      );
     } catch (err) {
       printError(err);
       process.exitCode = 1;

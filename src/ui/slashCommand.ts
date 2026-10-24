@@ -111,6 +111,13 @@ export const COMMANDS: CommandInfo[] = [
       'Nothing is deleted - turning it off restores the full context.',
   },
   {
+    name: '/graph',
+    select: 'run',
+    description:
+      'Show or hide the Code Graph from the model: /graph on, /graph off. ' +
+      'Off uses grep, glob and read only; indexing keeps running either way.',
+  },
+  {
     name: '/colorview',
     // Runs on Enter: it takes no argument, it just prints the chart.
     select: 'run',

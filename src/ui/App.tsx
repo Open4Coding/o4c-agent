@@ -84,6 +84,7 @@ import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import { ConfigStore, scopeOwningEntry, type ConfigScope } from '../session/configStore.js';
 import type { UsageStore } from '../session/usageStore.js';
+import type { CodeGraphSession } from '../graph/startup.js';
 import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } from './highlightColor.js';
 import { buildSplashText } from './splash.js';
 import type { Tool } from '../tools/types.js';
@@ -184,6 +185,8 @@ export interface AppProps {
     ref: McpPromptRef,
     args: Record<string, string>,
   ) => Promise<{ readonly text: string; readonly notes: readonly string[] }>;
+  /** The Code Graph, for `/graph`. Undefined when it is not running (untrusted project, tests). */
+  codeGraph?: CodeGraphSession;
   /** `'local' | 'anthropic' | 'mock'` - display only, for the startup splash header. */
   provider: string;
   /** Only meaningful (and only shown) for the local provider - display only, for the startup
@@ -549,6 +552,7 @@ export function App({
   mcpPromptCommands,
   mcpStatusReport,
   expandMcpPrompt,
+  codeGraph,
 }: AppProps) {
   const { exit } = useApp();
   // The model name and context size can change after launch: a server that was down at startup tells us both
@@ -1393,6 +1397,35 @@ export function App({
             void runLogger.log({ type: 'system', sub_type: 'info', command: '/window', setting: typed });
           }
         }
+      } else if (input === '/graph' || input.startsWith('/graph ')) {
+        pushBlock([userLine(input)]);
+        const typed = input.slice('/graph'.length).trim().toLowerCase();
+        if (!codeGraph) {
+          pushBlock([infoLine('The Code Graph is not running in this session (it needs a trusted project).')]);
+        } else if (!typed) {
+          pushBlock([
+            infoLine(
+              codeGraph.component.isExposed()
+                ? 'Code Graph is on: the model gets the code_graph tool and notes on grep/read results. /graph off hides it.'
+                : 'Code Graph is off: the model uses grep, glob and read only. It keeps indexing in the background; /graph on shows it again.',
+            ),
+          ]);
+        } else if (typed === 'on' || typed === 'off') {
+          const on = typed === 'on';
+          codeGraph.setExposed(on);
+          // Saved so the per-turn reload keeps it - cli.ts reads `codeGraph` at startup.
+          void configStore.set('local', 'codeGraph', on).catch(() => {});
+          pushBlock([
+            infoLine(
+              on
+                ? 'Code Graph on - the next request includes the code_graph tool and its notes.'
+                : 'Code Graph off - the next request uses grep, glob and read only. Indexing continues in the background.',
+            ),
+          ]);
+          void runLogger.log({ type: 'system', sub_type: 'info', command: '/graph', setting: typed });
+        } else {
+          pushBlock([infoLine(`"${typed}" is not a setting - use /graph on or /graph off.`)]);
+        }
       } else if (input === '/set' || input === '/config') {
         // Submitted rather than chosen from the dropdown. The dropdown owns Enter while it is open,
         // so reaching here means it was dismissed with Esc first - these commands have no action of
@@ -2140,7 +2173,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore],
   );
 
   const handleModePickerSelect = useCallback(

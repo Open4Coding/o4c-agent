@@ -28,12 +28,18 @@ export interface CodeGraphSessionOptions {
   readonly projectRoot: string | undefined;
   /** Adds the one verb to the loop, exactly as MCP adds its proxies. */
   readonly addTools: (tools: readonly Tool[]) => void;
+  /** Takes it back out, for `/graph off`. */
+  readonly removeTools: (names: readonly string[]) => void;
+  /** The saved `codeGraph` setting. Off still indexes; it only hides the graph from the model. */
+  readonly exposed: boolean;
 }
 
 export interface CodeGraphSession {
   readonly component: CodeGraphComponent;
   /** Resolves when the first full pass finishes. Nothing in the app awaits it. */
   readonly ready: Promise<void>;
+  /** Shows or hides the graph from the model - annotations and the tool together, never one alone. */
+  setExposed(on: boolean): void;
   close(): void;
 }
 
@@ -67,12 +73,22 @@ export function startCodeGraph(options: CodeGraphSessionOptions): CodeGraphSessi
   // blocked this thread for 27.7 s in total, with a worst stall of 416 ms. See `indexWorker.ts`.
   const pass = createWorkerPass();
   const component = new CodeGraphComponent(store, options.projectRoot, pass);
-  options.addTools([createCodeGraphTool(component)]);
+  const tool = createCodeGraphTool(component);
+  const setExposed = (on: boolean): void => {
+    if (on === component.isExposed()) return;
+    component.setExposed(on);
+    if (on) options.addTools([tool]);
+    else options.removeTools([tool.name]);
+  };
+  // Indexing starts either way: off hides the graph, it does not stop keeping it current.
+  options.addTools([tool]);
+  setExposed(options.exposed);
   const ready = component.reindex();
 
   return {
     component,
     ready,
+    setExposed,
     // No startup notice, on purpose. A failed pass is not silent - it leaves the component in
     // `failed`, which reports `incomplete` to the resolver, which turns every answer that would
     // have claimed absence into `degraded` with a note saying so. That is what the four-state

@@ -106,6 +106,15 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   /** The in-flight full pass, so a second request coalesces instead of running concurrently. */
   private running: Promise<void> | undefined;
   private rerunRequested = false;
+  /**
+   * Whether the model sees the graph at all - the `/graph` switch.
+   *
+   * Off means no annotations here and no `code_graph` tool (startup.ts removes it). It does **not**
+   * stop indexing: writes, shell calls and whole-file reads still keep the index level, so turning
+   * it back on gives a fresh index rather than one that went stale while it was hidden. That is
+   * also what makes an on/off comparison fair - only what the model is shown differs.
+   */
+  private exposed = true;
 
   /**
    * `runPass` is how a full pass gets off the UI thread.
@@ -124,6 +133,14 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
 
   status(): CodeGraphStatus {
     return { phase: this.phase, lastRun: this.lastRun, lastError: this.lastError };
+  }
+
+  isExposed(): boolean {
+    return this.exposed;
+  }
+
+  setExposed(on: boolean): void {
+    this.exposed = on;
   }
 
   /**
@@ -186,8 +203,12 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
     try {
       switch (call.tool.name) {
         case GREP_TOOL:
-          return this.annotateGrep(call.input, output);
+          return this.exposed ? this.annotateGrep(call.input, output) : output;
         case READ_TOOL:
+          if (!this.exposed) {
+            await this.absorbRead(call.input, output);
+            return output;
+          }
           return await this.annotateRead(call.input, output);
         case WRITE_TOOL:
           await this.absorbWrite(call.input, output);
@@ -276,6 +297,13 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
       indexStatus: this.indexStatus(),
     });
     return projection ? `${output}\n\n${projection}` : output;
+  }
+
+  /** `annotateRead`'s reindex without its annotation, for when the graph is switched off. */
+  private async absorbRead(input: Record<string, unknown>, output: string): Promise<void> {
+    if (output.startsWith(READ_ERROR_PREFIX) || !isWholeFileRead(input, output)) return;
+    const rel = repoRelative(this.root, String(input.path ?? ''));
+    if (rel && this.store.freshness(rel, output) !== 'fresh') await indexSource(this.store, rel, output);
   }
 
   /** Keeps the index level with a successful write, from the content the write already carried. */

@@ -323,6 +323,41 @@ test('reading a file appends its outline and brings the index level with the byt
   });
 });
 
+test('switched off, nothing is annotated but reads and writes still keep the index level', async () => {
+  await withHook(async ({ root, store, component }) => {
+    component.setExposed(false);
+
+    const grep = await component.aroundTool(
+      { tool: builtIn('grep_files'), input: { pattern: 'computeArea' } },
+      async () => GREP_OUTPUT,
+    );
+    assert.equal(grep, GREP_OUTPUT);
+
+    const edited = 'export function computeArea(r: number) { return r; }\nexport function perimeter() {}\n';
+    await writeFile(join(root, 'src/area.ts'), edited, 'utf-8');
+    const read = await component.aroundTool(
+      { tool: builtIn('read_file'), input: { path: 'src/area.ts' } },
+      async () => edited,
+    );
+    assert.equal(read, edited, 'the read is returned exactly as the tool gave it');
+    assert.equal(store.freshness('src/area.ts', edited), 'fresh', 'but the index still took it in');
+
+    await component.aroundTool(
+      { tool: builtIn('write_file'), input: { path: 'src/new.ts', content: 'export function added() {}\n' } },
+      async () => 'Wrote src/new.ts',
+    );
+    assert.equal(store.definitionsOf('added').length, 1);
+
+    // Back on, the same grep is annotated again from the index kept current while hidden.
+    component.setExposed(true);
+    const back = await component.aroundTool(
+      { tool: builtIn('grep_files'), input: { pattern: 'perimeter' } },
+      async () => 'src/area.ts:2: export function perimeter() {}',
+    );
+    assert.match(back, /^\[code graph\] perimeter · ok · /);
+  });
+});
+
 test('a ranged read makes no freshness claim, and a failed read is not annotated', async () => {
   await withHook(async ({ component }) => {
     const ranged = await component.aroundTool(

@@ -53,6 +53,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/mode',
     '/think',
     '/window',
+    '/graph',
     '/colorview',
     '/help',
     '/exit',
