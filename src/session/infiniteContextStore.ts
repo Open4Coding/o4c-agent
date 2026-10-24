@@ -10,7 +10,7 @@ import type { ContextEntry } from '../agent/contextEntry.js';
  * no such file existed on disk. `index.db` was a misleading name for a *record* store and kept
  * inviting the Code Graph to share the file - which it must not, because WAL allows one writer
  * per database and this store takes small live appends mid-turn while the graph does bulk
- * reindex writes. The graph lives beside it as `graph.db`; see `dbDirFor`. */
+ * reindex writes. The graph lives beside it as `datagraph.db`; see `dbDirFor`. */
 export const INFINITE_CONTEXT_DB_FILENAME = 'history.db';
 
 export interface SessionRecord {

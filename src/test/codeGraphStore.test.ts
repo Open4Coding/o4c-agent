@@ -1,10 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { GraphStore, GRAPH_DB_FILENAME } from '../graph/graphStore.js';
+import {
+  GraphStore,
+  GRAPH_DB_FILENAME,
+  LEGACY_GRAPH_DB_FILENAME,
+  migrateLegacyIndex,
+} from '../graph/graphStore.js';
 import { extractTags } from '../graph/tags.js';
 import { entityUid, contentHash, fileHash, normalisePath, kindFromCapture } from '../graph/entityId.js';
 import { edgeKindForCapture, isAssertedCall } from '../graph/edgeKind.js';
@@ -14,7 +19,7 @@ import { INFINITE_CONTEXT_DB_FILENAME } from '../session/infiniteContextStore.js
 
 /**
  * Build step 2 of `docs/research/code-graph/0000.DECISION.md`: tag extraction into
- * `.o4c/db/graph.db`, WAL, content-hash keyed, with an FTS5 capability check.
+ * `.o4c/db/datagraph.db`, WAL, content-hash keyed, with an FTS5 capability check.
  */
 
 async function withStore(fn: (store: GraphStore, dir: string) => Promise<void> | void): Promise<void> {
@@ -331,11 +336,92 @@ test('both databases live in .o4c/db with distinct filenames', () => {
   assert.equal(dir.replace(/\\/g, '/'), '/project/.o4c/db');
   assert.equal(dbDirFor(undefined), undefined, 'no project root means no database location');
 
-  assert.equal(GRAPH_DB_FILENAME, 'graph.db');
+  assert.equal(GRAPH_DB_FILENAME, 'datagraph.db');
   assert.equal(INFINITE_CONTEXT_DB_FILENAME, 'history.db');
   assert.notEqual(
     GRAPH_DB_FILENAME,
     INFINITE_CONTEXT_DB_FILENAME,
     'separate files: WAL allows one writer per database, and the graph is disposable while history is not',
   );
+});
+
+// ------------------------------------------------- renaming graph.db -> datagraph.db
+
+test('an index written under the old name is moved, not abandoned', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-graph-'));
+  try {
+    // A real index under the pre-2026-10-24 name.
+    const legacy = new GraphStore(join(dir, LEGACY_GRAPH_DB_FILENAME));
+    const tags = await extractTags(TS_SOURCE, 'typescript');
+    legacy.indexFile({ path: 'src/shapes.ts', language: 'typescript', source: TS_SOURCE, tags });
+    const before = legacy.stats();
+    legacy.checkpoint();
+    legacy.close();
+
+    migrateLegacyIndex(dir);
+
+    const names = await readdir(dir);
+    assert.ok(names.includes(GRAPH_DB_FILENAME), 'the new name exists');
+    assert.ok(!names.includes(LEGACY_GRAPH_DB_FILENAME), 'and the old one is gone, not orphaned');
+
+    // The point of moving rather than deleting: the index survives, so no cold pass is owed.
+    const moved = new GraphStore(join(dir, GRAPH_DB_FILENAME));
+    try {
+      assert.deepEqual(moved.stats(), before);
+    } finally {
+      moved.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the write-ahead log moves with the database it belongs to', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-graph-'));
+  try {
+    // SQLite matches these to a database by filename, so a rename that left them behind would
+    // strand whatever had not been checkpointed.
+    await writeFile(join(dir, LEGACY_GRAPH_DB_FILENAME), 'db', 'utf-8');
+    await writeFile(join(dir, `${LEGACY_GRAPH_DB_FILENAME}-wal`), 'wal', 'utf-8');
+    await writeFile(join(dir, `${LEGACY_GRAPH_DB_FILENAME}-shm`), 'shm', 'utf-8');
+
+    migrateLegacyIndex(dir);
+
+    const names = (await readdir(dir)).sort();
+    assert.deepEqual(names, [
+      GRAPH_DB_FILENAME,
+      `${GRAPH_DB_FILENAME}-shm`,
+      `${GRAPH_DB_FILENAME}-wal`,
+    ].sort());
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a live index is never clobbered by an older leftover', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-graph-'));
+  try {
+    await writeFile(join(dir, GRAPH_DB_FILENAME), 'the live one', 'utf-8');
+    await writeFile(join(dir, LEGACY_GRAPH_DB_FILENAME), 'leftovers', 'utf-8');
+
+    migrateLegacyIndex(dir);
+
+    const { readFile } = await import('node:fs/promises');
+    assert.equal(await readFile(join(dir, GRAPH_DB_FILENAME), 'utf-8'), 'the live one');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('nothing to move, and nowhere to move it, are both quiet', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-graph-'));
+  try {
+    // The common case by far - every project created after the rename.
+    assert.doesNotThrow(() => migrateLegacyIndex(dir));
+    assert.deepEqual(await readdir(dir), []);
+    // And a directory that does not exist at all: this runs before the store creates it.
+    assert.doesNotThrow(() => migrateLegacyIndex(join(dir, 'absent')));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

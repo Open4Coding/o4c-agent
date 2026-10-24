@@ -62,7 +62,7 @@ export function plansDirFor(projectRoot: string | undefined): string | undefined
  * without a trusted project root.
  *
  * Two separate database files live here: `history.db` (§4's `InfiniteContextStore`) and
- * `graph.db` (the Code Graph), each created by its own store along with its `-wal`/`-shm`
+ * `datagraph.db` (the Code Graph), each created by its own store along with its `-wal`/`-shm`
  * sidecars. **Separate files, not one**, decided 2026-10-18. The graph is derived and disposable
  * while the history is primary and irreplaceable, so "clear the index" must not be able to
  * destroy the history; and WAL permits **one writer per database**, so a bulk reindex sharing a

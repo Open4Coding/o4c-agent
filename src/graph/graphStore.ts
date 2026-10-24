@@ -1,7 +1,7 @@
 /**
  * The Code Graph's on-disk store - build step 2 of `docs/research/code-graph/0000.DECISION.md`.
  *
- * SQLite via `node:sqlite`, WAL mode, at `.o4c/db/graph.db`. Not a graph database: the fastest
+ * SQLite via `node:sqlite`, WAL mode, at `.o4c/db/datagraph.db`. Not a graph database: the fastest
  * system measured in the research (28M LOC in 3 minutes, sub-millisecond queries) uses SQLite,
  * which retired Neo4j/Memgraph/FalkorDB/Qdrant for this scale.
  *
@@ -30,8 +30,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, mkdirSync, renameSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import type { Tag } from './tags.js';
 import type { ImportBinding } from './imports.js';
@@ -39,8 +39,39 @@ import { edgeKindForCapture, type EdgeKind } from './edgeKind.js';
 import { entityUid, contentHash, fileHash, normalisePath, kindFromCapture } from './entityId.js';
 import { searchTextFor } from './identifierSplit.js';
 
-/** `graph.db` itself; its `-wal`/`-shm` sidecars sit beside it. See `dbDirFor`. */
-export const GRAPH_DB_FILENAME = 'graph.db';
+/** `datagraph.db` itself; its `-wal`/`-shm` sidecars sit beside it. See `dbDirFor`. */
+export const GRAPH_DB_FILENAME = 'datagraph.db';
+
+/** What the file was called before 2026-10-24, kept only so `migrateLegacyIndex` can find it. */
+export const LEGACY_GRAPH_DB_FILENAME = 'graph.db';
+
+/**
+ * Moves an index written under the old name onto the new one.
+ *
+ * Without this, every project that has already run o4c would pay a cold pass and then keep an
+ * orphaned `graph.db` next to the real index forever - junk that looks like data.
+ *
+ * The `-wal`/`-shm` sidecars move with it. SQLite matches them to a database **by filename**,
+ * so renaming the main file alone would strand any writes still in the log. Does nothing if
+ * the new name already exists: that index is the live one, and the old file is then just
+ * leftovers that the next schema bump would have discarded anyway.
+ *
+ * Never throws. The graph is derived data, so the whole cost of giving up here is one cold
+ * pass, which is not worth failing a session over.
+ */
+export function migrateLegacyIndex(dbDir: string): void {
+  try {
+    const current = join(dbDir, GRAPH_DB_FILENAME);
+    const legacy = join(dbDir, LEGACY_GRAPH_DB_FILENAME);
+    if (existsSync(current) || !existsSync(legacy)) return;
+    for (const suffix of ['', '-wal', '-shm']) {
+      if (existsSync(`${legacy}${suffix}`)) renameSync(`${legacy}${suffix}`, `${current}${suffix}`);
+    }
+  } catch {
+    // A half-done rename is still fine: the store below either opens what is there or creates
+    // a new database, and the next pass refills it.
+  }
+}
 
 /**
  * Schema version, bumped when a migration would be needed. A mismatch triggers a rebuild.

@@ -9,7 +9,7 @@
 
 import { join } from 'node:path';
 
-import { GRAPH_DB_FILENAME, GraphStore } from './graphStore.js';
+import { GRAPH_DB_FILENAME, GraphStore, migrateLegacyIndex } from './graphStore.js';
 import { CodeGraphComponent } from './toolHook.js';
 import { createWorkerPass } from './indexPass.js';
 import { createCodeGraphTool } from '../tools/codeGraph.js';
@@ -48,6 +48,10 @@ export interface CodeGraphSession {
 export function startCodeGraph(options: CodeGraphSessionOptions): CodeGraphSession | undefined {
   const dbDir = dbDirFor(options.projectRoot);
   if (!dbDir || !options.projectRoot) return undefined;
+
+  // Before the store opens, or it would create an empty database beside the old one and the
+  // rename would then be skipped forever.
+  migrateLegacyIndex(dbDir);
 
   let store: GraphStore;
   try {
