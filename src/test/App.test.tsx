@@ -185,6 +185,27 @@ class ThinkingWithToolProvider implements LLMProvider {
   }
 }
 
+// Streams reasoning in two chunks and then calls a tool. The first chunk flushes the instant it
+// arrives (a kind change always does); the second is still sitting in the delta-coalescing buffer
+// when the tool call lands - which is exactly the window the 2026-10-24 ordering bug lived in.
+class SplitThinkThenToolProvider implements LLMProvider {
+  readonly name = 'split-think-tool-test';
+  private step = 0;
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    if (this.step === 0) {
+      this.step = 1;
+      request.onToken?.('THINKHEAD', 'think');
+      request.onToken?.(' THINKTAIL', 'think');
+      return {
+        content: '<think>THINKHEAD THINKTAIL</think>',
+        toolCalls: [{ id: 't1', name: 'read_file', input: { path: 'x.txt' } }],
+        stopReason: 'tool_use',
+      };
+    }
+    return { content: 'ANSWERMARK', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
+
 // Streams a real 'think' chunk via onToken, then pauses (until the test calls resume()) before
 // streaming the real answer and resolving - lets a test inspect the LIVE frame mid-turn, the
 // actual behavior being tested (a live "[think]" label the instant reasoning starts streaming,
@@ -2823,6 +2844,38 @@ test('full view does not collapse a live turn the way compact does - full means 
     await submit(full.stdin, 'explore the codebase');
     await waitFor(() => anyFrameIncludes(full.frames, 'done scanning'));
     assert.equal(anyFrameIncludes(full.frames, '[scan] '), false, 'full shows every tool event');
+  });
+});
+
+test('reasoning still buffered when a tool call lands is committed before it, not after', async () => {
+  await withTempDir(async (dir) => {
+    // Reported 2026-10-24 from a live run. One sentence of reasoning rendered as:
+    //
+    //   [think]
+    //   First
+    //   [tool] run_shell {"command":"dir /b ..."}
+    //   , let's investigate the directory structure...
+    //
+    // The tail of the think text landed *after* the tool line, with the comma still on the front
+    // and no "[think]" label. Streamed text lives in two buffers - `deltaBufferRef` (deltas that
+    // have arrived but are still being coalesced) and `streamTailRef` (the partial line of what
+    // was already committed) - and the tool branch drained only the second, so whatever was still
+    // coalescing surfaced late and unlabelled. The kind-change path had always drained both.
+    const { stdin, frames } = await setup({
+      dir,
+      provider: new SplitThinkThenToolProvider(),
+      sessionView: 'full',
+      initialMode: 'auto',
+    });
+    await submit(stdin, 'look at the file');
+    await waitFor(() => anyFrameIncludes(frames, 'ANSWERMARK'));
+
+    const frame = frames.find((f) => f.includes('THINKTAIL') && f.includes('read_file'));
+    assert.ok(frame, 'a frame showing both the reasoning tail and the tool line');
+    assert.ok(
+      frame.indexOf('THINKTAIL') < frame.indexOf('read_file'),
+      `the reasoning tail must be committed before the tool line, not after it:\n${frame}`,
+    );
   });
 });
 

@@ -1928,9 +1928,23 @@ export function App({
               // scrollback above it. The unfinished stream line is committed first for the same
               // reason, and the delta kind is reset so the next round's reasoning starts a fresh
               // "[think]" line instead of running on from the previous round's.
+              //
+              // **Both** buffers have to be drained here, in this order, and for a while only the
+              // second one was. Streamed text sits in two places: `deltaBufferRef` holds deltas
+              // that have arrived but are still being coalesced (the O(n^2) guard), and
+              // `streamTailRef` holds the partial line of what has already been committed.
+              // Flushing only the tail left the coalesced deltas pending, so they landed *after*
+              // the tool line, on their own, without the "[think]" label - which only goes on at a
+              // kind change, and this buffer was not started by one. Reported 2026-10-24: one
+              // sentence of reasoning rendered as "[think] First", then the tool call, then
+              // ", let's investigate the directory structure..." with the comma still on the front.
+              // The kind-change path above already drains both in exactly this order; this is the
+              // same requirement, and the ordering matters because `flushDeltaBuffer` feeds
+              // `commitStreamText`, which is what leaves the tail that `flushStreamTail` commits.
               if ((event.type === 'tool_call' || event.type === 'tool_result') && sessionViewRef.current === 'full') {
                 const text = formatEvent(event, 'full');
                 if (!text) return;
+                flushDeltaBuffer();
                 flushStreamTail(lastDeltaKindRef.current);
                 lastDeltaKindRef.current = null;
                 dispatchTextWindow({ type: 'commit', lines: [{ kind: event.type, text }] });
@@ -1969,6 +1983,10 @@ export function App({
                 sessionViewRef.current === 'full' &&
                 (event.type === 'compaction' || event.type === 'prune' || event.type === 'warning')
               ) {
+                // Both buffers, same order, same reason as the tool lines above: a compaction or
+                // warning arriving mid-stream must not jump ahead of reasoning that is still
+                // coalescing, or it lands between a sentence and its own tail.
+                flushDeltaBuffer();
                 flushStreamTail(lastDeltaKindRef.current);
                 lastDeltaKindRef.current = null;
                 dispatchTextWindow({
