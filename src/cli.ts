@@ -18,7 +18,15 @@ import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
-import { ensureTrusted, resolveO4cMd, sessionsDirFor, logsDirFor, usageFileFor } from './session/projectContext.js';
+import {
+  ensureTrusted,
+  findProjectRootSync,
+  logsDirFor,
+  resolveO4cMd,
+  sessionsDirFor,
+  usageFileFor,
+} from './session/projectContext.js';
+import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
@@ -191,6 +199,10 @@ async function runRepl(
     delete process.env.O4C_FRESH_SCREEN;
     process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
   }
+  const lifecycleDir = logsDirFor(projectRoot);
+  // Past this point a hang is visible on screen, so this is the line that separates
+  // "never got to the UI" from "the UI itself is stuck".
+  recordLifecycle(lifecycleDir, 'render');
   const runLogger = new RunLogger(logsDirFor(projectRoot));
   // Per-session wire-level transcript - every full request sent to the provider and every full
   // response, plus tool calls/results - distinct from runLogger's own already-derived AgentEvent
@@ -303,17 +315,17 @@ async function runRepl(
     if (handoffFile) {
       // Running under the supervisor (see restartHandoff.ts): hand it the next launch's args and exit
       // with the restart code, so the chain of live processes never grows.
-      writeHandoff(
-        handoffFile,
-        buildRestartArgs({
-          ...opts,
-          resumeId: pendingRestart.resumeId,
-          mode: pendingRestart.mode,
-          window: pendingRestart.window,
-        }),
-      );
+      const handoffArgs = buildRestartArgs({
+        ...opts,
+        resumeId: pendingRestart.resumeId,
+        mode: pendingRestart.mode,
+        window: pendingRestart.window,
+      });
+      recordLifecycle(lifecycleDir, 'handoff', { via: 'supervisor', args: handoffArgs });
+      writeHandoff(handoffFile, handoffArgs);
       process.exit(RESTART_EXIT_CODE);
     }
+    recordLifecycle(lifecycleDir, 'handoff', { via: 'nested' });
     process.exit(spawnRestart(opts, pendingRestart.resumeId, pendingRestart.mode, pendingRestart.window));
   }
   // Without an explicit exit, a lingering open handle (most likely a keep-alive socket from an
@@ -354,6 +366,21 @@ program
   .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; profile?: string; mode?: string; window?: string }) => {
     const prompt = promptParts.join(' ');
 
+    // Before anything that can block - the trust gate prompts, the server probes wait, and a
+    // process that dies in here used to leave nothing behind at all. Resolved synchronously
+    // because `ensureTrusted` below has not run yet and this line has to be on disk before it
+    // does. No API key is ever a CLI argument (see --base-url's help), so argv is safe to record.
+    const lifecycleDir = logsDirFor(findProjectRootSync(process.cwd()));
+    recordLifecycle(lifecycleDir, 'start', {
+      argv: process.argv.slice(2),
+      worker: process.env.O4C_WORKER === '1',
+      freshScreen: process.env.O4C_FRESH_SCREEN === '1',
+      oneShot: prompt.length > 0,
+    });
+    // The last thing any path writes, restart or not, so the file always says how a process
+    // ended and not merely how far it got.
+    process.on('exit', (code) => recordLifecycle(lifecycleDir, 'exit', { code }));
+
     // Interactive launches run under a thin supervisor: this process becomes the launcher, and the real
     // app runs as its child (O4C_WORKER=1). A session reload is then a loop in the supervisor instead of
     // a nested process per reload. Skipped for one-shot prompts, non-terminals, nested workers, and when
@@ -372,6 +399,10 @@ program
           initialArgs: process.argv.slice(2),
           handoffPath: join(tmpdir(), `o4c-handoff-${process.pid}.json`),
           env: process.env,
+          // Every child the supervisor launches, recorded by the one process that outlives them
+          // all. A child that dies before its own 'start' line leaves this as the only evidence
+          // it was ever spawned, which is exactly the case that was undiagnosable before.
+          onSpawn: (args) => recordLifecycle(lifecycleDir, 'spawn', { args }),
           spawn: (command, args, options) => spawnSync(command, args, options),
         }),
       );
@@ -386,6 +417,7 @@ program
     // never even looks at the parameter).
     const cwd = process.cwd();
     const { trusted, projectRoot } = await ensureTrusted(cwd, undefined, undefined, opts.profile);
+    recordLifecycle(lifecycleDir, 'trusted', { trusted, projectRoot });
     const projectContext = trusted ? await resolveO4cMd(cwd, projectRoot) : '';
     const systemPrompt = [SYSTEM_PROMPT, platformPromptLine(), projectContext].filter(Boolean).join('\n\n');
 
@@ -567,6 +599,11 @@ program
     // (matches cc's own MODEL_CONTEXT_WINDOW_DEFAULT fallback, confirmed directly against its
     // source during this project's own context-window research) rather than guessing per model id.
     // 'mock' gets no default - a test/dev provider has no real window to report.
+    recordLifecycle(lifecycleDir, 'provider', {
+      provider: opts.provider,
+      model: opts.model,
+      serverStatus,
+    });
     const ANTHROPIC_DEFAULT_CONTEXT_WINDOW = 200_000;
     const contextWindow =
       configuredContextWindow ??
@@ -673,6 +710,7 @@ program
       // covers the REPL, one-shot mode and the restart paths' own process.exit() alike.
       process.on('exit', () => graph.close());
     }
+    recordLifecycle(lifecycleDir, 'graph', { opened: graph !== undefined });
 
     // Installed before either branch below (interactive REPL or one-shot) so both are covered -
     // this is a process-wide concern, not specific to the TUI. See gcWatchdog.ts's own doc comment

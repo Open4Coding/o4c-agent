@@ -70,6 +70,14 @@ export interface SupervisorOptions {
   handoffPath: string;
   env: NodeJS.ProcessEnv;
   spawn: SupervisorSpawn;
+  /**
+   * Called with each child's arguments just before it is launched.
+   *
+   * The supervisor outlives every child, so this is the only place that can witness a child
+   * which dies before writing anything of its own - the exact case that made a hung restart
+   * undiagnosable on 2026-10-22. Optional, and never allowed to break the loop.
+   */
+  onSpawn?: (args: readonly string[]) => void;
 }
 
 /**
@@ -94,6 +102,11 @@ export function runSupervisor(options: SupervisorOptions): number {
     };
     if (!first) env.O4C_FRESH_SCREEN = '1';
     first = false;
+    try {
+      options.onSpawn?.(args);
+    } catch {
+      // Diagnostics must never be able to stop the app restarting.
+    }
     const result = options.spawn(options.nodePath, [options.script, ...args], { stdio: 'inherit', env });
     if (result.status !== RESTART_EXIT_CODE) {
       rmSync(options.handoffPath, { force: true });

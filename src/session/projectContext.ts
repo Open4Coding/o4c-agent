@@ -1,4 +1,5 @@
 import { readFile, mkdir, stat } from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { join, dirname, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
@@ -109,6 +110,31 @@ export async function findProjectRoot(cwd: string): Promise<string | undefined> 
   for (;;) {
     if (dir === home) return undefined;
     if (await directoryExists(join(dir, '.o4c'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+/**
+ * The same search, synchronously, for the one caller that cannot await: `lifecycleLog.ts` writes
+ * from `process.on('exit')`, where no promise will ever resolve, and writes its first line before
+ * the trust gate - which is itself one of the places a startup can block.
+ *
+ * Deliberately here beside the async version rather than open-coded in the logger, so "what counts
+ * as a project root" - including the home-directory exclusion above - is decided in exactly one
+ * place and the two cannot drift.
+ */
+export function findProjectRootSync(cwd: string): string | undefined {
+  const home = resolve(homedir());
+  let dir = resolve(cwd);
+  for (;;) {
+    if (dir === home) return undefined;
+    try {
+      if (statSync(join(dir, '.o4c')).isDirectory()) return dir;
+    } catch {
+      // Not here - keep walking, exactly as directoryExists() returning false does above.
+    }
     const parent = dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;
