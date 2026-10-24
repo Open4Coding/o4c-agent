@@ -317,7 +317,7 @@ export class AgentLoop {
     this.tools.push(...tools);
   }
 
-  /** The reverse of `addTools`, for a tool that is switched off (`/graph off`). Same timing rule. */
+  /** The reverse of `addTools`, for a tool that is switched off (`/datagraph off`). Same timing rule. */
   removeTools(names: readonly string[]): void {
     this.tools = this.tools.filter((t) => !names.includes(t.name));
   }

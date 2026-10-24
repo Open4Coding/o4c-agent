@@ -709,7 +709,7 @@ program
       projectRoot: trusted ? projectRoot : undefined,
       addTools: (tools) => loop.addTools(tools),
       removeTools: (names) => loop.removeTools(names),
-      // Read from config rather than carried as a restart flag like --window: `/graph` saves it,
+      // Read from config rather than carried as a restart flag like --window: `/datagraph` saves it,
       // so the per-turn reload and the next session both pick it up with no extra plumbing.
       exposed: resolvedConfig.codeGraph !== false,
     });

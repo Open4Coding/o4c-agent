@@ -114,10 +114,10 @@ export const COMMANDS: CommandInfo[] = [
       'Nothing is deleted - turning it off restores the full context.',
   },
   {
-    name: '/graph',
+    name: '/datagraph',
     select: 'run',
     description:
-      'Show or hide the Code Graph from the model: /graph on, /graph off. ' +
+      'Show or hide the Code Graph from the model: /datagraph on, /datagraph off. ' +
       'Off uses grep, glob and read only; indexing keeps running either way.',
   },
   {

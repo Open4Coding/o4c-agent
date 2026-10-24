@@ -185,7 +185,7 @@ export interface AppProps {
     ref: McpPromptRef,
     args: Record<string, string>,
   ) => Promise<{ readonly text: string; readonly notes: readonly string[] }>;
-  /** The Code Graph, for `/graph`. Undefined when it is not running (untrusted project, tests). */
+  /** The Code Graph, for `/datagraph`. Undefined when it is not running (untrusted project, tests). */
   codeGraph?: CodeGraphSession;
   /** `'local' | 'anthropic' | 'mock'` - display only, for the startup splash header. */
   provider: string;
@@ -1432,17 +1432,17 @@ export function App({
             void runLogger.log({ type: 'system', sub_type: 'info', command: '/window', setting: typed });
           }
         }
-      } else if (input === '/graph' || input.startsWith('/graph ')) {
+      } else if (input === '/datagraph' || input.startsWith('/datagraph ')) {
         pushBlock([userLine(input)]);
-        const typed = input.slice('/graph'.length).trim().toLowerCase();
+        const typed = input.slice('/datagraph'.length).trim().toLowerCase();
         if (!codeGraph) {
           pushBlock([infoLine('The Code Graph is not running in this session (it needs a trusted project).')]);
         } else if (!typed) {
           pushBlock([
             infoLine(
               codeGraph.component.isExposed()
-                ? 'Code Graph is on: the model gets the code_graph tool and notes on grep/read results. /graph off hides it.'
-                : 'Code Graph is off: the model uses grep, glob and read only. It keeps indexing in the background; /graph on shows it again.',
+                ? 'Code Graph is on: the model gets the code_graph tool and notes on grep/read results. /datagraph off hides it.'
+                : 'Code Graph is off: the model uses grep, glob and read only. It keeps indexing in the background; /datagraph on shows it again.',
             ),
           ]);
         } else if (typed === 'on' || typed === 'off') {
@@ -1457,9 +1457,9 @@ export function App({
                 : 'Code Graph off - the next request uses grep, glob and read only. Indexing continues in the background.',
             ),
           ]);
-          void runLogger.log({ type: 'system', sub_type: 'info', command: '/graph', setting: typed });
+          void runLogger.log({ type: 'system', sub_type: 'info', command: '/datagraph', setting: typed });
         } else {
-          pushBlock([infoLine(`"${typed}" is not a setting - use /graph on or /graph off.`)]);
+          pushBlock([infoLine(`"${typed}" is not a setting - use /datagraph on or /datagraph off.`)]);
         }
       } else if (input === '/set' || input === '/config') {
         // Submitted rather than chosen from the dropdown. The dropdown owns Enter while it is open,
