@@ -1,6 +1,7 @@
 import React from 'react';
 import type { CommandInfo } from './slashCommand.js';
 import { SelectList } from './SelectList.js';
+import { SELECTED_ROW_BACKGROUND, SELECTED_ROW_TEXT } from './highlightColor.js';
 
 export interface CommandPaletteProps {
   commands: readonly CommandInfo[];
@@ -24,7 +25,8 @@ export function CommandPalette({ commands, onSelect, onCancel, highlightColor }:
       getKey={(c) => c.name}
       maxVisible={20}
       borderColor={highlightColor}
-      rowColor={(_, selected) => (selected ? highlightColor : undefined)}
+      selectedBackground={SELECTED_ROW_BACKGROUND}
+      selectedTextColor={SELECTED_ROW_TEXT}
       onSelect={onSelect}
       onCancel={onCancel}
       rowText={(c) => `${[c.name, ...(c.aliases ?? [])].join(', ')} — ${c.description}`}

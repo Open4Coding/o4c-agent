@@ -1,6 +1,17 @@
 import { theme } from './theme.js';
 
 /**
+ * The selected row in the "/" command list only: white text on a dark gray bar.
+ *
+ * It used to be inverse video in the highlight color - a solid amber block with black text - which
+ * was glaring. Bronze, a lighter bronze, bright green on amber, and green on light gray were all
+ * tried on 2026-10-24 before David picked this, matching a screenshot of a white-on-gray prompt
+ * highlight. The other pickers keep the original inverse look.
+ */
+export const SELECTED_ROW_BACKGROUND = '#404040';
+export const SELECTED_ROW_TEXT = '#FFFFFF';
+
+/**
  * The accepted values for the "/" palette highlight color - the single source of truth shared
  * by BOTH the write path (App.tsx's /config-highlightcolor handler) and the read path (cli.ts's
  * config.json load, via `resolveHighlightColor` below). A #RRGGBB hex code (theme.ts's own

@@ -66,6 +66,11 @@ export interface SelectListProps<T> {
   /** Color for all of a row's lines (a mode's own color, the highlight color on the selected row).
    * Default: the terminal's normal color. */
   rowColor?: (item: T, selected: boolean) => string | undefined;
+  /** When set, the selected row is drawn on this background instead of in inverse video. Opt-in,
+   * so the other lists keep the inverse look they were designed around. */
+  selectedBackground?: string;
+  /** The selected row's text color on `selectedBackground`. Default: its normal color. */
+  selectedTextColor?: string;
   onSelect: (item: T) => void;
   onCancel?: () => void;
   maxVisible?: number;
@@ -96,6 +101,8 @@ export function SelectList<T>({
   getKey,
   rowText,
   rowColor,
+  selectedBackground,
+  selectedTextColor,
   onSelect,
   onCancel,
   maxVisible = DEFAULT_MAX_VISIBLE,
@@ -163,11 +170,17 @@ export function SelectList<T>({
       {visible.map((item, i) => {
         const isSelected = scrollOffset + i === selectedIndex;
         const color = rowColor?.(item, isSelected);
+        const filled = isSelected && selectedBackground !== undefined;
         const lines = wrapRow(rowText(item), inner - MARKER_WIDTH, inner - CONTINUATION_INDENT);
         return (
           <Box key={getKey(item)} flexDirection="column">
             {lines.map((line, lineIndex) => (
-              <Text key={lineIndex} color={color} inverse={isSelected}>
+              <Text
+                key={lineIndex}
+                color={filled ? (selectedTextColor ?? color) : color}
+                backgroundColor={filled ? selectedBackground : undefined}
+                inverse={isSelected && !filled}
+              >
                 {lineIndex === 0 ? (isSelected ? '> ' : '  ') : ' '.repeat(CONTINUATION_INDENT)}
                 {line}
               </Text>
