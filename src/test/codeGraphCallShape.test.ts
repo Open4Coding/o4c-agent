@@ -223,6 +223,24 @@ test('the type-only rule is per language and never empties the list', () => {
   assert.equal(chooseTarget([definition('src/a.ts', 'type')], CALL)?.route, 'unique');
 });
 
+test('each language excludes only what it cannot call', () => {
+  const pick = (a: DefinitionRow, b: DefinitionRow) => chooseTarget([a, b], CALL)?.definition.path;
+  assert.equal(pick(definition('A.java', 'interface'), definition('B.java', 'method')), 'B.java');
+  assert.equal(pick(definition('a.rs', 'interface'), definition('b.rs', 'function')), 'b.rs', 'a trait');
+  assert.equal(pick(definition('a.rs', 'module'), definition('b.rs', 'function')), 'b.rs', 'a mod');
+  assert.equal(pick(definition('A.cs', 'module'), definition('B.cs', 'method')), 'B.cs', 'a namespace');
+  assert.equal(pick(definition('a.swift', 'interface'), definition('b.swift', 'function')), 'b.swift', 'a protocol');
+  assert.equal(pick(definition('a.rb', 'module'), definition('b.rb', 'method')), 'b.rb');
+  assert.equal(pick(definition('a.ts', 'enum'), definition('b.ts', 'function')), 'b.ts');
+  assert.equal(pick(definition('a.ts', 'module'), definition('b.ts', 'function')), 'b.ts', 'a namespace');
+  // Callable in their language, so they stay candidates: a Rust tuple struct, a Dart typedef,
+  // a C++ typedef (functional cast), a Python class.
+  assert.equal(pick(definition('a.rs', 'class'), definition('b.rs', 'function')), undefined);
+  assert.equal(pick(definition('a.dart', 'type'), definition('b.dart', 'function')), undefined);
+  assert.equal(pick(definition('a.cpp', 'type'), definition('b.cpp', 'function')), undefined);
+  assert.equal(pick(definition('a.py', 'class'), definition('b.py', 'function')), undefined);
+});
+
 test('two callable definitions stay ambiguous beside a type', () => {
   const candidates = [definition('src/a.ts', 'function'), definition('src/b.ts', 'function'), definition('src/c.ts', 'type')];
   assert.equal(chooseTarget(candidates, CALL), undefined);

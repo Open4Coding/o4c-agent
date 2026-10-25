@@ -54,6 +54,9 @@ export interface GraphLanguage {
   readonly typeOnlyKinds?: readonly string[];
 }
 
+/** A `type` alias, `interface`, `enum` or `namespace` (`module`): none of them can be called. */
+const TS_TYPE_ONLY = ['type', 'interface', 'enum', 'module'] as const;
+
 /**
  * The bundled set, ordered by Stack Overflow 2025 usage rank so the list reads as a coverage
  * statement rather than an accident of implementation order.
@@ -81,13 +84,14 @@ export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
     id: 'typescript',
     extensions: ['.ts', '.mts', '.cts'],
     distinguishesCallShape: true,
-    typeOnlyKinds: ['type', 'interface'],
+    typeOnlyKinds: TS_TYPE_ONLY,
   },
-  { id: 'tsx', extensions: ['.tsx'], distinguishesCallShape: true, typeOnlyKinds: ['type', 'interface'] },
+  { id: 'tsx', extensions: ['.tsx'], distinguishesCallShape: true, typeOnlyKinds: TS_TYPE_ONLY },
   // rank 7
-  { id: 'c_sharp', extensions: ['.cs'] },
+  // An interface cannot be invoked, and `module` is a namespace.
+  { id: 'c_sharp', extensions: ['.cs'], typeOnlyKinds: ['interface', 'module'] },
   // rank 8
-  { id: 'java', extensions: ['.java'] },
+  { id: 'java', extensions: ['.java'], typeOnlyKinds: ['interface'] },
   // rank 10 - reference patterns authored here; macros stay invisible.
   // `.h` is deliberately claimed by C++ rather than C: the extension is genuinely ambiguous,
   // and the two failure modes are not symmetric. A C header parsed by the C++ grammar parses
@@ -99,15 +103,20 @@ export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
   // rank 12
   { id: 'php', extensions: ['.php'] },
   // rank 13
-  { id: 'go', extensions: ['.go'] },
+  // `module` is the package name. Not `type` or `interface`: `T(x)` and `I(x)` are conversions.
+  { id: 'go', extensions: ['.go'], typeOnlyKinds: ['module'] },
   // rank 14
-  { id: 'rust', extensions: ['.rs'] },
+  // A trait (`interface`) and a `mod`. Not `class`: a tuple struct is constructed as `S(x)`.
+  { id: 'rust', extensions: ['.rs'], typeOnlyKinds: ['interface', 'module'] },
   // rank 17
-  { id: 'ruby', extensions: ['.rb'] },
+  // `Foo()` reaches a method named Foo, never the module.
+  { id: 'ruby', extensions: ['.rb'], typeOnlyKinds: ['module'] },
   // rank 18
-  { id: 'dart', extensions: ['.dart'] },
+  // Not `type`: a Dart typedef can be used to construct.
+  { id: 'dart', extensions: ['.dart'], typeOnlyKinds: ['mixin', 'enum'] },
   // rank 20 - reference patterns authored here
-  { id: 'swift', extensions: ['.swift'] },
+  // A protocol (`interface`) cannot be invoked.
+  { id: 'swift', extensions: ['.swift'], typeOnlyKinds: ['interface'] },
 ];
 
 const BY_EXTENSION = new Map<string, GraphLanguage>(
