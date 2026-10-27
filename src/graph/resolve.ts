@@ -286,6 +286,22 @@ export function chooseTarget(
   return undefined;
 }
 
+function narrowToCallable(candidates: readonly DefinitionRow[]): readonly DefinitionRow[] {
+  const kept = candidates.filter(isCallable);
+  return kept.length > 0 ? kept : candidates;
+}
+
+/**
+ * Whether any call could reach this definition. False only for a kind the file's language marks
+ * type-only (`languages.ts`), so a `type X = any` stub sharing a function's name stops making the
+ * function's every call site unattributable. That stub is not hypothetical: a 2,782-file
+ * repository measured on 2026-10-24 carries 747 files of them, and one sent a "who calls this"
+ * question on it back to grep and file reads.
+ */
+export function isCallable(definition: DefinitionRow): boolean {
+  return !languageForPath(definition.path)?.typeOnlyKinds?.includes(definition.kind);
+}
+
 /**
  * Candidates whose kind the call's syntax can actually reach, or all of them when that would
  * leave none.
@@ -307,22 +323,6 @@ export function chooseTarget(
  * The fallback to the full list is what keeps the rule positive, and a language whose query does
  * not distinguish the two shapes passes `undefined` and narrows nothing.
  */
-function narrowToCallable(candidates: readonly DefinitionRow[]): readonly DefinitionRow[] {
-  const kept = candidates.filter(isCallable);
-  return kept.length > 0 ? kept : candidates;
-}
-
-/**
- * Whether any call could reach this definition. False only for a kind the file's language marks
- * type-only (`languages.ts`), so a `type X = any` stub sharing a function's name stops making the
- * function's every call site unattributable. That stub is not hypothetical: a 2,782-file
- * repository measured on 2026-10-24 carries 747 files of them, and one sent a "who calls this"
- * question on it back to grep and file reads.
- */
-export function isCallable(definition: DefinitionRow): boolean {
-  return !languageForPath(definition.path)?.typeOnlyKinds?.includes(definition.kind);
-}
-
 function narrowByCallShape(
   candidates: readonly DefinitionRow[],
   shape: CallShape | undefined,
