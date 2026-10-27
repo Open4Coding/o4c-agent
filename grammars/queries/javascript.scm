@@ -61,17 +61,23 @@
 )
 
 (assignment_expression
-  left: [
-    (identifier) @name.definition.function
-    (member_expression
-      property: (property_identifier) @name.definition.function)
-  ]
+  left: (identifier) @name.definition.function
   right: [(arrow_function) (function_expression)]
 ) @definition.function
 
+; A function stored in a property - `obj.f = () => {}`, `{ f: () => {} }` - is a `field`, not a
+; `function`: it is called as `obj.f()`, which `resolve.ts` does not let reach a `function`, or
+; bare after destructuring. Filed as `function` (until 2026-10-27), every `api.fetchUser()` on a
+; handler object was declined. See the kinds note in `typescript.scm`.
+(assignment_expression
+  left: (member_expression
+    property: (property_identifier) @name.definition.field)
+  right: [(arrow_function) (function_expression)]
+) @definition.field
+
 (pair
-  key: (property_identifier) @name.definition.function
-  value: [(arrow_function) (function_expression)]) @definition.function
+  key: (property_identifier) @name.definition.field
+  value: [(arrow_function) (function_expression)]) @definition.field
 
 (
   (call_expression

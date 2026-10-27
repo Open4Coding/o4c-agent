@@ -80,6 +80,23 @@ test('a function-typed property or parameter is a field, not a function', async 
   assert.equal(defs.get('plain'), 'name.definition.function', 'a declaration is still a function');
 });
 
+test('a JavaScript function stored in a property is a field, so a member call can reach it', async () => {
+  // Filed as `function` it was out of reach of `api.fetchUser()` once member calls stopped being
+  // handed the only top-level function of their name.
+  const source = [
+    'const api = { fetchUser: (id) => id, save: function () {} };',
+    'Vehicle.prototype.getInfo = function () {};',
+    'let plain = () => 1;',
+    'plain = function () {};',
+  ].join('\n');
+  const { tags } = await extractFile(source, 'javascript');
+  const defs = new Map(tags.filter((t) => t.kind === 'def').map((t) => [t.name, t.capture]));
+  assert.equal(defs.get('fetchUser'), 'name.definition.field');
+  assert.equal(defs.get('save'), 'name.definition.field');
+  assert.equal(defs.get('getInfo'), 'name.definition.field');
+  assert.equal(defs.get('plain'), 'name.definition.function', 'a bare binding is still a function');
+});
+
 // ------------------------------------------------------------------ the shape of a reference
 
 test('a call shape is only read from a language whose query distinguishes them', () => {
