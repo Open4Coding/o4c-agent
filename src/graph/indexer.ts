@@ -34,7 +34,7 @@ import { join, relative, resolve, isAbsolute } from 'node:path';
 import type { GraphStore } from './graphStore.js';
 import { extractFile } from './tags.js';
 import { languageForPath } from './languages.js';
-import { skipReasonFor, type SkipReason } from './indexFilter.js';
+import { declaresGenerated, skipReasonFor, type SkipReason } from './indexFilter.js';
 import { resetGrammarCache } from './loadLanguage.js';
 import { walkFiles } from '../tools/searchUtils.js';
 
@@ -45,8 +45,16 @@ import { walkFiles } from '../tools/searchUtils.js';
  * judgement about the file: nothing is wrong with a `.css` file, the graph simply cannot read it.
  * Collapsing the two would make "we chose not to index this" and "we are unable to" look alike,
  * and only the first licenses reporting an empty result as a fact.
+ *
+ * `generated-header` is indexed, but for its definitions only - see `declaresGenerated`.
  */
-export type FileOutcome = 'indexed' | 'unchanged' | 'no-grammar' | SkipReason | 'failed';
+export type FileOutcome =
+  | 'indexed'
+  | 'generated-header'
+  | 'unchanged'
+  | 'no-grammar'
+  | SkipReason
+  | 'failed';
 
 export interface IndexRunResult {
   readonly indexed: number;
@@ -90,6 +98,12 @@ export async function indexSource(
   if (store.freshness(repoRelativePath, source) === 'fresh') return 'unchanged';
 
   const { tags, imports } = await extractFile(source, language.id);
+  if (declaresGenerated(source)) {
+    // Imports go too: they only ever settle this file's own references.
+    const definitions = tags.filter((tag) => tag.kind === 'def');
+    store.indexFile({ path: repoRelativePath, language: language.id, source, tags: definitions, imports: [] });
+    return 'generated-header';
+  }
   store.indexFile({ path: repoRelativePath, language: language.id, source, tags, imports });
   return 'indexed';
 }
@@ -158,7 +172,8 @@ export async function indexProject(
 
     try {
       const outcome = await indexSource(store, entry.path, source);
-      if (outcome === 'indexed') {
+      if (outcome === 'indexed' || outcome === 'generated-header') {
+        if (outcome === 'generated-header') note(outcome);
         indexed++;
         seen.add(entry.path);
       } else if (outcome === 'unchanged') {
