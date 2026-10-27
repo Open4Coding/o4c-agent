@@ -232,6 +232,12 @@ export interface ChooseOptions {
    * the function would be a claim the index cannot back.
    */
   readonly isCall?: boolean;
+  /**
+   * Every specifier the referencing file imports from. Read only for `o.f()` where every
+   * candidate is a top-level function: that call reaches one only through a module object the
+   * file imported (`import * as ns`, a default-exported object, a `require`).
+   */
+  readonly importedModules?: readonly string[];
 }
 
 /**
@@ -245,6 +251,12 @@ export interface ChooseOptions {
  * Every rule here is **positive**: each may choose among the candidates the index already holds,
  * and none may rule a candidate out. The type-only and call-shape narrowings therefore fall back
  * to the full list when they would empty it, and a missing or unknown shape narrows nothing.
+ *
+ * With one exception, which **declines** rather than chooses: a call whose shape no candidate's
+ * kind can take. `x.trim()` with only a top-level `function trim` in the index is not a call to
+ * it - it is a call into a library the index does not hold - and asserting the edge anyway was
+ * most of what the stricter grading line (library calls given an in-repo target) found on
+ * 2026-10-27.
  */
 export function chooseTarget(
   candidates: readonly DefinitionRow[],
@@ -253,6 +265,10 @@ export function chooseTarget(
   if (candidates.length === 0) return undefined;
 
   const callable = options.isCall ? narrowToCallable(candidates) : candidates;
+  const shape = options.callShape;
+  if (shape && callable.every((c) => c.kind === unreachableKind(shape))) {
+    return shape === 'member' ? throughModuleObject(callable, options) : undefined;
+  }
   const narrowed = narrowByCallShape(callable, options.callShape);
   if (narrowed.length === 1) {
     if (narrowed.length === candidates.length) return { definition: narrowed[0], route: 'unique' };
@@ -310,8 +326,9 @@ export function isCallable(definition: DefinitionRow): boolean {
  * language rather than a heuristic:
  *
  * - `o.f()` cannot reach a top-level `function` - a declaration or a `const` arrow is not a
- *   member of anything. (`import * as ns` is the exception, and it costs a decline rather than a
- *   wrong answer, because this rule only ever removes candidates from a contested list.)
+ *   member of anything. (A module object is the exception - `import * as ns`, a default-exported
+ *   object - and it costs a decline rather than a wrong answer here, because this rule only ever
+ *   removes candidates from a contested list. See `throughModuleObject` for the uncontested case.)
  * - `f()` cannot reach a `method` without a receiver.
  *
  * A `field` - a function held in a property or a parameter - is reachable **either** way and is
@@ -328,9 +345,44 @@ function narrowByCallShape(
   shape: CallShape | undefined,
 ): readonly DefinitionRow[] {
   if (!shape) return candidates;
-  const unreachable = shape === 'member' ? 'function' : 'method';
+  const unreachable = unreachableKind(shape);
   const kept = candidates.filter((c) => c.kind !== unreachable);
   return kept.length > 0 ? kept : candidates;
+}
+
+function unreachableKind(shape: CallShape): string {
+  return shape === 'member' ? 'function' : 'method';
+}
+
+/**
+ * `o.f()` when every candidate is a top-level function: the one candidate in this file or in a
+ * file this file imports, or a decline.
+ *
+ * Those are the two ways the call is possible at all. In the same file, the functions are
+ * gathered into an object - repomix's `deps.getGitLog()`, with `deps` defaulting to
+ * `{ getGitLog, ... }`, was all 16 right answers a decline without this cost there. Through an
+ * import, the receiver is a module object - `ns.f()` after `import * as ns`, `m.f()` on a
+ * default-exported object - and declining without it cost 239 right answers on a second
+ * repository. Requiring one or the other is what tells those apart from `s.trim()` on a string,
+ * where the repository's own `function trim` is not the target.
+ */
+function throughModuleObject(
+  functions: readonly DefinitionRow[],
+  options: ChooseOptions,
+): ChosenTarget | undefined {
+  const home = options.fromPath;
+  if (!home) return undefined;
+  const sameFile = functions.filter((d) => d.path === home);
+  if (sameFile.length === 1) return { definition: sameFile[0], route: 'same-file' };
+  if (!options.importedModules) return undefined;
+  const reached: { definition: DefinitionRow; module: string }[] = [];
+  for (const definition of functions) {
+    const module = options.importedModules.find((m) => importedTarget(home, m, [definition.path]));
+    if (module) reached.push({ definition, module });
+  }
+  return reached.length === 1
+    ? { definition: reached[0].definition, route: 'import', module: reached[0].module }
+    : undefined;
 }
 
 /**
@@ -446,7 +498,9 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
   for (const file of store.files()) {
     // One query per file rather than one per call site: a file with 200 calls asks about its own
     // imports once.
-    const imports = importMap(store.importsIn(file.path));
+    const bindings = store.importsIn(file.path);
+    const imports = importMap(bindings);
+    const importedModules = [...new Set(bindings.map((b) => b.module))];
 
     for (const ref of store.referencesIn(file.path)) {
       if (!isAssertedCall(ref.edgeKind)) continue;
@@ -463,6 +517,7 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
         importedModule: imports.get(ref.name),
         callShape: callShapeFor(file.language, ref.kind),
         isCall: true,
+        importedModules,
       });
 
       if (chosen) {

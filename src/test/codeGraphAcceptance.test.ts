@@ -32,6 +32,8 @@ interface Cell {
   missedByExtraction: number;
   missedByResolution: number;
   recoverableByCandidate: number;
+  /** Library calls (per the compiler) the graph gave an in-repo target. */
+  libraryAsserted: number;
 }
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -59,6 +61,12 @@ function cell(id: string): Cell {
 
 function widened(c: Cell) {
   return rate(c.counts.truePositives, c.counts.oracleEdges + c.constructorsInCell);
+}
+
+/** Precision with a library call given an in-repo target counted as wrong. */
+function strict(c: Cell) {
+  const { truePositives, falsePositives } = c.counts;
+  return rate(truePositives, truePositives + falsePositives + c.libraryAsserted);
 }
 
 function figuresBlock(): string {
@@ -97,6 +105,7 @@ test('each table row is exactly what the stored counts produce', () => {
     const c = cell(id);
     const g = grade(c.counts);
     const w = widened(c);
+    const s = strict(c);
 
     // Reconstructed in full rather than checked field by field: one assertion that covers every
     // figure in the row, and that fails if any single digit was edited by hand.
@@ -107,6 +116,7 @@ test('each table row is exactly what the stored counts produce', () => {
       `| **${pct(g.recall.value)}** (${g.recall.successes}/${g.recall.trials}, ` +
       `95% CI ${pct(g.recall.interval.lower)}-${pct(g.recall.interval.upper)}) ` +
       `| ${pct(w.value)} (${w.successes}/${w.trials}) ` +
+      `| ${pct(s.value)} (${s.successes}/${s.trials}) ` +
       `| ${g.f1.toFixed(3)} |`;
 
     assert.ok(
@@ -140,7 +150,7 @@ test('no percentage in the figures block is one the counts do not produce', () =
   for (const [id] of CELLS) {
     const c = cell(id);
     const g = grade(c.counts);
-    for (const r of [g.precision, g.recall, widened(c), rate(c.exactLine, c.counts.truePositives)]) {
+    for (const r of [g.precision, g.recall, widened(c), strict(c), rate(c.exactLine, c.counts.truePositives)]) {
       allowed.add(pct(r.value));
       allowed.add(pct(r.interval.lower));
       allowed.add(pct(r.interval.upper));
@@ -148,7 +158,7 @@ test('no percentage in the figures block is one the counts do not produce', () =
   }
 
   const found = figuresBlock().match(/\d+\.\d%/g) ?? [];
-  assert.ok(found.length >= 4 * 7, `expected the block to carry the figures, found ${found.length}`);
+  assert.ok(found.length >= 4 * 8, `expected the block to carry the figures, found ${found.length}`);
   for (const token of found) {
     assert.ok(
       allowed.has(token),

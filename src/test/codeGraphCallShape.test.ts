@@ -127,12 +127,28 @@ test('a field is reachable by either shape and is never excluded', () => {
   );
 });
 
-test('narrowing to nothing keeps the whole list rather than declining', () => {
-  // Positive evidence only: a member call whose only candidate is a top-level function is a
-  // namespace import or a mistake, and either way the rule must not be what decides.
-  const chosen = chooseTarget([definition('src/a.ts', 'function')], { callShape: 'member' });
-  assert.equal(chosen?.route, 'unique', 'the single candidate survives the exclusion');
-  assert.equal(chosen?.definition.path, 'src/a.ts');
+test('a call no candidate can take is declined, not given the only namesake', () => {
+  // `s.trim()` with one top-level `function trim` in the index is a call into a library. Asserting
+  // it was most of what the stricter grading line found on 2026-10-27.
+  assert.equal(chooseTarget([definition('src/a.ts', 'function')], { callShape: 'member' }), undefined);
+  assert.equal(chooseTarget([definition('src/a.ts', 'method')], { callShape: 'bare' }), undefined);
+});
+
+test('a member call reaches a top-level function through a module the file imported', () => {
+  const functions = [definition('src/a.ts', 'function'), definition('src/b.ts', 'function')];
+  const chosen = chooseTarget(functions, {
+    callShape: 'member',
+    fromPath: 'src/use.ts',
+    importedModules: ['./b.js', 'node:path'],
+  });
+  assert.equal(chosen?.route, 'import', '`ns.f()` after `import * as ns from "./b.js"`');
+  assert.equal(chosen?.definition.path, 'src/b.ts');
+  assert.equal(chosen?.module, './b.js');
+  // Both files imported: the receiver could be either module object, so the call is declined.
+  assert.equal(
+    chooseTarget(functions, { callShape: 'member', fromPath: 'src/use.ts', importedModules: ['./a.js', './b.js'] }),
+    undefined,
+  );
 });
 
 test('an unknown shape narrows nothing', () => {
