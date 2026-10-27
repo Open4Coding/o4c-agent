@@ -139,7 +139,15 @@ function sample(items, wanted = 20) {
   return Array.from({ length: wanted }, (_, i) => sorted[Math.floor(i * stride)]);
 }
 
-function compare(oracleSites, constructorSites, predictedEdges, extractedSites, defFileCount, includeCaller) {
+function compare(
+  oracleSites,
+  constructorSites,
+  librarySites,
+  predictedEdges,
+  extractedSites,
+  defFileCount,
+  includeCaller,
+) {
   // Deduplicate both sides by call-site key. `foo(foo(1))` is two call sites on one line sharing
   // a name; neither side can tell them apart, so both sides collapse them identically.
   const oracleByKey = new Map();
@@ -224,6 +232,23 @@ function compare(oracleSites, constructorSites, predictedEdges, extractedSites, 
   let outOfUniverse = 0;
   for (const k of assertedByKey.keys()) if (!oracleByKey.has(k)) outOfUniverse++;
 
+  // Of those, the ones the compiler resolved to a library. "Outside the universe" undersells
+  // them: tsc says the call goes to the standard library or node_modules, and the graph asserted
+  // an in-repo target, so the answer is wrong. Found 2026-10-27, when a Rust change resolved
+  // `x.clone()` and `iter.collect()` to the repository's one method of that name - and the
+  // same thing can happen in TypeScript (`map.get`, `arr.push`) without the headline noticing.
+  const libraryKeys = new Set(
+    librarySites.filter((s) => includeCaller(s.fromPath)).map((s) => key(s.fromPath, s.fromLine, s.name)),
+  );
+  let libraryAsserted = 0;
+  const libraryAssertedDetail = [];
+  for (const [k, edge] of assertedByKey) {
+    if (oracleByKey.has(k) || !libraryKeys.has(k)) continue;
+    libraryAsserted++;
+    libraryAssertedDetail.push(`${k}  said ${edge.toPath}:${edge.toLine}  truth: a library`);
+  }
+  const strictPrecision = rate(truePositives, truePositives + falsePositives + libraryAsserted);
+
   const counts = {
     asserted: assertedByKey.size,
     truePositives,
@@ -245,6 +270,8 @@ function compare(oracleSites, constructorSites, predictedEdges, extractedSites, 
     grade: grade(counts),
     constructorsInCell,
     widenedRecall: widened,
+    libraryAsserted,
+    strictPrecision,
     sameFilePreferenceWon,
     sameFilePreferenceLost,
     crossFileWrong,
@@ -254,6 +281,7 @@ function compare(oracleSites, constructorSites, predictedEdges, extractedSites, 
     missedByResolution,
     samples: {
       falsePositives: sample(falsePositiveDetail),
+      libraryAsserted: sample(libraryAssertedDetail),
       falseNegatives: sample(falseNegativeDetail),
     },
   };
@@ -316,6 +344,7 @@ for (const repo of REPOS) {
     const result = compare(
       oracle.sites,
       oracle.constructorSites,
+      oracle.librarySites,
       indexed.resolved.edges,
       indexed.extractedSites,
       indexed.defFileCount,
@@ -325,6 +354,7 @@ for (const repo of REPOS) {
     report.cells[id] = {
       counts: result.counts,
       constructorsInCell: result.constructorsInCell,
+      libraryAsserted: result.libraryAsserted,
       sameFilePreferenceWon: result.sameFilePreferenceWon,
       sameFilePreferenceLost: result.sameFilePreferenceLost,
       crossFileWrong: result.crossFileWrong,
@@ -340,7 +370,9 @@ for (const repo of REPOS) {
     console.log(`  F1         ${result.grade.f1.toFixed(3)}`);
     console.log(`  recall if the ${result.constructorsInCell} in-repo constructor calls are ` +
       `counted as misses: ${formatRate(result.widenedRecall)}`);
-    console.log(`  out of the oracle's universe (library calls): ${result.counts.outOfUniverse}`);
+    console.log(`  out of the oracle's universe: ${result.counts.outOfUniverse}, of which ` +
+      `${result.libraryAsserted} are library calls given an in-repo target`);
+    console.log(`  precision if those count as wrong: ${formatRate(result.strictPrecision)}`);
     console.log(`  exact target line too: ${result.exactLine}/${result.counts.truePositives} ` +
       `(${pct(rate(result.exactLine, result.counts.truePositives).value)})`);
     console.log(`  same-file preference: right ${result.sameFilePreferenceWon} times on a shared name, ` +
@@ -355,6 +387,9 @@ for (const repo of REPOS) {
     console.log(`\n  20 sampled false negatives:`);
     for (const line of result.samples.falseNegatives) console.log(`    ${line}`);
     if (result.samples.falseNegatives.length === 0) console.log('    (none)');
+    console.log(`\n  20 sampled library calls given an in-repo target:`);
+    for (const line of result.samples.libraryAsserted) console.log(`    ${line}`);
+    if (result.samples.libraryAsserted.length === 0) console.log('    (none)');
   }
 
   report.cells[`${repo.name} / with tests`].oracleDiagnostics = oracle.diagnostics;

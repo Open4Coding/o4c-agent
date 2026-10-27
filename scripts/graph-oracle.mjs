@@ -98,6 +98,11 @@ export function buildOracle(projectRoot, tsconfigName = 'tsconfig.json') {
   const sites = [];
   /** Constructor sites with in-repo targets: reported to size the exclusion, never graded. */
   const constructorSites = [];
+  /**
+   * Call sites the compiler resolved outside the repository - the standard library and
+   * node_modules. Not edges, but not unknowns either: an in-repo answer for one of these is wrong.
+   */
+  const librarySites = [];
   const diagnostics = {
     sourceFiles: 0,
     callExpressions: 0,
@@ -172,7 +177,10 @@ export function buildOracle(projectRoot, tsconfigName = 'tsconfig.json') {
         .filter((a) => isInRepo(root, a.fileName));
 
       if (anchors.length === 0) {
-        if (graded) diagnostics.outOfRepo++;
+        if (graded) {
+          diagnostics.outOfRepo++;
+          librarySites.push({ fromPath, fromLine, name });
+        }
         return;
       }
 
@@ -204,7 +212,7 @@ export function buildOracle(projectRoot, tsconfigName = 'tsconfig.json') {
     visit(sourceFile);
   }
 
-  return { root, configPath, sites, constructorSites, diagnostics };
+  return { root, configPath, sites, constructorSites, librarySites, diagnostics };
 }
 
 if (import.meta.url === `file:///${process.argv[1].split('\\').join('/')}`) {
