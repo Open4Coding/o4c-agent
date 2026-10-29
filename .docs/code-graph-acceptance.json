@@ -1,90 +1,90 @@
 {
-  "generated": "2026-10-27",
-  "commit": "16d2a4f648f5405e6c450a6aab538eb3064dc7c2",
+  "generated": "2026-10-28",
+  "commit": "d43cdcf62393d00c1ca176538ea6eb976a382f00",
   "workingTreeDirty": true,
   "cells": {
     "o4c-agent / with tests": {
       "counts": {
-        "asserted": 7165,
-        "truePositives": 6467,
+        "asserted": 6886,
+        "truePositives": 6455,
         "falsePositives": 17,
-        "falseNegatives": 524,
-        "outOfUniverse": 681,
-        "oracleEdges": 6991
+        "falseNegatives": 552,
+        "outOfUniverse": 414,
+        "oracleEdges": 7007
       },
       "constructorsInCell": 371,
-      "libraryAsserted": 425,
-      "sameFilePreferenceWon": 1643,
+      "libraryAsserted": 288,
+      "sameFilePreferenceWon": 1646,
       "sameFilePreferenceLost": 11,
       "crossFileWrong": 6,
-      "exactLine": 6460,
-      "recoverableByCandidate": 416,
+      "exactLine": 6448,
+      "recoverableByCandidate": 444,
       "missedByExtraction": 0,
-      "missedByResolution": 507,
+      "missedByResolution": 535,
       "oracleDiagnostics": {
-        "sourceFiles": 191,
-        "callExpressions": 17369,
-        "newExpressions": 629,
+        "sourceFiles": 192,
+        "callExpressions": 17410,
+        "newExpressions": 631,
         "unsupportedShape": 49,
         "unresolved": 0,
         "ambiguous": 0,
-        "outOfRepo": 10222,
-        "inRepo": 7098,
+        "outOfRepo": 10246,
+        "inRepo": 7115,
         "constructorsInRepo": 371
       },
       "graphCounts": {
-        "callSites": 17955,
-        "resolved": 7292,
-        "ambiguous": 787,
-        "unresolved": 9876,
-        "viaImport": 54,
+        "callSites": 18025,
+        "resolved": 7008,
+        "ambiguous": 1094,
+        "unresolved": 9923,
+        "viaImport": 45,
         "viaCallShape": 195,
         "viaCallable": 0,
-        "edges": 12668
+        "edges": 12691
       },
       "graphFiles": {
-        "indexed": 197,
+        "indexed": 199,
         "skipped": 0,
         "noGrammar": 50
       }
     },
     "o4c-agent / without tests": {
       "counts": {
-        "asserted": 1684,
-        "truePositives": 1311,
+        "asserted": 1456,
+        "truePositives": 1294,
         "falsePositives": 8,
-        "falseNegatives": 98,
-        "outOfUniverse": 365,
-        "oracleEdges": 1409
+        "falseNegatives": 116,
+        "outOfUniverse": 154,
+        "oracleEdges": 1410
       },
       "constructorsInCell": 27,
-      "libraryAsserted": 111,
+      "libraryAsserted": 30,
       "sameFilePreferenceWon": 81,
       "sameFilePreferenceLost": 6,
       "crossFileWrong": 2,
-      "exactLine": 1307,
-      "recoverableByCandidate": 79,
+      "exactLine": 1290,
+      "recoverableByCandidate": 97,
       "missedByExtraction": 0,
-      "missedByResolution": 90
+      "missedByResolution": 108
     },
     "repomix / with tests": {
       "counts": {
-        "asserted": 4358,
-        "truePositives": 3643,
+        "asserted": 4131,
+        "truePositives": 3564,
         "falsePositives": 12,
-        "falseNegatives": 323,
-        "outOfUniverse": 703,
+        "falseNegatives": 402,
+        "outOfUniverse": 555,
         "oracleEdges": 3966
       },
       "constructorsInCell": 200,
-      "libraryAsserted": 87,
+      "libraryAsserted": 30,
       "sameFilePreferenceWon": 167,
       "sameFilePreferenceLost": 0,
       "crossFileWrong": 12,
-      "exactLine": 3642,
-      "recoverableByCandidate": 86,
+      "exactLine": 3563,
+      "recoverableByCandidate": 165,
       "missedByExtraction": 0,
-      "missedByResolution": 311,
+      "missedByResolution": 390,
       "oracleDiagnostics": {
         "sourceFiles": 302,
         "callExpressions": 20154,
@@ -98,10 +98,10 @@
       },
       "graphCounts": {
         "callSites": 22264,
-        "resolved": 4362,
-        "ambiguous": 1046,
+        "resolved": 4135,
+        "ambiguous": 1273,
         "unresolved": 16856,
-        "viaImport": 421,
+        "viaImport": 420,
         "viaCallShape": 66,
         "viaCallable": 0,
         "edges": 7563
@@ -114,22 +114,22 @@
     },
     "repomix / without tests": {
       "counts": {
-        "asserted": 1671,
-        "truePositives": 1153,
+        "asserted": 1458,
+        "truePositives": 1076,
         "falsePositives": 3,
-        "falseNegatives": 66,
-        "outOfUniverse": 515,
+        "falseNegatives": 143,
+        "outOfUniverse": 379,
         "oracleEdges": 1219
       },
       "constructorsInCell": 169,
-      "libraryAsserted": 75,
+      "libraryAsserted": 25,
       "sameFilePreferenceWon": 42,
       "sameFilePreferenceLost": 0,
       "crossFileWrong": 3,
-      "exactLine": 1152,
-      "recoverableByCandidate": 15,
+      "exactLine": 1075,
+      "recoverableByCandidate": 92,
       "missedByExtraction": 0,
-      "missedByResolution": 63
+      "missedByResolution": 140
     }
   }
 }

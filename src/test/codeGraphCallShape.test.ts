@@ -168,6 +168,40 @@ test('a member call reaches a top-level function through a module the file impor
   );
 });
 
+test('a member call to a standard-library method name reaches only a method in its own file', () => {
+  // `m.get()` on a receiver of unknown type: a `Map` is likelier than the repository's one `get`.
+  const elsewhere = [definition('src/cache.ts', 'method')];
+  const member = { callShape: 'member', fromPath: 'src/use.ts', isCall: true, libraryMethod: true } as const;
+  assert.equal(chooseTarget(elsewhere, member), undefined, 'the only namesake is not enough');
+  const own = chooseTarget([definition('src/cache.ts', 'method'), definition('src/use.ts', 'method')], member);
+  assert.equal(own?.route, 'same-file', '`this.get()` inside the class that defines it');
+  assert.equal(own?.definition.path, 'src/use.ts');
+  // A plain call is not a library method call, whatever its name.
+  assert.equal(
+    chooseTarget([definition('src/a.ts', 'function')], { ...member, callShape: 'bare' })?.route,
+    'unique',
+  );
+});
+
+test('call edges skip a library method name called on another file\'s receiver', async () => {
+  await withStore(async (store) => {
+    await addTs(
+      store,
+      'src/cache.ts',
+      ['export class Cache {', '  get(): number { return 1; }', '  twice() { return this.get() * 2; }', '}'].join('\n'),
+    );
+    await addTs(store, 'src/use.ts', "export function run(m: Map<string, number>) { return m.get('a'); }\n");
+
+    const { edges } = resolveCallEdges(store);
+    const gets = edges.filter((e) => e.name === 'get' && e.kind === 'call');
+    assert.deepEqual(
+      gets.map((e) => e.fromPath),
+      ['src/cache.ts'],
+      'only the call inside the defining file is asserted',
+    );
+  });
+});
+
 test('an unknown shape narrows nothing', () => {
   const candidates = [definition('src/a.ts', 'function'), definition('src/b.ts', 'method')];
   assert.equal(chooseTarget(candidates, {}), undefined, 'still ambiguous without the shape');

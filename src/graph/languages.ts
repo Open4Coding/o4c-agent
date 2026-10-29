@@ -28,6 +28,7 @@
  * Further grammars are reachable by pointing `O4C_WASM_DIR` at a directory - see
  * `grammarPaths.ts`.
  */
+import { ECMASCRIPT_LIBRARY_METHODS } from './libraryMethods.js';
 
 /** A language the Code Graph can parse out of the box. */
 export interface GraphLanguage {
@@ -52,6 +53,12 @@ export interface GraphLanguage {
    * called to construct it.
    */
   readonly typeOnlyKinds?: readonly string[];
+  /**
+   * Method names the language's standard library defines. `o.f()` to one of these resolves only
+   * to a method in the calling file - see `chooseTarget`. Needs `distinguishesCallShape`, since
+   * the rule applies to the member shape only.
+   */
+  readonly libraryMethods?: ReadonlySet<string>;
 }
 
 /** A `type` alias, `interface`, `enum` or `namespace` (`module`): none of them can be called. */
@@ -74,7 +81,12 @@ const TS_TYPE_ONLY = ['type', 'interface', 'enum', 'module'] as const;
  */
 export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
   // rank 1
-  { id: 'javascript', extensions: ['.js', '.mjs', '.cjs', '.jsx'], distinguishesCallShape: true },
+  {
+    id: 'javascript',
+    extensions: ['.js', '.mjs', '.cjs', '.jsx'],
+    distinguishesCallShape: true,
+    libraryMethods: ECMASCRIPT_LIBRARY_METHODS,
+  },
   // rank 4
   { id: 'python', extensions: ['.py', '.pyi'] },
   // rank 5 - a shell script's call graph really is its command invocations
@@ -85,8 +97,15 @@ export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
     extensions: ['.ts', '.mts', '.cts'],
     distinguishesCallShape: true,
     typeOnlyKinds: TS_TYPE_ONLY,
+    libraryMethods: ECMASCRIPT_LIBRARY_METHODS,
   },
-  { id: 'tsx', extensions: ['.tsx'], distinguishesCallShape: true, typeOnlyKinds: TS_TYPE_ONLY },
+  {
+    id: 'tsx',
+    extensions: ['.tsx'],
+    distinguishesCallShape: true,
+    typeOnlyKinds: TS_TYPE_ONLY,
+    libraryMethods: ECMASCRIPT_LIBRARY_METHODS,
+  },
   // rank 7
   // An interface cannot be invoked, and `module` is a namespace.
   { id: 'c_sharp', extensions: ['.cs'], typeOnlyKinds: ['interface', 'module'] },

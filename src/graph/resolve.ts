@@ -238,6 +238,11 @@ export interface ChooseOptions {
    * file imported (`import * as ns`, a default-exported object, a `require`).
    */
   readonly importedModules?: readonly string[];
+  /**
+   * The name is one the language's standard library defines as a method
+   * (`GraphLanguage.libraryMethods`). Read only with `callShape: 'member'`.
+   */
+  readonly libraryMethod?: boolean;
 }
 
 /**
@@ -257,6 +262,13 @@ export interface ChooseOptions {
  * it - it is a call into a library the index does not hold - and asserting the edge anyway was
  * most of what the stricter grading line (library calls given an in-repo target) found on
  * 2026-10-27.
+ *
+ * And one more that declines: `o.get()`, where `get` is a standard-library method name, resolves
+ * only to a method in the calling file. The receiver's type is unknown, and a library receiver
+ * is the likelier one: graded on 2026-10-28 the rule raised precision including library calls
+ * from 93.6% to 95.5% (o4c-agent) and 97.4% to 98.8% (repomix), at a recall cost of 0.4 and 2.0
+ * points. A precision-for-recall trade, taken deliberately: a wrong edge is handed to the model
+ * as fact, a missing one as an honest `low_confidence`.
  */
 export function chooseTarget(
   candidates: readonly DefinitionRow[],
@@ -266,6 +278,10 @@ export function chooseTarget(
 
   const callable = options.isCall ? narrowToCallable(candidates) : candidates;
   const shape = options.callShape;
+  if (shape === 'member' && options.libraryMethod) {
+    const own = callable.filter((c) => c.path === options.fromPath && c.kind !== 'function');
+    return own.length === 1 ? { definition: own[0], route: 'same-file' } : undefined;
+  }
   if (shape && callable.every((c) => c.kind === unreachableKind(shape))) {
     return shape === 'member' ? throughModuleObject(callable, options) : undefined;
   }
@@ -501,6 +517,7 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
     const bindings = store.importsIn(file.path);
     const imports = importMap(bindings);
     const importedModules = [...new Set(bindings.map((b) => b.module))];
+    const libraryMethods = languageById(file.language)?.libraryMethods;
 
     for (const ref of store.referencesIn(file.path)) {
       if (!isAssertedCall(ref.edgeKind)) continue;
@@ -518,6 +535,7 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
         callShape: callShapeFor(file.language, ref.kind),
         isCall: true,
         importedModules,
+        libraryMethod: libraryMethods?.has(ref.name),
       });
 
       if (chosen) {

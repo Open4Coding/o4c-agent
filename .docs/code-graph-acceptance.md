@@ -1,8 +1,9 @@
 # Code Graph acceptance test
 
-**Measured 2026-10-27**, re-run after the stricter precision line was added (a library call given
-an in-repo target now counts against it - see the figures) and `o.f()` stopped being handed the
-only top-level function of its name. Earlier runs: import-aware disambiguation, and telling `f()`
+**Measured 2026-10-28**, re-run after `o.get()`, `o.push()` and the other standard-library method
+names stopped resolving outside the calling file (see the figures). Earlier runs: the stricter
+precision line (a library call given an in-repo target counts against it), `o.f()` no longer
+handed the only top-level function of its name, import-aware disambiguation, and telling `f()`
 from `o.f()`. Reproduce with
 `npm run build && node scripts/graph-grade.mjs <path-to-repomix>`.
 
@@ -39,9 +40,9 @@ reporting filter on the caller's path changes, so the cells differ by exactly on
 
 | Excluded | Count (o4c / repomix) | Why |
 |---|---|---|
-| `new X()` | 629 / 651 | The TypeScript query captures it as `name.reference.class`, which `isAssertedCall` already excludes. Grading it would measure a claim the graph does not make. |
+| `new X()` | 631 / 651 | The TypeScript query captures it as `name.reference.class`, which `isAssertedCall` already excludes. Grading it would measure a claim the graph does not make. |
 | `a["b"]()`, `(f ?? g)()` | 49 / 144 | No query pattern captures these shapes, so they are not claims either. |
-| Targets outside the repository | 10,222 / 16,011 | A call into `node_modules` or the standard library is not an edge the graph can recover, so it is not in the recall denominator. **But it is one the graph can get wrong**: an in-repo target asserted for it is a wrong answer. Until 2026-10-27 those were counted as neither right nor wrong, which flattered precision; the figures block now reports precision with them counted. |
+| Targets outside the repository | 10,246 / 16,011 | A call into `node_modules` or the standard library is not an edge the graph can recover, so it is not in the recall denominator. **But it is one the graph can get wrong**: an in-repo target asserted for it is a wrong answer. Until 2026-10-27 those were counted as neither right nor wrong, which flattered precision; the figures block now reports precision with them counted. |
 
 The constructor exclusion is defensible but it also **flatters recall**, so the figures block
 reports recall again over a denominator widened by every in-repo constructor call, counting all of
@@ -92,10 +93,10 @@ same one.
 
 | Cell | Precision | Recall | Recall incl. constructors | Precision incl. library calls | F1 |
 |---|---|---|---|---|---|
-| o4c-agent, with tests | **99.7%** (6467/6484, 95% CI 99.6%-99.8%) | **92.5%** (6467/6991, 95% CI 91.9%-93.1%) | 87.8% (6467/7362) | 93.6% (6467/6909) | 0.960 |
-| o4c-agent, without tests | **99.4%** (1311/1319, 95% CI 98.8%-99.7%) | **93.0%** (1311/1409, 95% CI 91.6%-94.3%) | 91.3% (1311/1436) | 91.7% (1311/1430) | 0.961 |
-| repomix, with tests | **99.7%** (3643/3655, 95% CI 99.4%-99.8%) | **91.9%** (3643/3966, 95% CI 91.0%-92.7%) | 87.4% (3643/4166) | 97.4% (3643/3742) | 0.956 |
-| repomix, without tests | **99.7%** (1153/1156, 95% CI 99.2%-99.9%) | **94.6%** (1153/1219, 95% CI 93.2%-95.7%) | 83.1% (1153/1388) | 93.7% (1153/1231) | 0.971 |
+| o4c-agent, with tests | **99.7%** (6455/6472, 95% CI 99.6%-99.8%) | **92.1%** (6455/7007, 95% CI 91.5%-92.7%) | 87.5% (6455/7378) | 95.5% (6455/6760) | 0.958 |
+| o4c-agent, without tests | **99.4%** (1294/1302, 95% CI 98.8%-99.7%) | **91.8%** (1294/1410, 95% CI 90.2%-93.1%) | 90.0% (1294/1437) | 97.1% (1294/1332) | 0.954 |
+| repomix, with tests | **99.7%** (3564/3576, 95% CI 99.4%-99.8%) | **89.9%** (3564/3966, 95% CI 88.9%-90.8%) | 85.5% (3564/4166) | 98.8% (3564/3606) | 0.945 |
+| repomix, without tests | **99.7%** (1076/1079, 95% CI 99.2%-99.9%) | **88.3%** (1076/1219, 95% CI 86.3%-90.0%) | 77.5% (1076/1388) | 97.5% (1076/1104) | 0.936 |
 
 Precision is over *graded* edges — those whose call site the oracle ruled on. Recall is over every
 in-repo oracle edge, and its denominator includes edges the graph answered **wrongly**, so a wrong
@@ -110,8 +111,15 @@ looked like a large gain turned out to resolve `x.clone()` and `iter.collect()` 
 repository's own namesakes; the same kind of error was already in these TypeScript figures, about
 seven to twenty-five times as common, depending on the cell, as the errors the headline column counts.
 
-Target line numbers agree on 99.9% (6460/6467), 99.7% (1307/1311), 100.0% (3642/3643) and
-99.9% (1152/1153) of the recovered edges respectively. That is not a headline figure but it is
+Most of it went on 2026-10-28: a member call to a name the ECMAScript standard library defines
+as a method (`get`, `push`, `trim` - 335 names, `src/graph/libraryMethods.ts`) now resolves only
+to a method in the calling file. That is a deliberate precision-for-recall trade: it cost between 0.4
+and 6.3 points of recall per cell, because some of those calls really were to the
+repository's own `get`. A wrong edge reaches the model as fact; a declined one reaches it as
+`low_confidence` with the candidates listed, which it can still read.
+
+Target line numbers agree on 99.9% (6448/6455), 99.7% (1290/1294), 100.0% (3563/3564) and
+99.9% (1075/1076) of the recovered edges respectively. That is not a headline figure but it is
 useful corroboration: if the two sides were accidentally agreeing on files for some structural
 reason, line numbers would not line up as well.
 
@@ -258,7 +266,7 @@ accuracy rather than shipped on the strength of its recall column.
 **Nothing is lost to extraction.** `missedByExtraction` is 0 in all four cells: every oracle edge
 the graph failed to recover was at a call site the graph *did* see.
 
-**The limit is ambiguity, not blindness.** Of the 507 misses in the largest cell, 416 (82.1%) had
+**The limit is ambiguity, not blindness.** Of the 535 misses in the largest cell, 444 (83.0%) had
 the correct target sitting in the candidate list and were declined because the evidence available
 could not choose. The graph refused to guess, which is the designed behaviour —
 `resolveCallEdges` emits `call_reference` for those, and `isAssertedCall` keeps them out of any
@@ -270,9 +278,9 @@ syntax.
 
 `resolve.ts` prefers a definition in the referencing file when a name is shared, and its own
 comment said the acceptance test would decide whether that was justified. Measured across the four
-cells it was **right 1,933 times and wrong 17** — a ratio of 114 to 1. It keeps.
+cells it was **right 1,936 times and wrong 17** — a ratio of 114 to 1. It keeps.
 
-That is 1,933 answers that would otherwise have been declined as `low_confidence`, bought for 17
+That is 1,936 answers that would otherwise have been declined as `low_confidence`, bought for 17
 wrong ones. The ratio improved without the rule changing, because the call-shape exclusion now
 removes some wrong same-file candidates before this rule can prefer them. Note it is a ratio, not a free win: the 19 are real errors, and they are concentrated
 in exactly the case the next section describes.
