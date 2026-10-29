@@ -243,6 +243,8 @@ export interface ChooseOptions {
    * (`GraphLanguage.libraryMethods`). Read only with `callShape: 'member'`.
    */
   readonly libraryMethod?: boolean;
+  /** The reference is a macro invocation (`m!()`), which only a `macro` definition can take. */
+  readonly macroCall?: boolean;
 }
 
 /**
@@ -275,6 +277,10 @@ export function chooseTarget(
   options: ChooseOptions = {},
 ): ChosenTarget | undefined {
   if (candidates.length === 0) return undefined;
+  if (options.macroCall) {
+    const macros = candidates.filter((c) => c.kind === 'macro');
+    return macros.length > 0 ? chooseTarget(macros, { ...options, macroCall: false }) : undefined;
+  }
 
   const callable = options.isCall ? narrowToCallable(candidates) : candidates;
   const shape = options.callShape;
@@ -536,6 +542,7 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
         isCall: true,
         importedModules,
         libraryMethod: libraryMethods?.has(ref.name),
+        macroCall: ref.kind === 'macro',
       });
 
       if (chosen) {

@@ -31,9 +31,9 @@ export type EdgeKind =
  * Matched as the capture's kind suffix. `send` is Ruby's and C#'s word for an invocation;
  * `method` is Java's, which is also why matching must never be on exact full capture names -
  * Java emits `name.reference.method` where JavaScript, Python, Go and Rust emit
- * `name.reference.call`.
+ * `name.reference.call`. `macro` is Rust's `m!()`, a call that only a macro definition can take.
  */
-const CALL_KINDS = new Set(['call', 'method', 'send', 'invocation']);
+const CALL_KINDS = new Set(['call', 'method', 'send', 'invocation', 'macro']);
 
 /**
  * Classifies a reference capture.

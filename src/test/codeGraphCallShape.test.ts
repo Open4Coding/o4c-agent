@@ -347,3 +347,66 @@ test('nothing is attributed when there are no calls to attribute', async () => {
     assert.doesNotMatch(nameProjection(store, 'Shape').text, /can be called|call site/);
   });
 });
+
+// ------------------------------------------------------------------ Rust
+
+async function addRs(store: GraphStore, path: string, source: string): Promise<void> {
+  const { tags, imports } = await extractFile(source, 'rust');
+  store.indexFile({ path, language: 'rust', source, tags, imports });
+}
+
+test('a Rust fn is one kind: a method in an impl, a function outside one', async () => {
+  // Until 2026-10-29 every fn in an impl or trait was captured as both, so a method defined once
+  // was two candidates on one line - which hid the call shape and the library-name errors alike.
+  const source = [
+    'struct S;',
+    'impl S { fn inside(&self) {} }',
+    'fn outside() {}',
+    'mod tests { fn helper() {} }',
+  ].join('\n');
+  const defs = (await extractFile(source, 'rust')).tags.filter((t) => t.kind === 'def');
+  const kinds = (name: string) => defs.filter((d) => d.name === name).map((d) => d.capture);
+  assert.deepEqual(kinds('inside'), ['name.definition.method']);
+  assert.deepEqual(kinds('outside'), ['name.definition.function']);
+  assert.deepEqual(kinds('helper'), ['name.definition.function'], 'a fn in `mod tests` is not a method');
+});
+
+test('Rust records the call shape, and a macro invocation as its own kind', async () => {
+  const { tags } = await extractFile('fn go(x: X) { plain(); x.member(); shout!(1); }', 'rust');
+  const refs = tags.filter((t) => t.kind === 'ref');
+  assert.equal(refs.find((r) => r.name === 'plain')?.capture, 'name.reference.call');
+  assert.equal(refs.find((r) => r.name === 'member')?.capture, 'name.reference.method');
+  assert.equal(refs.find((r) => r.name === 'shout')?.capture, 'name.reference.macro');
+  assert.equal(callShapeFor('rust', 'method'), 'member');
+});
+
+test('a Rust library method name reaches only a method in its own file', async () => {
+  await withStore(async (store) => {
+    await addRs(
+      store,
+      'src/stack.rs',
+      [
+        'pub struct Stack;',
+        'impl Stack {',
+        '  pub fn len(&self) -> usize { 0 }',
+        '  fn twice(&self) -> usize { self.len() * 2 }',
+        '}',
+      ].join('\n'),
+    );
+    await addRs(store, 'src/use.rs', 'fn run(v: Vec<u8>) -> usize { v.len() }');
+
+    const calls = resolveCallEdges(store).edges.filter((e) => e.name === 'len' && e.kind === 'call');
+    assert.deepEqual(calls.map((e) => e.fromPath), ['src/stack.rs'], '`v.len()` on a Vec is not Stack::len');
+  });
+});
+
+test('a macro invocation reaches a macro definition, never a function of its name', async () => {
+  await withStore(async (store) => {
+    // `assert!` was resolving to a JavaScript `function assert`, and `env!` to an `fn env`.
+    await addRs(store, 'src/util.rs', 'pub fn env() {}\nmacro_rules! shout { () => {} }');
+    await addRs(store, 'src/main.rs', 'fn main() { env!("HOME"); shout!(); }');
+
+    const calls = resolveCallEdges(store).edges.filter((e) => e.fromPath === 'src/main.rs' && e.kind === 'call');
+    assert.deepEqual(calls.map((e) => e.name), ['shout']);
+  });
+});

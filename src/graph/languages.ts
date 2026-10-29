@@ -29,6 +29,7 @@
  * `grammarPaths.ts`.
  */
 import { ECMASCRIPT_LIBRARY_METHODS } from './libraryMethods.js';
+import { RUST_LIBRARY_METHODS } from './rustLibraryMethods.js';
 
 /** A language the Code Graph can parse out of the box. */
 export interface GraphLanguage {
@@ -126,7 +127,13 @@ export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
   { id: 'go', extensions: ['.go'], typeOnlyKinds: ['module'] },
   // rank 14
   // A trait (`interface`) and a `mod`. Not `class`: a tuple struct is constructed as `S(x)`.
-  { id: 'rust', extensions: ['.rs'], typeOnlyKinds: ['interface', 'module'] },
+  {
+    id: 'rust',
+    extensions: ['.rs'],
+    distinguishesCallShape: true,
+    typeOnlyKinds: ['interface', 'module'],
+    libraryMethods: RUST_LIBRARY_METHODS,
+  },
   // rank 17
   // `Foo()` reaches a method named Foo, never the module.
   { id: 'ruby', extensions: ['.rb'], typeOnlyKinds: ['module'] },
