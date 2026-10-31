@@ -3054,6 +3054,8 @@ test('Manual Mode (the default) prompts before write_file, and declining leaves 
 
     await submit(stdin, 'please write the file');
     await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
+    // Nothing is running while the box waits on the user, so the spinner is gone (NextUp item 40).
+    assert.equal((lastFrame() ?? '').includes('Thinking...'), false);
 
     // The settle tick is NOT decoration, and leaving it out cost a real investigation (NextUp
     // item 32). ConfirmDialog subscribes to input from a useEffect, which runs after the commit
