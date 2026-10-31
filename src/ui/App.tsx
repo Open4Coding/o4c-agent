@@ -2741,7 +2741,7 @@ export function App({
         ))}
       {/* Not while a write_file/run_shell confirmation is open: that box arrives mid-turn, so
           isThinking is still true, but nothing is running until the user answers (NextUp item
-          40). The "Stop now?" box is different - the model keeps working behind it. */}
+          41). The "Stop now?" box is different - the model keeps working behind it. */}
       {isThinking && !confirmDialog && <Spinner />}
       <InputBox
         disabled={isProcessing}
