@@ -34,7 +34,7 @@ function lineBudget(cols: number): number {
 
 /** How many file lines to preview: a quarter of the window, never fewer than 3 nor more than 8, so
  * the dialog stays a small part of any window. */
-function previewLineCount(rows: number): number {
+export function previewLineCount(rows: number = currentSize().rows): number {
   return Math.max(3, Math.min(8, Math.floor(rows / 4)));
 }
 
@@ -122,6 +122,11 @@ export function formatConfirmMessage(
    * message, which changes what belongs in it - see the write_file branch.
    */
   diffSummary?: string,
+  /**
+   * The caller draws the new file's first lines itself, syntax-coloured (item 9), so the message
+   * stops at the question and the notes.
+   */
+  previewDrawnSeparately = false,
 ): string {
   const budget = lineBudget(size.cols);
   // Under the question rather than above it: the first line is the one guaranteed to be on screen
@@ -138,6 +143,7 @@ export function formatConfirmMessage(
     // and a dialog taller than the window is the exact failure this file was written to fix. The
     // counts stay, because "how big is this write" is a different question from "what changes".
     if (diffSummary) return [`${head}, ${diffSummary}`, ...notes].join('\n');
+    if (previewDrawnSeparately) return [head, ...notes].join('\n');
     const shown = Math.min(lines.length, previewLineCount(size.rows));
     const preview = lines.slice(0, shown).map((l) => clipLine(l, budget));
     const hidden = lines.length - shown;

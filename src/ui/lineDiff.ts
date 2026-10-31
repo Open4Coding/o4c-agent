@@ -25,6 +25,10 @@ export type DiffKind = 'same' | 'removed' | 'added';
 export interface DiffLine {
   readonly kind: DiffKind;
   readonly text: string;
+  /** 1-based line number in the old text. Set on `removed` and `same` lines, never on a marker. */
+  readonly oldLine?: number;
+  /** 1-based line number in the new text. Set on `added` and `same` lines, never on a marker. */
+  readonly newLine?: number;
 }
 
 /**
@@ -62,13 +66,13 @@ export function diffLines(before: string, after: string): readonly DiffLine[] {
   if (a.length === 0 && b.length === 0) return [];
   // A new file: everything is an addition. Worth special-casing before the guard below, so
   // creating a big file still shows as additions rather than as a replacement of nothing.
-  if (a.length === 0) return b.map((text) => ({ kind: 'added', text }) as const);
-  if (b.length === 0) return a.map((text) => ({ kind: 'removed', text }) as const);
+  if (a.length === 0) return b.map((text, j) => ({ kind: 'added', text, newLine: j + 1 }) as const);
+  if (b.length === 0) return a.map((text, i) => ({ kind: 'removed', text, oldLine: i + 1 }) as const);
 
   if (a.length > MAX_DIFF_LINES || b.length > MAX_DIFF_LINES) {
     return [
-      ...a.map((text) => ({ kind: 'removed', text }) as const),
-      ...b.map((text) => ({ kind: 'added', text }) as const),
+      ...a.map((text, i) => ({ kind: 'removed', text, oldLine: i + 1 }) as const),
+      ...b.map((text, j) => ({ kind: 'added', text, newLine: j + 1 }) as const),
     ];
   }
 
@@ -85,19 +89,19 @@ export function diffLines(before: string, after: string): readonly DiffLine[] {
   let j = 0;
   while (i < a.length && j < b.length) {
     if (a[i] === b[j]) {
-      out.push({ kind: 'same', text: a[i] });
+      out.push({ kind: 'same', text: a[i], oldLine: i + 1, newLine: j + 1 });
       i++;
       j++;
     } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
-      out.push({ kind: 'removed', text: a[i] });
+      out.push({ kind: 'removed', text: a[i], oldLine: i + 1 });
       i++;
     } else {
-      out.push({ kind: 'added', text: b[j] });
+      out.push({ kind: 'added', text: b[j], newLine: j + 1 });
       j++;
     }
   }
-  while (i < a.length) out.push({ kind: 'removed', text: a[i++] });
-  while (j < b.length) out.push({ kind: 'added', text: b[j++] });
+  for (; i < a.length; i++) out.push({ kind: 'removed', text: a[i], oldLine: i + 1 });
+  for (; j < b.length; j++) out.push({ kind: 'added', text: b[j], newLine: j + 1 });
   return out;
 }
 

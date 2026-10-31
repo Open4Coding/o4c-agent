@@ -20,7 +20,9 @@ import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { listPlans, plansReport } from '../session/plansStore.js';
-import { clipDiff, diffLines, diffStats, formatDiffStats, type DiffLine } from './lineDiff.js';
+import { clipDiff, diffLines, diffStats, formatDiffStats } from './lineDiff.js';
+import { styleCodePreview, styleDiff, type StyledDiffLine } from './diffStyle.js';
+import { grammarForPath, highlightCode } from './syntaxHighlight.js';
 import { readFile } from 'node:fs/promises';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
@@ -35,7 +37,7 @@ import {
 } from '../agent/thinkLevel.js';
 import { formatEvent } from './formatEvent.js';
 import { formatError } from './formatError.js';
-import { formatConfirmMessage } from './confirmPreview.js';
+import { formatConfirmMessage, previewLineCount } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
 import { formatMessage } from './formatMessage.js';
 import {
@@ -66,7 +68,8 @@ import {
   liveRegionCapRows as sharedLiveRegionCapRows,
   liveRegionCapRowsFor,
 } from './frameBudget.js';
-import { theme, lineStyle, contextBarStyle } from './theme.js';
+import { theme, lineStyle, contextBarStyle, diffColors, scopeColor } from './theme.js';
+import { FenceTracker, fencedSegments } from './codeFences.js';
 import { colorViewLines } from './colorView.js';
 import {
   formatTokenCount,
@@ -515,6 +518,38 @@ function ProjectBar({
 
 function LineText({ line }: { line: Line }) {
   const style = lineStyle[line.kind];
+  // Item 9: code in a reply is coloured; the text itself is unchanged, so layout is too. Code is
+  // never bold - the reply's bold accent is for prose - and fence lines recede.
+  if (line.fence) return <Text color={diffColors.gutter}>{line.text}</Text>;
+  if (line.code) {
+    return (
+      <Text>
+        {line.code.map((s, i) => (
+          <Text key={i} color={scopeColor(s.scope) ?? theme.text}>
+            {s.text}
+          </Text>
+        ))}
+      </Text>
+    );
+  }
+  const segments = line.kind === 'final' && !line.color ? fencedSegments(line.text) : undefined;
+  if (segments) {
+    return (
+      <Text>
+        {segments.map((s, i) =>
+          s.kind === 'prose' ? (
+            <Text key={i} bold={style.bold} color={style.color}>
+              {s.text}
+            </Text>
+          ) : (
+            <Text key={i} color={s.kind === 'fence' ? diffColors.gutter : (scopeColor(s.scope) ?? theme.text)}>
+              {s.text}
+            </Text>
+          ),
+        )}
+      </Text>
+    );
+  }
   return (
     <Text bold={style.bold} color={line.color ?? style.color}>
       {line.text}
@@ -768,9 +803,26 @@ export function App({
     const { lines, tail } = splitStreamLines(streamTailRef.current + text);
     streamTailRef.current = tail;
     if (lines.length > 0) {
-      dispatchTextWindow({ type: 'commit', lines: lines.map((t) => ({ kind: lineKind, text: t })), flow: true });
+      dispatchTextWindow({
+        type: 'commit',
+        lines: lines.map((t) => (kind === 'text' ? replyLine(t) : { kind: lineKind, text: t })),
+        flow: true,
+      });
     }
     dispatchTextWindow({ type: 'setLiveTail', text: tail });
+  };
+
+  /**
+   * Item 9: which fenced block, if any, the streamed reply is inside. A line is committed before
+   * the next one exists, so the code/fence decision has to be made here, in order, and carried on
+   * the line - see `Line.code`.
+   */
+  const fenceTrackerRef = useRef(new FenceTracker());
+  const replyLine = (text: string): Line => {
+    const role = fenceTrackerRef.current.next(text);
+    if (role.role === 'fence') return { kind: 'final', text, fence: true };
+    if (role.role === 'code') return { kind: 'final', text, code: role.code };
+    return { kind: 'final', text };
   };
 
   /** Commits whatever partial line is left, at the end of a stream segment (the kind changing, a
@@ -781,10 +833,12 @@ export function App({
     if (pending !== '') {
       dispatchTextWindow({
         type: 'commit',
-        lines: [{ kind: kind === 'text' ? 'final' : 'system', text: pending }],
+        lines: [kind === 'text' ? replyLine(pending) : { kind: 'system', text: pending }],
         flow: true,
       });
     }
+    // The segment is over: a block it left open does not carry into the next one.
+    fenceTrackerRef.current.reset();
     dispatchTextWindow({ type: 'setLiveTail', text: '' });
   };
 
@@ -962,8 +1016,8 @@ export function App({
   const [confirmDialog, setConfirmDialog] = useState<{
     id: number;
     message: string;
-    /** A write_file diff, already clipped - item 8. Absent for every other tool. */
-    diff?: readonly DiffLine[];
+    /** A write_file diff, already clipped and styled - items 8 and 9. Absent for every other tool. */
+    diff?: readonly StyledDiffLine[];
     tool: Tool;
     input: Record<string, unknown>;
     resolve: (confirmed: boolean) => void;
@@ -974,7 +1028,7 @@ export function App({
       message: string,
       tool: Tool,
       input: Record<string, unknown>,
-      diff?: readonly DiffLine[],
+      diff?: readonly StyledDiffLine[],
     ): Promise<boolean> => {
       return new Promise((resolve) => {
         setConfirmDialog({ id: nextDialogId++, message, diff, tool, input, resolve });
@@ -1088,7 +1142,7 @@ export function App({
       // Failure to read is not an error: a new file (ENOENT) is the ordinary case and reads
       // as all-additions, and an unreadable existing file simply gets no diff - the content
       // preview is still there, so the dialog is never worse than before this existed.
-      let diff: readonly DiffLine[] | undefined;
+      let diff: readonly StyledDiffLine[] | undefined;
       let diffSummary: string | undefined;
       if (tool.name === 'write_file' && typeof input.path === 'string') {
         let existing: string | undefined;
@@ -1106,19 +1160,35 @@ export function App({
         // answer to that, only content. So: existing file -> diff, new file -> the preview that
         // was already there. Found by the big-write_file dialog test, which asserts on that tail:
         // the regression was mine and the test was right.
-        const full = existing === undefined ? [] : diffLines(existing, String(input.content ?? ''));
+        const content = String(input.content ?? '');
+        const full = existing === undefined ? [] : diffLines(existing, content);
         const stats = diffStats(full);
         if (stats.added > 0 || stats.removed > 0) {
           // Sized from the terminal, like every other part of this dialog: a third of the
           // window, floored at 4 and capped at 16, so the diff informs the decision without
           // becoming the frame-taller-than-the-window bug confirmPreview.ts exists to fix.
           const rows = process.stdout.rows || 24;
-          diff = clipDiff(full, Math.max(4, Math.min(16, Math.floor(rows / 3))));
+          const clipped = clipDiff(full, Math.max(4, Math.min(16, Math.floor(rows / 3))));
+          // Item 9: both versions highlighted whole, so a line inside a block comment is still a
+          // comment; each diff line then takes its colours from the version it belongs to.
+          const grammar = grammarForPath(input.path);
+          diff = styleDiff(clipped, highlightCode(existing ?? '', grammar), highlightCode(content, grammar));
           diffSummary = formatDiffStats(stats);
+        } else {
+          // No diff to show - a new file, or a write that changes nothing: the file's first lines
+          // instead, numbered and coloured (item 9). Only the lines shown are highlighted, which
+          // is exact, since highlighting runs forward from the top of the file.
+          const lines = content.split('\n');
+          const head = lines.slice(0, Math.min(lines.length, previewLineCount())).join('\n');
+          diff = styleCodePreview(
+            highlightCode(head, grammarForPath(input.path)),
+            lines.length,
+            (process.stdout.columns || 80) - 4,
+          );
         }
       }
       const ok = await askConfirm(
-        formatConfirmMessage(tool.name, input, undefined, tool.mcp, diffSummary),
+        formatConfirmMessage(tool.name, input, undefined, tool.mcp, diffSummary, diff !== undefined && !diffSummary),
         tool,
         input,
         diff,
@@ -1835,6 +1905,7 @@ export function App({
         turnHadThinkRef.current = false;
         lastDeltaKindRef.current = null;
         streamTailRef.current = '';
+        fenceTrackerRef.current.reset();
         streamCommittedRef.current = { think: false, text: false };
         // Defensive - the finally block below always flushes and clears these at the end of every
         // turn, but starting clean here too means a stray leftover timer/buffer can never bleed a

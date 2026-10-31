@@ -84,3 +84,61 @@ export const lineStyle: Record<LineKind, { color: string; bold?: boolean }> = {
   error: { color: theme.error },
   splash: { color: theme.primary, bold: true },
 };
+
+/**
+ * Syntax colours - checklist item 9. Monokai's hues, the scheme Claude Code's diff colours were
+ * measured against: chosen for readability on a near-black background, and distinct from the amber
+ * of the transcript chrome so code never reads as UI. Keys are highlight.js scopes; `scopeColor`
+ * tries the full scope, then its first part.
+ */
+export const syntax: Readonly<Record<string, string>> = {
+  keyword: '#F92672',
+  'meta.keyword': '#F92672',
+  operator: '#F92672',
+  string: '#E6DB74',
+  regexp: '#E6DB74',
+  char: '#E6DB74',
+  number: '#AE81FF',
+  literal: '#AE81FF',
+  symbol: '#AE81FF',
+  comment: '#8F8B76',
+  doc: '#8F8B76',
+  quote: '#8F8B76',
+  title: '#A6E22E',
+  section: '#A6E22E',
+  'title.class': '#66D9EF',
+  type: '#66D9EF',
+  built_in: '#66D9EF',
+  attr: '#FD971F',
+  params: '#FD971F',
+  attribute: '#A6E22E',
+  property: '#F8F8F2',
+  variable: '#F8F8F2',
+  'variable.language': '#FD971F',
+  meta: '#8F8B76',
+  tag: '#F92672',
+  name: '#F92672',
+  'selector-tag': '#F92672',
+  'selector-class': '#A6E22E',
+  'selector-id': '#A6E22E',
+  addition: '#A6E22E',
+  deletion: '#F92672',
+};
+
+/** The colour for a highlight.js scope, or `undefined` to leave the text in its default colour. */
+export function scopeColor(scope: string | undefined): string | undefined {
+  if (!scope) return undefined;
+  return syntax[scope] ?? syntax[scope.split('.')[0]];
+}
+
+/**
+ * Diff backgrounds - a whole changed line gets the dim one, the words that changed within it the
+ * bright one. Dark enough that the syntax colours drawn on top keep their contrast.
+ */
+export const diffColors = {
+  removedLine: '#3D1F1F',
+  removedWord: '#7A2E2E',
+  addedLine: '#1E3A22',
+  addedWord: '#2F6B37',
+  gutter: '#75715E',
+} as const;
