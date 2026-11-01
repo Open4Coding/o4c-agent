@@ -266,3 +266,16 @@ test('reasoning_budget_tokens is sent to the server only when a budget is config
   assert.equal(bodies[0].reasoning_budget_tokens, 1000);
   assert.equal('reasoning_budget_tokens' in bodies[1], false);
 });
+
+test('tool-call arguments report their progress as they stream, so a long write_file is not silent (item 43)', async () => {
+  const stream = sseStream([
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'write_file', arguments: '{"path":"a' } }] } }] }),
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '.html","content":"<html>' } }] } }] }),
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '</html>"}' } }] } }] }),
+    sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+  ]);
+  const progress: Array<[string, number]> = [];
+  const result = await parseSseStream(stream, undefined, (name, chars) => progress.push([name, chars]));
+  assert.deepEqual(progress, [['write_file', 10], ['write_file', 34], ['write_file', 43]]);
+  assert.equal(result.toolCalls[0].input.path, 'a.html');
+});

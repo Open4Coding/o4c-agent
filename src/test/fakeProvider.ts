@@ -27,7 +27,8 @@ export class FakeProvider implements LLMProvider {
     // structured-cloneable (a function and, depending on the runtime, an AbortSignal), and
     // recording them was never the point; `receivedRequests` is for asserting on what was *asked*
     // (messages, tools, systemPrompt), not on these two call-mechanics-only fields.
-    const { onToken, signal, ...cloneable } = request;
+    // `onToolProgress` too, for the same reason: it is a function (NextUp item 43).
+    const { onToken, onToolProgress, signal, ...cloneable } = request;
     this.receivedRequests.push(structuredClone(cloneable) as CompletionRequest);
     const next = this.queue.shift();
     if (!next) {

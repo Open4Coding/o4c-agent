@@ -55,7 +55,7 @@ import {
 } from '../tools/toolOutput.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'tool_progress';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -71,6 +71,9 @@ export interface AgentEvent {
    * `onToken` doc comment) via `createThinkTagStripper`. Lets the live UI label reasoning the
    * instant it starts streaming, not just after the fact. */
   kind?: 'think' | 'text';
+  /** `'tool_progress'` only - how many characters of the tool call's arguments (`toolName`) have
+   * streamed so far. A live-status signal like `'delta'`: not logged, not a transcript line. */
+  chars?: number;
 }
 
 export interface RunOptions {
@@ -1343,6 +1346,7 @@ export class AgentLoop {
           streamed = true;
           thinkFilter.feed(delta, kind);
         },
+        onToolProgress: (toolName, chars) => onEvent({ type: 'tool_progress', toolName, chars }),
       };
       try {
         response = await this.provider.complete(request);

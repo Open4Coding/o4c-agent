@@ -297,7 +297,7 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
  * allocation churn and ~100 KB/s of terminal writes. 250 ms (4 fps) still reads as clearly alive. */
 export const SPINNER_INTERVAL_MS = 250;
 
-function Spinner() {
+function Spinner({ label = 'Thinking...' }: { label?: string }) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setFrame((f) => (f + 1) % SPINNER_FRAMES.length), SPINNER_INTERVAL_MS);
@@ -305,10 +305,14 @@ function Spinner() {
   }, []);
   return (
     <Text color={theme.warn}>
-      {SPINNER_FRAMES[frame]} Thinking...
+      {SPINNER_FRAMES[frame]} {label}
     </Text>
   );
 }
+
+/** How often the spinner's "Writing <tool> call..." count may re-render (NextUp item 43): every
+ * streamed fragment would be a render each, for a number nobody reads faster than this. */
+const TOOL_PROGRESS_MS = 250;
 
 /** Session-elapsed-time ticker + the model/tokens/context-usage line shown above the input box -
  * per direct instruction, matching Hermes Agent's own status bar. `tick` exists purely to force
@@ -717,6 +721,10 @@ export function App({
   // is in flight,
   // so the "Thinking..." spinner doesn't run during a turn that's really just waiting on the user.
   const [isThinking, setIsThinking] = useState(false);
+  // The tool call whose arguments are streaming right now, for the spinner's label (NextUp item
+  // 43). Null whenever the model is not in the middle of writing one.
+  const [toolProgress, setToolProgress] = useState<{ name: string; chars: number } | null>(null);
+  const toolProgressShownAtRef = useRef(0);
   // Narrower than isThinking: true while waiting on the model itself (including the silent gap
   // before its first byte), false while a tool is actually executing or the final answer is
   // already streaming. Drives handleEscape's choice between asking first and stopping at once -
@@ -1992,6 +2000,7 @@ export function App({
         const responseLines: Line[] = [];
         dispatchTextWindow({ type: 'clearLive' });
         setIsThinking(true);
+        setToolProgress(null);
         // True by default at the start of every round waiting on the model - including a
         // non-streaming provider's silent gap before its first byte, which is exactly the
         // long-running-reasoning case Esc should ask about. Flipped false the instant a 'text'
@@ -2071,7 +2080,18 @@ export function App({
               // line rather than starting a new one each time (textWindow.ts's own deltaActive
               // tracking) - handled first and returned early since every other event type below
               // means "a new, distinct line", the opposite of what a delta continuation needs.
+              // Live status only, like 'delta': not logged, never a transcript line. Throttled,
+              // because it arrives once per streamed fragment of the arguments.
+              if (event.type === 'tool_progress') {
+                const now = Date.now();
+                if (event.toolName && now - toolProgressShownAtRef.current >= TOOL_PROGRESS_MS) {
+                  toolProgressShownAtRef.current = now;
+                  setToolProgress({ name: event.toolName, chars: event.chars ?? 0 });
+                }
+                return;
+              }
               if (event.type === 'delta') {
+                setToolProgress(null);
                 if (event.text) {
                   // event.kind reflects what the provider actually said this chunk was (see
                   // AgentEvent's own doc comment) - defaulted to 'text' only for a provider/fake
@@ -2136,6 +2156,8 @@ export function App({
               // it's the agent's own local action).
               void fullContextLogger.log({ event });
 
+              // The call it was counting has arrived whole: back to "Thinking...".
+              if (event.type === 'tool_call') setToolProgress(null);
               const isToolEvent = event.type === 'tool_call' || event.type === 'tool_result';
               if (isToolEvent) {
                 toolEventCount += 1;
@@ -2842,7 +2864,11 @@ export function App({
       {/* Not while a write_file/run_shell confirmation is open: that box arrives mid-turn, so
           isThinking is still true, but nothing is running until the user answers (NextUp item
           41). The "Stop now?" box is different - the model keeps working behind it. */}
-      {isThinking && !confirmDialog && <Spinner />}
+      {isThinking && !confirmDialog && (
+        <Spinner
+          label={toolProgress ? `Writing the ${toolProgress.name} call... ${toolProgress.chars.toLocaleString('en-US')} characters` : undefined}
+        />
+      )}
       <InputBox
         disabled={isProcessing}
         active={!confirmDialog && !stopConfirm && !clearConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker}

@@ -835,6 +835,31 @@ test('/clear mid-turn, confirmed: aborts the turn, saves the session once, then 
   });
 });
 
+test('while the model writes a tool call, the spinner says so and counts the characters, then goes back to Thinking (item 43)', async () => {
+  await withTempDir(async (dir) => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    const provider: LLMProvider = {
+      name: 'tool-progress-fake',
+      async complete(request: CompletionRequest): Promise<CompletionResponse> {
+        calls += 1;
+        if (calls === 1) {
+          request.onToolProgress?.('write_file', 4210);
+          await gate;
+          return { content: '', toolCalls: [{ id: 'c1', name: 'read_file', input: { path: 'nope.txt' } }], stopReason: 'tool_use' };
+        }
+        return { content: 'done', toolCalls: [], stopReason: 'end_turn' };
+      },
+    };
+    const { stdin, frames } = await setup({ dir, provider });
+    await submit(stdin, 'write the page');
+    await waitFor(() => anyFrameIncludes(frames, 'Writing the write_file call... 4,210 characters'));
+    release();
+    await waitFor(() => anyFrameIncludes(frames, 'done'));
+  });
+});
+
 test('Escape while thinking cancels the turn and restores its prompt to the input box', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames } = await setup({ dir, provider: new AbortAwareHangingProvider() });

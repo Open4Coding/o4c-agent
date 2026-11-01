@@ -475,7 +475,7 @@ export class LocalProvider implements LLMProvider {
     const prefill = lastMessage?.role === 'assistant' ? lastMessage.content : '';
     const streamOnToken =
       prefill && request.onToken ? createPrefillEchoFilter(prefill, request.onToken) : request.onToken;
-    const { content, toolCalls, finishReason, usage } = await parseSseStream(idleBody, streamOnToken);
+    const { content, toolCalls, finishReason, usage } = await parseSseStream(idleBody, streamOnToken, request.onToolProgress);
     return {
       content,
       toolCalls,
@@ -577,6 +577,7 @@ interface ParsedStream {
 export async function parseSseStream(
   body: ReadableStream<Uint8Array>,
   onToken?: (delta: string, kind: 'think' | 'text') => void,
+  onToolProgress?: (toolName: string, argumentChars: number) => void,
 ): Promise<ParsedStream> {
   let content = '';
   let reasoning = '';
@@ -635,6 +636,7 @@ export async function parseSseStream(
           if (call.function?.name) existing.name = call.function.name;
           if (call.function?.arguments) existing.args += call.function.arguments;
           toolCallsByIndex.set(call.index, existing);
+          if (call.function?.arguments && existing.name) onToolProgress?.(existing.name, existing.args.length);
         }
         if (choice.finish_reason) finishReason = choice.finish_reason;
       }

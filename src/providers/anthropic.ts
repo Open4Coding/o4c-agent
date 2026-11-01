@@ -163,6 +163,21 @@ export class AnthropicProvider implements LLMProvider {
       // provider that only emits embedded `<think>` markup in a single text stream.
       stream.on('thinking', (delta) => request.onToken?.(delta, 'think'));
     }
+    if (request.onToolProgress) {
+      // Counted per content block: a new block index is a new tool call, starting from zero.
+      let block = -1;
+      let chars = 0;
+      stream.on('inputJson', (partial) => {
+        const content = stream.currentMessage?.content ?? [];
+        if (content.length - 1 !== block) {
+          block = content.length - 1;
+          chars = 0;
+        }
+        chars += partial.length;
+        const last = content[content.length - 1];
+        request.onToolProgress?.(last && last.type === 'tool_use' ? last.name : 'tool', chars);
+      });
+    }
 
     let response: Anthropic.Message;
     try {

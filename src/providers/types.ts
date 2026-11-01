@@ -69,6 +69,14 @@ export interface CompletionRequest {
    * events), so this is a direct signal, not a guess reconstructed from the complete text later. */
   onToken?: (delta: string, kind: 'think' | 'text') => void;
   /**
+   * Called as a tool call's arguments stream in, with the tool's name and how many characters of
+   * arguments have arrived so far (NextUp item 43). A `write_file` carries the whole file in its
+   * arguments, so a model writing a 13K-character page spends a minute or more generating them -
+   * with nothing to stream to `onToken`, that minute looked like the model had gone silent, which
+   * was reported as thinking not being shown. Optional, like `onToken`.
+   */
+  onToolProgress?: (toolName: string, argumentChars: number) => void;
+  /**
    * How much reasoning this request is allowed, from `/think` (see `agent/thinkLevel.ts`).
    *
    * Per-request rather than fixed on the provider, because the whole point is that `/think` takes
