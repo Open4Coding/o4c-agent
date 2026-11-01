@@ -85,3 +85,15 @@ test('o4c\'s own .o4c state is never walked, and grep_files skips binary files (
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('grep_files on a single file searches that file instead of answering "No matches" (tmp4 run)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-walktest-'));
+  try {
+    await writeFile(join(dir, 'ast.ts'), "export type C =\n  | { kind: 'NotNull' }\n");
+    const out = await grepTool.execute({ pattern: 'NotNull', path: join(dir, 'ast.ts') });
+    assert.equal(out, "ast.ts:2: | { kind: 'NotNull' }");
+    assert.match(await grepTool.execute({ pattern: 'absent', path: join(dir, 'ast.ts') }), /^No matches/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

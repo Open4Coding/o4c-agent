@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import type { Tool } from './types.js';
 import { walkFiles, globToRegExp } from './searchUtils.js';
 
@@ -15,7 +15,7 @@ export const grepTool: Tool = {
     type: 'object',
     properties: {
       pattern: { type: 'string', description: 'Regular expression to search for.' },
-      path: { type: 'string', description: 'Base directory to search from. Defaults to the current directory.' },
+      path: { type: 'string', description: 'Directory to search from, or a single file to search. Defaults to the current directory.' },
       glob: { type: 'string', description: 'Optional glob to restrict which files are searched, e.g. "*.ts".' },
     },
     required: ['pattern'],
@@ -33,19 +33,25 @@ export const grepTool: Tool = {
     }
 
     try {
-      const walked = await walkFiles(baseDir);
+      // A single file is searched on its own. Until 2026-11-01 a file path went to the directory
+      // walk, found no children and answered "No matches" - found on the tmp4 long run, where the
+      // model concluded the tool was "unreliable" and fell back to findstr.
+      const target = await stat(baseDir).catch(() => undefined);
+      const singleFile = target?.isFile() === true;
+      const searchRoot = singleFile ? dirname(baseDir) : baseDir;
+      const walked = singleFile ? { entries: [], ignored: 0 } : await walkFiles(baseDir);
       let entries = walked.entries;
       if (glob) {
         const globRegex = globToRegExp(glob);
         entries = entries.filter((e) => globRegex.test(e.path));
       }
-      const files = entries.filter((e) => !e.isDirectory).map((e) => e.path);
+      const files = singleFile ? [basename(baseDir)] : entries.filter((e) => !e.isDirectory).map((e) => e.path);
 
       const results: string[] = [];
       outer: for (const file of files) {
         let content: string;
         try {
-          content = await readFile(join(baseDir, file), 'utf-8');
+          content = await readFile(join(searchRoot, file), 'utf-8');
         } catch {
           continue;
         }
