@@ -17,6 +17,7 @@ import { parsePlanCommand, planPrompt, savePlanFromAnswer, type PlanHooks } from
 import { ULTRAPLAN_MAX_ITERATIONS } from '../session/ultraplanResearch.js';
 import { formatChecklist, formatPlan } from '../session/planView.js';
 import { exportPlan } from '../session/planExport.js';
+import { importPlanFiles } from '../session/planImport.js';
 import {
   PLAN_PICKER_TITLE,
   parsePlanEditCommand,
@@ -25,6 +26,7 @@ import {
   planItemOpRows,
   planItemRows,
   planPickerRows,
+  plansListing,
   type ChoiceRow,
   type PlanAction,
   type PlanItemOp,
@@ -1443,8 +1445,16 @@ export function App({
         // classifyToolAccess). Reads the disk on every invocation rather than caching: a plan the
         // model just wrote has to show up, and the directory is small.
         pushBlock([userLine(input)]);
-        const listing = await listPlans(projectRoot);
-        pushBlock([infoLine(plansReport(listing, Boolean(projectRoot)).join('\n'))]);
+        if (plans) {
+          // Plans live in history.db now (brief 0005). Importing first is what keeps Plan-Write
+          // mode useful: a plan file the model just wrote shows up here as a plan straight away.
+          const result = await importPlanFiles(projectRoot, plans.store);
+          if (result.imported.length > 0) plans.changed();
+          pushBlock([infoLine(plansListing(plans.store, result.unrecognised, result.imported).join('\n'))]);
+        } else {
+          const listing = await listPlans(projectRoot);
+          pushBlock([infoLine(plansReport(listing, Boolean(projectRoot)).join('\n'))]);
+        }
       } else if (commandName(input).startsWith('/keyboard-')) {
         // The "/keyboard-<os>" family: same table, asked about a system other than this
         // one. Named commands rather than only the `[windows|mac|linux]` argument so they are

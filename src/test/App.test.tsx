@@ -4133,3 +4133,26 @@ test('/view-plan Edit items: move without a model call, and reword through the i
     }
   });
 });
+
+test('/plans with a project store: imports new plan files first, then lists the plans newest first', async () => {
+  await withTempDir(async (dir) => {
+    const store = new PlanTestStore(join(dir, 'history.db'));
+    try {
+      let changed = 0;
+      const plans: PlanHooks = { store: store.plans(), sessionId: 's1', changed: () => changed++, currentTask: () => undefined };
+      plans.store.createPlan({ name: 'Made Here' }, 1);
+      await mkdir(join(dir, '.o4c', 'plans'), { recursive: true });
+      await writeFile(join(dir, '.o4c', 'plans', '0007.FromPlanWrite.checklist.md'), '- [ ] one\n');
+      await writeFile(join(dir, '.o4c', 'plans', 'stray.txt'), 'x');
+      const { stdin, frames } = await setup({ dir, plans, projectRoot: dir });
+      await submit(stdin, '/plans');
+      await waitFor(() => anyFrameSays(frames, 'Open one with /view-plan.'));
+      assert.ok(anyFrameSays(frames, 'Imported from .o4c/plans/: 0007.FromPlanWrite'));
+      assert.ok(anyFrameSays(frames, '0007 FromPlanWrite - open, 0 of 1 items finished'));
+      assert.ok(anyFrameSays(frames, 'stray.txt'));
+      assert.equal(changed, 1, 'update_plan is re-offered once a plan arrives');
+    } finally {
+      store.close();
+    }
+  });
+});

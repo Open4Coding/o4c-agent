@@ -46,6 +46,12 @@ conversation (the default), a one-line pointer to matching past tasks, or contex
 itself from the project's task history. See [`.docs/context-history.md`](.docs/context-history.md);
 `/set-contextwindowtype` switches between them.
 
+## Plans
+
+`/plan <goal>` makes a plan with a checklist, saved with the project; `/ultraplan <goal>` researches
+first. `/view-plan` shows, edits, activates or exports one, and the active plan is worked one item at
+a time. See [`.docs/plans.md`](.docs/plans.md).
+
 ## MCP servers
 
 o4c can use tools from MCP servers — local plugins, desktop applications reached over loopback, or

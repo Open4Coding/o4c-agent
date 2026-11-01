@@ -30,6 +30,8 @@
 - `/clear` — clear the current session and start fresh; it stays resumable via `/resume`.
 - `/resume` — browse and resume one of the last saved sessions.
 - `/context` — local token usage for this session, with no LLM call.
+- `/plan <goal>`, `/ultraplan <goal>` — make a plan with a checklist; `/plans` lists them,
+  `/view-plan` views, edits, activates or exports one. See [plans.md](plans.md).
 - `/mode` — switch between Manual, Auto, Accept Edits, Plan and Plan-Write.
 - `/think` — reasoning depth: nothink, low, med, high, xhigh.
 - `/keyboard` — keybindings for this OS; `/keyboard-windows|-mac|-linux` for another one.

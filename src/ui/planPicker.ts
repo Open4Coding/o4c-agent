@@ -77,6 +77,25 @@ export function planActionTitle(plan: PlanRow): string {
   return `Plan ${formatPlanNo(plan.number)} ${plan.name} (↑/↓ to choose, Enter to select, Esc to cancel):`;
 }
 
+/**
+ * What `/plans` prints once plans live in SQLite (P11): every plan, newest first, plus any file in
+ * `.o4c/plans/` that the import could not read as a plan - reported, not hidden, as before.
+ */
+export function plansListing(plans: PlanStore, unrecognised: readonly string[], imported: readonly string[]): string[] {
+  const rows = planPickerRows(plans);
+  const lines: string[] = [];
+  if (imported.length > 0) lines.push(`Imported from .o4c/plans/: ${imported.join(', ')}`, '');
+  if (rows.length === 0) {
+    lines.push('No plans yet. Make one with /plan <goal> (or /ultraplan <goal> to research first).');
+  } else {
+    lines.push('Plans, newest first:', ...rows.map((r) => `  ${r.label}`), '', 'Open one with /view-plan.');
+  }
+  if (unrecognised.length > 0) {
+    lines.push('', 'In .o4c/plans/ but not plan files (expected NNNN.Name.plan.md / .checklist.md):', ...unrecognised.map((n) => `  ${n}`));
+  }
+  return lines;
+}
+
 export const PLAN_PICKER_TITLE = 'Choose a plan (↑/↓ to choose, Enter to select, Esc to cancel):';
 
 function oneLine(text: string, max: number): string {

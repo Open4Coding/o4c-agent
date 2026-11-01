@@ -92,7 +92,7 @@ export const COMMANDS: CommandInfo[] = [
     name: '/plans',
     // Runs on Enter rather than prefilling: it takes no argument, so there is nothing to fill in.
     select: 'run',
-    description: "List this project's plan documents, from .o4c/plans/ - no LLM call.",
+    description: "List this project's plans (and pick up any plan files written to .o4c/plans/) - no LLM call.",
   },
   {
     name: '/keyboard',
