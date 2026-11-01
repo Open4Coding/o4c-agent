@@ -12,8 +12,14 @@ import { GITIGNORE_FILENAME, IgnoreRules, loadRulesDownTo } from './gitignore.js
  * is in `SKIP_WITHOUT_GIT` instead, because inside a repository the right answer is whatever that
  * repository's own `.gitignore` says - a project that tracks its `dist/` should be able to search
  * it.
+ *
+ * `.o4c` because it is o4c's own state - sessions, run logs, and the SQLite history and graph
+ * databases - never the project's code. Found live on 2026-10-31: a `grep_files` for a function
+ * name matched inside `.o4c/db/datagraph.db` and poured binary pages into the context (one small
+ * rename cost 44K input tokens). A file in there that the model genuinely needs is still one
+ * `read_file` away.
  */
-const ALWAYS_SKIP_DIRS = new Set(['node_modules', '.git']);
+const ALWAYS_SKIP_DIRS = new Set(['node_modules', '.git', '.o4c']);
 
 /** Added to the skip list only when there are no ignore rules to consult - see above. */
 const SKIP_WITHOUT_GIT = new Set(['dist']);

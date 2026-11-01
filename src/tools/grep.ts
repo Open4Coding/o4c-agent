@@ -49,6 +49,9 @@ export const grepTool: Tool = {
         } catch {
           continue;
         }
+        // A NUL in the first 8K is the usual test for a binary file (git uses the same one). Its
+        // "lines" are noise at best and can be megabytes at worst; nothing in one is a search hit.
+        if (content.slice(0, 8000).includes('\0')) continue;
         const lines = content.split('\n');
         for (let i = 0; i < lines.length; i++) {
           if (regex.test(lines[i])) {

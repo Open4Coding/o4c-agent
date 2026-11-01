@@ -46,11 +46,16 @@ export async function snapshotEntities(source: string, repoPath: string): Promis
     const next = defs.find((d) => d.line > def.line);
     const end = next ? next.line - 1 : lines.length;
     const kind = kindFromCapture(def.capture);
+    // The definition's own name is blanked before fingerprinting: it sits on the declaring line, so
+    // without this a renamed function never fingerprints the same and `diffEntities` reports it as
+    // deleted + added. Found live on 2026-10-31 (greetUser -> welcomeUser) - the unit test had
+    // supplied equal hashes directly and so never exercised it.
+    const span = lines.slice(def.line - 1, end).join('\n');
     return {
       uid: entityUid({ language: language.id, path: repoPath, kind, name: def.name }),
       name: def.name,
       kind,
-      hash: contentHash(lines.slice(def.line - 1, end).join('\n')),
+      hash: contentHash(span.replace(new RegExp(`\\b${escapeRegExp(def.name)}\\b`, 'g'), '\u0000')),
     };
   });
 }
@@ -91,4 +96,8 @@ export function diffEntities(before: readonly EntitySnapshot[], after: readonly 
     changes.push({ entity_uid: entity.uid, name: entity.name, kind: entity.kind, change: 'deleted', hash_before: entity.hash, hash_after: null });
   }
   return changes;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -185,3 +185,12 @@ test('a new session closes tasks left open by sessions that ended (a one-shot ru
     assert.equal(store.lastTask('next')!.outcome, 'open', 'its own running task is left alone');
   });
 });
+
+test('a renamed function with the same body is recorded as renamed, not deleted + added (found live)', async () => {
+  const before = await snapshotEntities('export function greetUser(name: string): string {\n  return "Hello, " + name;\n}\n', 'greet.ts');
+  const after = await snapshotEntities('export function welcomeUser(name: string): string {\n  return "Hello, " + name;\n}\n', 'greet.ts');
+  assert.ok(before && after);
+  assert.deepEqual(diffEntities(before, after).map((c) => [c.name, c.change]), [['welcomeUser', 'renamed']]);
+  const edited = await snapshotEntities('export function greetUser(name: string): string {\n  return "Hi, " + name;\n}\n', 'greet.ts');
+  assert.deepEqual(diffEntities(before, edited!).map((c) => [c.name, c.change]), [['greetUser', 'modified']], 'a body change is still a change');
+});
