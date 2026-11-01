@@ -39,6 +39,13 @@ Run `o4c` with no prompt to start an interactive, multi-turn session instead of 
 command — see [`.docs/interactive-repl.md`](.docs/interactive-repl.md) for REPL commands and
 how to run it from a terminal or VS Code.
 
+## Context and history
+
+How much of the past each request carries is your choice — just the current message, the recent
+conversation (the default), a one-line pointer to matching past tasks, or context the model picks
+itself from the project's task history. See [`.docs/context-history.md`](.docs/context-history.md);
+`/set-contextwindowtype` switches between them.
+
 ## MCP servers
 
 o4c can use tools from MCP servers — local plugins, desktop applications reached over loopback, or

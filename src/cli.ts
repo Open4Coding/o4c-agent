@@ -34,6 +34,21 @@ import { secureModeFromScopes, secureModeProviderRefusal } from './session/secur
 import { startMcpSession, type McpSession } from './mcp/startup.js';
 import { startCodeGraph, type CodeGraphSession } from './graph/startup.js';
 import { startHistory } from './session/historyStartup.js';
+import {
+  CONTEXT_WINDOW_TYPE_CONFIG_KEY,
+  CURATED_RECENT_EXCHANGES,
+  contextWindowTypeControl,
+  curatedBudgetTokens,
+  offersHistorySearch,
+  type ContextWindowType,
+  type ContextWindowTypeControl,
+} from './agent/contextWindowType.js';
+import { contextTypeComponent } from './agent/contextTypeComponent.js';
+import { HistoryRetrieval } from './session/retrieval.js';
+import { createHistoryTool } from './session/historyTool.js';
+import { curatedHistory } from './session/curated.js';
+import { markWorkedCommand } from './session/workedCommand.js';
+import { contextWindowTypeFromConfig } from './ui/contextWindowSetting.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
 
@@ -188,6 +203,8 @@ async function runRepl(
   mcp?: McpSession,
   graph?: CodeGraphSession,
   sessionId?: string,
+  contextWindowType?: ContextWindowTypeControl,
+  markWorked?: (arg: string) => string,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -256,6 +273,8 @@ async function runRepl(
       fullContextLogger,
       initialSession,
       sessionId,
+      contextWindowType,
+      markWorked,
       restart,
       initialMode,
       sessionView,
@@ -707,16 +726,70 @@ program
     // the two `aroundTool` wrappers and leaves the graph innermost, as the graph's own note below
     // asks. The recorder only observes - it reads a file before a write and diffs it after, and
     // returns the tool's result untouched - so wrapping the graph changes nothing the graph sees.
+    // NextUp item 23: the live context window type, read from config like `/datagraph` so the
+    // per-turn reload keeps it. `none` turns the recorder off - one-shot answers are not kept.
+    const contextWindowType = contextWindowTypeControl(
+      contextWindowTypeFromConfig(resolvedConfig[CONTEXT_WINDOW_TYPE_CONFIG_KEY]),
+    );
     const history = startHistory({
       projectRoot: trusted ? projectRoot : undefined,
       sessionId,
-      enabled: () => true,
+      enabled: () => contextWindowType.current().type !== 'none',
     });
     if (history) {
       loop.registerCore(history.recorder);
       process.on('exit', () => history.close());
     }
     recordLifecycle(lifecycleDir, 'history', { opened: history !== undefined });
+    // Shapes every request by the type: `none` sends only the current turn, `pointer` and `curated`
+    // add what the history offers. Registered whether or not the store opened - `none` needs no
+    // store, and without one `pointer`/`curated` simply send what `floating` would.
+    //
+    // The graph starts below, so the staleness lookup is a late-bound reference: retrieval only
+    // runs during a turn, by which time it is set (or stays undefined, and staleness is unknown).
+    let entityExists: ((entityUid: string) => boolean | undefined) | undefined;
+    const retrieval = history
+      ? new HistoryRetrieval({
+          store: history.store,
+          sessionId,
+          currentTask: () => history.recorder.currentTask(),
+          entityExists: (uid) => entityExists?.(uid),
+        })
+      : undefined;
+    loop.registerCore(
+      contextTypeComponent({
+        control: contextWindowType,
+        retrieval: history && retrieval && {
+          pointerHint: (request) => retrieval.pointerHint(request),
+          // The same provider the turn uses: `curated`'s two calls are the model building its own
+          // context, so they go to the model that will read it.
+          curatedHistory: (request, budget) =>
+            curatedHistory(
+              {
+                complete: (completion) => provider.complete(completion),
+                store: history.store,
+                retrieval,
+                currentTask: () => history.recorder.currentTask(),
+              },
+              request,
+              budget,
+            ),
+        },
+        curatedBudget: curatedBudgetTokens,
+        recentExchanges: CURATED_RECENT_EXCHANGES,
+      }),
+    );
+    // `search_history` is offered with the types that point the model at past tasks, and follows
+    // the type when it changes mid-session.
+    if (history && retrieval) {
+      const historyTool = createHistoryTool(history.store, retrieval);
+      const syncHistoryTool = (setting: ContextWindowType) => {
+        loop.removeTools([historyTool.name]);
+        if (offersHistorySearch(setting)) loop.addTools([historyTool]);
+      };
+      syncHistoryTool(contextWindowType.current());
+      contextWindowType.onChange(syncHistoryTool);
+    }
 
     // The Code Graph - build step 4, in the core tier rather than the MCP tier (design doc §5.1's
     // revision: it has to change what a tool call *returns*, which a server cannot express).
@@ -738,6 +811,7 @@ program
       exposed: resolvedConfig.codeGraph !== false,
     });
     if (graph) {
+      entityExists = (uid) => graph.component.entityExists(uid);
       loop.registerCore(graph.component);
       // On 'exit' rather than in each branch's teardown: the close is synchronous, so one hook
       // covers the REPL, one-shot mode and the restart paths' own process.exit() alike.
@@ -828,6 +902,8 @@ program
         mcp,
         graph,
         sessionId,
+        contextWindowType,
+        history && ((arg: string) => markWorkedCommand(history.store, sessionId, arg)),
       );
       return;
     }

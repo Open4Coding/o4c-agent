@@ -552,6 +552,12 @@ export class InfiniteContextStore {
       .get(id, Number(match[2])) as TaskRow | undefined;
   }
 
+  /** Whether any task exists other than `taskId` and anything newer - "is there history to
+   * search at all", asked before spending model calls on it. */
+  hasTasksBefore(taskId: number | undefined): boolean {
+    return this.db.prepare(`SELECT 1 FROM tasks WHERE id < ? LIMIT 1`).get(taskId ?? Number.MAX_SAFE_INTEGER) !== undefined;
+  }
+
   /** The session's most recent task, or undefined before its first. */
   lastTask(sessionId: string): TaskRow | undefined {
     return this.db
@@ -595,6 +601,21 @@ export class InfiniteContextStore {
          WHERE id = ? AND outcome = 'open'`,
       )
       .run(finishedAt, id);
+  }
+
+  /**
+   * Closes every task still `open` from other sessions. A task is closed by the next message in its
+   * own session, so the last task of a session that ended - a one-shot run, a `/clear` - would
+   * otherwise read as running forever. A session still live in another window loses nothing real:
+   * its task's answer keeps updating, and `done` versus `incomplete` is only a label.
+   */
+  finishOtherSessionsTasks(sessionId: string, finishedAt = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE tasks SET outcome = CASE WHEN answer <> '' THEN 'done' ELSE 'incomplete' END, finished_at = ?
+         WHERE outcome = 'open' AND session_id <> ?`,
+      )
+      .run(finishedAt, sessionId);
   }
 
   /** The manual "worked" mark. `null` clears it. */

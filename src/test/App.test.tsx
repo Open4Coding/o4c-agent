@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { App } from '../ui/App.js';
 import type { OsKey } from '../ui/platform.js';
 import { AgentLoop } from '../agent/loop.js';
+import { contextWindowTypeControl, type ContextWindowTypeControl } from '../agent/contextWindowType.js';
 import { MockProvider } from '../providers/mock.js';
 import { defaultTools } from '../tools/index.js';
 import type { Tool } from '../tools/types.js';
@@ -476,6 +477,10 @@ async function setup(opts: {
   usageStore?: UsageStore;
   // The id cli.ts decides at startup (NextUp item 13). Omitted, the first save mints one, as before.
   sessionId?: string;
+  // The live context window type (NextUp item 23). Only the /set-contextwindowtype tests pass it.
+  contextWindowType?: ContextWindowTypeControl;
+  // /worked's action. Only the /worked test passes it; absent is a session with no history store.
+  markWorked?: (arg: string) => string;
   // The loop's tool list. Only the MCP test below passes this; everything else gets the real
   // built-ins, as a real launch does.
   tools?: Tool[];
@@ -509,6 +514,8 @@ async function setup(opts: {
       fullContextLogger,
       initialSession: opts.initialSession,
       sessionId: opts.sessionId,
+      contextWindowType: opts.contextWindowType,
+      markWorked: opts.markWorked,
       restart,
       projectRoot: opts.projectRoot,
       model: 'test-model',
@@ -2131,10 +2138,11 @@ test('/set opens its family dropdown; choosing a setting prefills the input box 
     await tick(50);
     assert.ok((lastFrame() ?? '').includes('/set commands'), 'the inert first row keeps the list open');
 
-    // Rows below the first are alphabetical, so /set-sessionname is the eighth: /set,
-    // -global-sessionsToSave, -global-sessionview, -global-think, -local-sessionsToSave,
-    // -local-sessionview, -local-think, -sessionname.
-    for (let i = 0; i < 7; i++) {
+    // Rows below the first are alphabetical, so /set-sessionname is the eleventh: /set,
+    // -contextwindowtype, -global-contextwindowtype, -global-sessionsToSave, -global-sessionview,
+    // -global-think, -local-contextwindowtype, -local-sessionsToSave, -local-sessionview,
+    // -local-think, -sessionname.
+    for (let i = 0; i < 10; i++) {
       stdin.write(DOWN);
       await tick(50);
     }
@@ -2298,6 +2306,84 @@ test('/config-global-highlightcolor writes only the global scope, isolated from 
     assert.equal((await store.readScope('global')).highlightColor, '#445566');
     // The project-shared (local) scope is untouched.
     assert.equal((await store.readScope('local')).highlightColor, undefined);
+  });
+});
+
+test('/set-contextwindowtype with no argument shows the current type and all four', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = join(dir, 'project');
+    const configGlobalDir = join(dir, 'fake-global');
+    const contextWindowType = contextWindowTypeControl({ type: 'floating' });
+    const { stdin, frames } = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir, contextWindowType });
+
+    await submit(stdin, '/set-contextwindowtype');
+    await waitFor(() => anyFrameSays(frames, 'Context window type: floating.'));
+    for (const type of ['none -', 'floating -', 'pointer -', 'curated -']) assert.ok(anyFrameSays(frames, type));
+  });
+});
+
+test('/set-contextwindowtype saves the project value and switches the running session at once', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = join(dir, 'project');
+    const configGlobalDir = join(dir, 'fake-global');
+    const contextWindowType = contextWindowTypeControl({ type: 'floating' });
+    const { stdin, frames } = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir, contextWindowType });
+
+    await submit(stdin, '/set-contextwindowtype curated 20%');
+    await waitFor(() => anyFrameSays(frames, 'Now in effect: curated, loading up to 20% of the context window.'));
+    const configStore = new ConfigStore(projectRoot, configGlobalDir);
+    assert.equal((await configStore.readScope('local')).contextWindowType, 'curated 20%');
+    assert.deepEqual(contextWindowType.current(), { type: 'curated', budget: { fraction: 0.2 } });
+
+    await submit(stdin, '/set-contextwindowtype default');
+    await waitFor(() => anyFrameSays(frames, 'Saved context window type cleared (local). Now in effect: floating.'));
+    assert.equal((await configStore.readScope('local')).contextWindowType, undefined);
+    assert.equal(contextWindowType.current().type, 'floating');
+  });
+});
+
+test('/set-global-contextwindowtype under a project with its own value says the project still wins, and changes nothing live', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = join(dir, 'project');
+    const configGlobalDir = join(dir, 'fake-global');
+    const contextWindowType = contextWindowTypeControl({ type: 'floating' });
+    const { stdin, frames } = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir, contextWindowType });
+
+    await submit(stdin, '/set-contextwindowtype pointer');
+    await waitFor(() => anyFrameSays(frames, 'Now in effect: pointer.'));
+    await submit(stdin, '/set-global-contextwindowtype none');
+    await waitFor(() => anyFrameSays(frames, 'This project has its own value, which still wins here. Now in effect: pointer.'));
+    assert.equal((await new ConfigStore(projectRoot, configGlobalDir).readScope('global')).contextWindowType, 'none');
+    assert.equal(contextWindowType.current().type, 'pointer');
+  });
+});
+
+test('/set-contextwindowtype with an unknown type or a budget on the wrong type writes nothing', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = join(dir, 'project');
+    const configGlobalDir = join(dir, 'fake-global');
+    const { stdin, frames } = await setup({ dir: join(dir, 'sessions'), projectRoot, configGlobalDir });
+
+    await submit(stdin, '/set-contextwindowtype sliding');
+    await waitFor(() => anyFrameSays(frames, '"sliding" isn\'t a context window type.'));
+    await submit(stdin, '/set-contextwindowtype pointer 20%');
+    await waitFor(() => anyFrameSays(frames, '"pointer 20%" isn\'t a context window type.'));
+    assert.equal((await new ConfigStore(projectRoot, configGlobalDir).readScope('local')).contextWindowType, undefined);
+  });
+});
+
+test('/worked hands its argument to the history store and shows the answer; without a store it says why', async () => {
+  await withTempDir(async (dir) => {
+    const args: string[] = [];
+    const withStore = await setup({ dir, markWorked: (arg) => (args.push(arg), 'Marked #7 "a task" as worked.') });
+    await submit(withStore.stdin, '/worked #7');
+    await waitFor(() => anyFrameSays(withStore.frames, 'Marked #7 "a task" as worked.'));
+    assert.deepEqual(args, [' #7']);
+    withStore.unmount();
+
+    const without = await setup({ dir });
+    await submit(without.stdin, '/worked');
+    await waitFor(() => anyFrameSays(without.frames, 'No task history here - it needs a trusted project'));
   });
 });
 
@@ -2934,8 +3020,9 @@ test('choosing /set-sessionview from the dropdown opens its picklist straight aw
     await tick(150); // the palette unmounts and the dropdown's key handler takes over input
 
     // Row 0 is the inert /set itself and the rest are alphabetical, so /set-sessionview is the
-    // tenth row: the three -global-*, the three -local-*, -sessionname, -sessionsToSave, then it.
-    for (let i = 0; i < 9; i++) {
+    // thirteenth row: -contextwindowtype, the four -global-*, the four -local-*, -sessionname,
+    // -sessionsToSave, then it.
+    for (let i = 0; i < 12; i++) {
       stdin.write(DOWN);
       await tick(100);
     }

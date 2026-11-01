@@ -36,6 +36,18 @@ import {
   type ThinkLevel,
 } from '../agent/thinkLevel.js';
 import { formatEvent } from './formatEvent.js';
+import {
+  CONTEXT_WINDOW_TYPES,
+  CONTEXT_WINDOW_TYPE_CONFIG_KEY,
+  CONTEXT_WINDOW_TYPE_INFO,
+  type ContextWindowTypeControl,
+} from '../agent/contextWindowType.js';
+import {
+  contextWindowTypeFromConfig,
+  describeContextWindowType,
+  formatContextWindowType,
+  parseContextWindowType,
+} from './contextWindowSetting.js';
 import { formatError } from './formatError.js';
 import { formatConfirmMessage, previewLineCount } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
@@ -132,6 +144,15 @@ export interface AppProps {
    * that never gets a save is simply never used. Absent in tests, where the first save mints one.
    */
   sessionId?: string;
+  /**
+   * The live context window type (NextUp item 23), shared with the components that act on it -
+   * the history recorder and the request builders. Absent in tests that are not about it, where
+   * `/set-contextwindowtype` still saves the setting but has nothing live to switch.
+   */
+  contextWindowType?: ContextWindowTypeControl;
+  /** `/worked`'s action - marks a task in the history store and says what it did. Absent without a
+   * trusted project (no store), where `/worked` explains that instead. */
+  markWorked?: (arg: string) => string;
   /** Requests that /clear or /resume hand off to a brand-new process instead of resetting
    * state in-place - see cli.ts's spawnRestart for why. Call this, then exit() (as /exit does),
    * never both without the other: cli.ts only spawns the replacement after this process's Ink
@@ -573,6 +594,8 @@ export function App({
   fullContextLogger,
   initialSession,
   sessionId: plannedSessionId,
+  contextWindowType,
+  markWorked,
   restart,
   initialMode,
   os = detectCurrentOs(),
@@ -1511,6 +1534,17 @@ export function App({
             void runLogger.log({ type: 'system', sub_type: 'info', command: '/window', setting: typed });
           }
         }
+      } else if (input === '/worked' || input.startsWith('/worked ')) {
+        pushBlock([userLine(input)]);
+        const arg = input.slice('/worked'.length);
+        try {
+          pushBlock([
+            infoLine(markWorked ? markWorked(arg) : 'No task history here - it needs a trusted project, where o4c keeps .o4c/db/history.db.'),
+          ]);
+          void runLogger.log({ type: 'system', sub_type: 'info', command: '/worked', setting: arg.trim() });
+        } catch (err) {
+          pushBlock([{ kind: 'error', text: formatError(err) }]);
+        }
       } else if (input === '/datagraph' || input.startsWith('/datagraph ')) {
         pushBlock([userLine(input)]);
         const typed = input.slice('/datagraph'.length).trim().toLowerCase();
@@ -1755,6 +1789,63 @@ export function App({
                 ]);
               }
             }
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
+        }
+      } else if (
+        commandName(input) === '/set-contextwindowtype' ||
+        commandName(input) === '/set-local-contextwindowtype' ||
+        commandName(input) === '/set-global-contextwindowtype'
+      ) {
+        pushBlock([userLine(input)]);
+        const name = commandName(input);
+        const scope: ConfigScope = name === '/set-global-contextwindowtype' ? 'global' : 'local';
+        const raw = input.slice(name.length).trim();
+        const current = contextWindowType?.current() ?? contextWindowTypeFromConfig(await configStore.get(CONTEXT_WINDOW_TYPE_CONFIG_KEY));
+        const listing = CONTEXT_WINDOW_TYPES.map((t) => `  ${t} - ${CONTEXT_WINDOW_TYPE_INFO[t]}`);
+        const parsed = raw.toLowerCase() === 'default' ? 'default' : parseContextWindowType(raw);
+        if (!raw) {
+          pushBlock([
+            infoLine(
+              [
+                `Context window type: ${describeContextWindowType(current)}.`,
+                ...listing,
+                `Usage: ${name} <type>, e.g. ${name} pointer or ${name} curated 20%. ${name} default clears the saved value.`,
+              ].join('\n'),
+            ),
+          ]);
+        } else if (!parsed) {
+          pushBlock([
+            {
+              kind: 'error',
+              text: `"${raw}" isn't a context window type. Choose none, floating, pointer or curated (only curated takes a budget, e.g. curated 20% or curated 20000).`,
+            },
+          ]);
+        } else if (scope === 'local' && !configStore.hasScope('local')) {
+          pushBlock([
+            {
+              kind: 'error',
+              text: 'No trusted project in this directory - nothing to set a local value into. Trust this project first, or use /set-global-contextwindowtype instead.',
+            },
+          ]);
+        } else {
+          try {
+            await configStore.set(scope, CONTEXT_WINDOW_TYPE_CONFIG_KEY, parsed === 'default' ? undefined : formatContextWindowType(parsed));
+            // What wins after the write, not what was typed: a global choice under a project that
+            // has its own value changes nothing here, and saying otherwise would be a lie.
+            const effective = contextWindowTypeFromConfig(await configStore.get(CONTEXT_WINDOW_TYPE_CONFIG_KEY));
+            contextWindowType?.set(effective);
+            const what =
+              parsed === 'default'
+                ? `Saved context window type cleared (${scope}).`
+                : `Context window type set to ${describeContextWindowType(parsed)} (${scope}).`;
+            const shadowed =
+              parsed !== 'default' && formatContextWindowType(effective) !== formatContextWindowType(parsed)
+                ? ' This project has its own value, which still wins here.'
+                : '';
+            pushBlock([infoLine(`${what}${shadowed} Now in effect: ${describeContextWindowType(effective)}.`)]);
+            void runLogger.log({ type: 'system', sub_type: 'info', command: name, setting: raw, scope });
           } catch (err) {
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }

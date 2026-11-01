@@ -126,7 +126,9 @@ export class HistoryRecorder implements CoreComponent {
 
   private ensureSession(firstRequest: string): void {
     if (this.sessionReady) return;
-    this.options.store.ensureSession({ id: this.options.sessionId, title: firstRequest.split('\n')[0].slice(0, 80), started_at: Date.now() });
+    const { store, sessionId } = this.options;
+    store.ensureSession({ id: sessionId, title: firstRequest.split('\n')[0].slice(0, 80), started_at: Date.now() });
+    store.finishOtherSessionsTasks(sessionId);
     this.sessionReady = true;
   }
 }

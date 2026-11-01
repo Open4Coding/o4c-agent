@@ -170,3 +170,18 @@ test('snapshotEntities sees a change inside a function body, which the graph\'s 
   assert.notEqual(one[0].hash, two[0].hash);
   assert.equal(await snapshotEntities('<html>', 'page.html'), undefined, 'uncharted language');
 });
+
+test('a new session closes tasks left open by sessions that ended (a one-shot run, a /clear)', async () => {
+  await withRecorder(async ({ store, root }) => {
+    const earlier = new HistoryRecorder({ store, sessionId: 'earlier', projectRoot: root, enabled: () => true });
+    earlier.onEntry(userInputEntry('create a copy of the game tetris in html'));
+    earlier.onEntry(aiResponseEntry('done'));
+    const left = store.lastTask('earlier')!;
+    assert.equal(left.outcome, 'open');
+
+    const next = new HistoryRecorder({ store, sessionId: 'next', projectRoot: root, enabled: () => true });
+    next.onEntry(userInputEntry('write a README for the tetris game'));
+    assert.equal(store.getTask(left.id)!.outcome, 'done');
+    assert.equal(store.lastTask('next')!.outcome, 'open', 'its own running task is left alone');
+  });
+});

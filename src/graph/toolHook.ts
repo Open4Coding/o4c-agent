@@ -139,6 +139,16 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
     return this.exposed;
   }
 
+  /**
+   * Whether a definition with this identity exists right now - for the history's staleness flag
+   * (brief 0004, Q9). `undefined` while the index cannot support a claim of absence, the same rule
+   * `resolveName` follows: a task is never called stale because the first pass has not landed.
+   */
+  entityExists(entityUid: string): boolean | undefined {
+    if (this.indexStatus() !== 'fresh') return undefined;
+    return this.store.hasEntity(entityUid);
+  }
+
   setExposed(on: boolean): void {
     this.exposed = on;
   }

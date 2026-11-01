@@ -114,6 +114,13 @@ export const COMMANDS: CommandInfo[] = [
       'Nothing is deleted - turning it off restores the full context.',
   },
   {
+    name: '/worked',
+    select: 'run',
+    description:
+      'Mark the last task as having worked, so history search ranks it higher: /worked, /worked no, ' +
+      '/worked clear, or /worked #412 for a specific task.',
+  },
+  {
     name: '/datagraph',
     select: 'run',
     description:
@@ -195,6 +202,30 @@ export const COMMANDS: CommandInfo[] = [
   {
     name: '/set-global-think',
     description: "Pick the thinking level new sessions start at on this machine (doesn't change this one).",
+    hidden: true,
+    select: 'run',
+  },
+  // How much past context each request carries - NextUp item 23. Takes effect at once and is saved,
+  // unlike /set-think, because it governs what the very next request sends. `run` on select: picked
+  // from the /set list with no argument it lists the four types, which is the help a first-time
+  // user needs; typing a type after a space submits as usual.
+  {
+    name: '/set-contextwindowtype',
+    description:
+      'Choose what each request carries: none, floating, pointer or curated (project-shared). ' +
+      'Usage: /set-contextwindowtype <type> [budget], or no argument to see them all.',
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/set-local-contextwindowtype',
+    description: 'Same as /set-contextwindowtype - explicit alias for the same project-shared tier.',
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/set-global-contextwindowtype',
+    description: "Choose the context window type as this machine's global default (~/.o4c/config.json).",
     hidden: true,
     select: 'run',
   },

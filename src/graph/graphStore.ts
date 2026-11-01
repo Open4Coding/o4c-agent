@@ -487,6 +487,12 @@ export class GraphStore {
     return rows.map(toReference);
   }
 
+  /** Whether any definition with this identity is indexed - the history store's staleness check
+   * (`idx_defs_uid` exists for exactly this join). */
+  hasEntity(entityUid: string): boolean {
+    return this.db.prepare('SELECT 1 FROM defs WHERE entity_uid = ? LIMIT 1').get(entityUid) !== undefined;
+  }
+
   /** Every definition in one file. */
   definitionsIn(path: string): DefinitionRow[] {
     const rows = this.db
