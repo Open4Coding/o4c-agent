@@ -66,6 +66,14 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Show local token-usage for this session - no LLM call.',
   },
   {
+    name: '/plan',
+    description: 'Make a plan with a checklist for a goal, saved in this project. Read-only while planning. Usage: /plan <goal>',
+  },
+  {
+    name: '/ultraplan',
+    description: 'Like /plan, but researches first (past tasks, the code graph, the files involved) and thinks harder. Usage: /ultraplan <goal>',
+  },
+  {
     name: '/plans',
     // Runs on Enter rather than prefilling: it takes no argument, so there is nothing to fill in.
     select: 'run',

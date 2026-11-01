@@ -42,6 +42,7 @@ import { HistoryRetrieval } from './session/retrieval.js';
 import { createHistoryTool } from './session/historyTool.js';
 import { createPlanTool } from './session/planTool.js';
 import { importPlanFiles } from './session/planImport.js';
+import type { PlanHooks } from './session/planAuthoring.js';
 import { curatedHistory } from './session/curated.js';
 import { markWorkedCommand } from './session/workedCommand.js';
 import { contextWindowTypeFromConfig } from './ui/contextWindowSetting.js';
@@ -214,6 +215,7 @@ async function runRepl(
   sessionId?: string,
   contextWindowType?: ContextWindowTypeControl,
   markWorked?: (arg: string) => string,
+  plans?: PlanHooks,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -284,6 +286,7 @@ async function runRepl(
       sessionId,
       contextWindowType,
       markWorked,
+      plans,
       restart,
       initialMode,
       sessionView,
@@ -942,6 +945,12 @@ program
         sessionId,
         contextWindowType,
         history && ((arg: string) => markWorkedCommand(history.store, sessionId, arg)),
+        history && {
+          store: history.store.plans(),
+          sessionId,
+          changed: () => syncPlanTool(),
+          currentTask: () => history.recorder.currentTask(),
+        },
       );
       return;
     }

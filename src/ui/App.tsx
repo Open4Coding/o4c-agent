@@ -13,6 +13,7 @@ import { CommandFamilyPicker } from './CommandFamilyPicker.js';
 import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice } from './ThinkPicker.js';
 
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
+import { parsePlanCommand, planPrompt, savePlanFromAnswer, type PlanHooks } from '../session/planAuthoring.js';
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { listPlans, plansReport } from '../session/plansStore.js';
@@ -141,6 +142,11 @@ export interface AppProps {
    * that never gets a save is simply never used. Absent in tests, where the first save mints one.
    */
   sessionId?: string;
+  /**
+   * Plans in history.db (brief 0005): what `/plan`, `/ultraplan` and `/view-plan` read and write.
+   * Absent without a trusted project, or in tests that are not about plans.
+   */
+  plans?: PlanHooks;
   /**
    * The live context window type (NextUp item 23), shared with the components that act on it -
    * the history recorder and the request builders. Absent in tests that are not about it, where
@@ -597,6 +603,7 @@ export function App({
   sessionId: plannedSessionId,
   contextWindowType,
   markWorked,
+  plans,
   restart,
   initialMode,
   os = detectCurrentOs(),
@@ -1087,6 +1094,10 @@ export function App({
   // sync every render, the same pattern this file already uses for currentSessionIdRef/
   // inputHistoryRef).
   const modeRef = useRef(mode);
+  // Set for the length of one turn that must run in a mode other than the user's - a /plan turn is
+  // read-only whatever mode is selected (brief 0005, decision 2). Read by `toolPolicy` before
+  // `modeRef`, and cleared when the turn settles.
+  const turnModeRef = useRef<Mode | undefined>(undefined);
   modeRef.current = mode;
   const plansDirRef = useRef(plansDir);
   plansDirRef.current = plansDir;
@@ -1167,7 +1178,7 @@ export function App({
   // even mid-turn - see the comment on those refs above for why that distinction matters.
   const toolPolicy = useCallback(
     async (tool: Tool, input: Record<string, unknown>): Promise<'allow' | 'deny' | 'declined'> => {
-      const access = classifyToolAccess(modeRef.current, tool, input, plansDirRef.current);
+      const access = classifyToolAccess(turnModeRef.current ?? modeRef.current, tool, input, plansDirRef.current);
       if (access === 'allow') return 'allow';
       if (access === 'deny') return 'deny';
       // `tool.mcp` is undefined for every built-in; for a proxied tool it is what puts the
@@ -1981,6 +1992,16 @@ export function App({
             }
           }
         }
+      } else if (parsePlanCommand(input) && (!plans || !parsePlanCommand(input)!.goal)) {
+        const command = parsePlanCommand(input)!;
+        pushBlock([
+          userLine(input),
+          infoLine(
+            !plans
+              ? 'Plans need a trusted project - o4c keeps them in .o4c/db/history.db.'
+              : `Usage: /${command.kind} <goal> - what you want planned, e.g. /${command.kind} add an export command for plans`,
+          ),
+        ]);
       } else if (looksLikeSlashCommand(input) && !knownCommandNames(mcpCommands).includes(commandName(input))) {
         pushBlock([
           userLine(input),
@@ -1993,6 +2014,11 @@ export function App({
         // Echo the user's own line immediately, as its own permanent block - don't
         // wait for the (possibly very long) response before it shows up in scrollback.
         pushBlock([userLine(input)]);
+        // `/plan <goal>`: the same turn with a planning prompt, run read-only, its answer saved as a
+        // plan below. The echo above stays the user's own short command.
+        const planCommand = plans ? parsePlanCommand(input) : undefined;
+        const sent = planCommand ? planPrompt(planCommand) : input;
+        turnModeRef.current = planCommand ? 'plan' : undefined;
 
         const responseLines: Line[] = [];
         dispatchTextWindow({ type: 'clearLive' });
@@ -2029,10 +2055,10 @@ export function App({
         const myGeneration = turnGenerationRef.current;
 
         try {
-          const finalAnswer = await loop.run(input, {
+          const finalAnswer = await loop.run(sent, {
             images: initialImage ? [initialImage] : undefined,
             toolPolicy,
-            modeInstruction: modeSystemPrompt(mode, plansDir),
+            modeInstruction: modeSystemPrompt(planCommand ? 'plan' : mode, plansDir),
             signal: controller.signal,
             contextWindow,
             toolOutputDir,
@@ -2274,6 +2300,13 @@ export function App({
           if (finalAnswer && !(sessionViewRef.current === 'full' && streamCommittedRef.current.text)) {
             responseLines.push({ kind: 'final', text: labelled(RESPONSE_TAG, finalAnswer) });
           }
+          if (planCommand && plans) {
+            // Before the autosave below, so the notice is saved with the turn and survives the
+            // per-turn reload's repaint.
+            const saved = savePlanFromAnswer(plans, planCommand, finalAnswer ?? '');
+            loop.addNotice(saved.message);
+            responseLines.push(infoLine(saved.message));
+          }
         } catch (err) {
           turnFailed = true;
           if (err instanceof AbortedError) {
@@ -2282,7 +2315,8 @@ export function App({
             // user can revise and resend it. Not an "error" line - a plain system note fits the
             // deliberate, expected nature of a cancellation better than the red error styling.
             responseLines.push({ kind: 'system', text: 'Cancelled - your message is back in the input box.' });
-            setPrefill({ token: nextPrefillToken++, text: err.prompt });
+            // A /plan turn sent its planning prompt; what goes back is what the user typed.
+            setPrefill({ token: nextPrefillToken++, text: planCommand ? input : err.prompt });
           } else if (err instanceof ServerUnavailableError) {
             // Not a failed request: the server cannot answer yet. The loop already rolled the turn back, so put
             // the message back in the input box and open the wait box - when the server answers the user just
@@ -2291,12 +2325,13 @@ export function App({
               kind: 'error',
               text: `${err.message} Your message is back in the input box - waiting for the server.`,
             });
-            if (err.prompt) setPrefill({ token: nextPrefillToken++, text: err.prompt });
+            if (err.prompt) setPrefill({ token: nextPrefillToken++, text: planCommand ? input : err.prompt });
             setServerWait({ status: err.loading ? 'loading' : 'down', checks: 0 });
           } else {
             responseLines.push({ kind: 'error', text: formatError(err) });
           }
         } finally {
+          turnModeRef.current = undefined;
           // Whenever this call actually settles: if the generation has moved on (the user
           // force-recovered via Ctrl+C, and possibly already started a newer turn), this
           // invocation is stale - abandoned, not cancelled, since whatever it was stuck on may
@@ -2395,7 +2430,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans],
   );
 
   const handleModePickerSelect = useCallback(

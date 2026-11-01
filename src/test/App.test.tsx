@@ -1,4 +1,6 @@
 import { test, afterEach } from 'node:test';
+import type { PlanHooks } from '../session/planAuthoring.js';
+import { InfiniteContextStore as PlanTestStore } from '../session/infiniteContextStore.js';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
@@ -481,6 +483,8 @@ async function setup(opts: {
   contextWindowType?: ContextWindowTypeControl;
   // /worked's action. Only the /worked test passes it; absent is a session with no history store.
   markWorked?: (arg: string) => string;
+  // Plans (brief 0005). Only the /plan tests pass it; absent is a session with no history store.
+  plans?: PlanHooks;
   // The loop's tool list. Only the MCP test below passes this; everything else gets the real
   // built-ins, as a real launch does.
   tools?: Tool[];
@@ -516,6 +520,7 @@ async function setup(opts: {
       sessionId: opts.sessionId,
       contextWindowType: opts.contextWindowType,
       markWorked: opts.markWorked,
+      plans: opts.plans,
       restart,
       projectRoot: opts.projectRoot,
       model: 'test-model',
@@ -3917,5 +3922,50 @@ test("the write_file confirmation shows a red/green line diff of the change", as
     await tick(200);
     await submit(stdin, ESCAPE);
     assert.equal(await readFile(targetPath, "utf-8"), "keep\nold line\ntail");
+  });
+});
+
+// Brief 0005, checklist P5: /plan runs a read-only planning turn whatever mode is selected, and its
+// answer becomes the session's active plan.
+class PlanAnswerProvider implements LLMProvider {
+  readonly name = 'plan-answer';
+  systemPrompt = '';
+  lastUser = '';
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    this.systemPrompt = request.systemPrompt ?? '';
+    const last = request.messages[request.messages.length - 1];
+    this.lastUser = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content);
+    return {
+      content: '# Export Plans\n\nSummary: Write plans out as markdown.\n\n## Plan\nAdd exportPlan.\n\n## Checklist\n- [ ] Write exportPlan\n  - [ ] its test passes\n',
+      toolCalls: [],
+      stopReason: 'end_turn',
+    };
+  }
+}
+
+test('/plan <goal> plans read-only in any mode and saves the answer as the active plan; bare /plan explains itself', async () => {
+  await withTempDir(async (dir) => {
+    const store = new PlanTestStore(join(dir, 'history.db'));
+    try {
+      const provider = new PlanAnswerProvider();
+      let changed = 0;
+      const plans: PlanHooks = { store: store.plans(), sessionId: 's1', changed: () => changed++, currentTask: () => undefined };
+      const { stdin, frames } = await setup({ dir, provider, plans, initialMode: 'auto' });
+
+      await submit(stdin, '/plan');
+      await waitFor(() => anyFrameSays(frames, 'Usage: /plan <goal>'));
+
+      await submit(stdin, '/plan add an export command');
+      await waitFor(() => anyFrameSays(frames, 'Saved as plan 0001 "Export Plans" (1 item), now the active plan.'));
+      assert.match(provider.lastUser, /^\/plan add an export command\n/);
+      assert.match(provider.lastUser, /## Checklist/);
+      assert.match(provider.systemPrompt, /read only|Investigate and read only/i, 'Plan mode instruction, though the user is in Auto');
+      const plan = plans.store.activePlan('s1')!;
+      assert.equal(plan.goal, 'add an export command');
+      assert.deepEqual(plans.store.items(plan.id).map((i) => [i.text, i.checks]), [['Write exportPlan', 'its test passes']]);
+      assert.equal(changed, 1);
+    } finally {
+      store.close();
+    }
   });
 });
