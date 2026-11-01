@@ -19,14 +19,7 @@ import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
-import {
-  ensureTrusted,
-  findProjectRootSync,
-  logsDirFor,
-  resolveO4cMd,
-  sessionsDirFor,
-  usageFileFor,
-} from './session/projectContext.js';
+import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
 import { ConfigStore } from './session/configStore.js';
@@ -933,6 +926,13 @@ program
         images: opts.image ? [opts.image] : undefined,
         onEvent: printEvent,
         maxIterations,
+        // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which
+        // left one-shot runs with no compaction, no pre-send size check and no curated bound: the
+        // tmp4 long run grew a turn to 229,610 tokens against a 229,376 window and the server
+        // rejected every request from then on. Short one-shot prompts never got near the limit,
+        // which is how it went unnoticed.
+        contextWindow,
+        toolOutputDir: toolOutputDirFor(projectRoot),
       });
 
       process.stdout.write(`\n--- final ---\n${finalAnswer}\n`);
