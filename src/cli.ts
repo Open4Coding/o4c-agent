@@ -44,7 +44,13 @@ import { curatedHistory } from './session/curated.js';
 import { markWorkedCommand } from './session/workedCommand.js';
 import { contextWindowTypeFromConfig } from './ui/contextWindowSetting.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
-import type { ThinkCaps } from './agent/thinkLevel.js';
+import {
+  DEFAULT_THINK_LEVEL,
+  THINK_LEVEL_CONFIG_KEY,
+  parseThinkLevel,
+  type ThinkCaps,
+  type ThinkLevel,
+} from './agent/thinkLevel.js';
 
 /** `config.json` key caching each model's probed reasoning capabilities, so the startup check
  * runs once per model rather than at every launch. */
@@ -173,6 +179,13 @@ function printEvent(event: AgentEvent): void {
   if (!line) return;
   // tool_result prints directly under its tool_call, no separating blank line.
   process.stdout.write(event.type === 'tool_result' ? `${line}\n` : `\n${line}\n`);
+}
+
+/** The thinking level a one-shot run uses - the same rule `App.tsx` applies on mount. */
+function oneShotThinkLevel(config: Record<string, unknown>, model: string): ThinkLevel {
+  const saved = config[THINK_LEVEL_CONFIG_KEY];
+  const forModel = saved && typeof saved === 'object' ? (saved as Record<string, unknown>)[model] : undefined;
+  return (typeof forModel === 'string' ? parseThinkLevel(forModel) : undefined) ?? DEFAULT_THINK_LEVEL;
 }
 
 function printError(err: unknown): void {
@@ -933,6 +946,11 @@ program
         // which is how it went unnoticed.
         contextWindow,
         toolOutputDir: toolOutputDirFor(projectRoot),
+        // The level the TUI would start at: the per-model `thinkLevelByModel` entry, else o4c's
+        // default (`med`). Missing until 2026-11-01, so one-shot runs sent no reasoning limit at
+        // all and llama-server let the model think without bound - on the tmp4 long run that was
+        // ~2,300 output tokens per call, most of it planning probes.
+        thinkLevel: oneShotThinkLevel(resolvedConfig, opts.model),
       });
 
       process.stdout.write(`\n--- final ---\n${finalAnswer}\n`);

@@ -40,6 +40,11 @@ export const THINK_LEVELS: readonly ThinkLevel[] = ['nothink', 'low', 'med', 'hi
  */
 export const DEFAULT_THINK_LEVEL: ThinkLevel = 'med';
 
+/** `config.json` key holding the chosen thinking level per model id - `/think`'s choice is about
+ * how one particular model behaves, so Qwen3 and Claude keep separate values and neither is
+ * clobbered by switching provider. Shared by the TUI and one-shot mode, which apply it the same way. */
+export const THINK_LEVEL_CONFIG_KEY = 'thinkLevelByModel';
+
 export function isThinkLevel(value: unknown): value is ThinkLevel {
   return typeof value === 'string' && (THINK_LEVELS as readonly string[]).includes(value);
 }

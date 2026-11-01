@@ -12,10 +12,6 @@ import type { ServerProbe, ServerStatus } from '../providers/local.js';
 import { CommandFamilyPicker } from './CommandFamilyPicker.js';
 import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice } from './ThinkPicker.js';
 
-/** `config.json` key holding the chosen thinking level per model id - `/think`'s choice is about
- * how one particular model behaves, so Qwen3 and Claude keep separate values and neither is
- * clobbered by switching provider. */
-const THINK_LEVEL_CONFIG_KEY = 'thinkLevelByModel';
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
@@ -28,6 +24,7 @@ import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../se
 import {
   DEFAULT_THINK_CAPS,
   DEFAULT_THINK_LEVEL,
+  THINK_LEVEL_CONFIG_KEY,
   THINK_LEVELS,
   THINK_LEVEL_INFO,
   effectiveThinkLevel,
