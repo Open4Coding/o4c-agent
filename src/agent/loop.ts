@@ -453,6 +453,19 @@ export class AgentLoop {
     return this.usage;
   }
 
+  /**
+   * Counts a provider call made on this session's behalf outside the turn loop - `curated`'s two
+   * pre-turn calls (NextUp item 23). They cost real tokens, and a footer that left them out would
+   * understate exactly the type whose cost a user is deciding about.
+   */
+  countExternalCall(response: CompletionResponse): void {
+    this.usage.requestCount += 1;
+    if (response.usage) {
+      this.usage.inputTokens += response.usage.inputTokens;
+      this.usage.outputTokens += response.usage.outputTokens;
+    }
+  }
+
   /** Estimated token size of exactly what `getMessages()`/`toWireMessages()` would send right now
    * (`agent_visible !== false` entries only) - the number §2.3's compaction trigger compares
    * against a model's `contextWindow`. O(1) - see `visibleTokenEstimate`. */

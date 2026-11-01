@@ -1235,3 +1235,10 @@ test('a rejected tool discovery is a warning, not a failed turn', async () => {
   const warning = events.find((e) => e.type === 'warning');
   assert.ok(warning?.text?.includes('fell over'), JSON.stringify(events));
 });
+
+test('countExternalCall adds a call made outside the turn (curated\'s pre-turn calls) to the session totals', () => {
+  const loop = new AgentLoop(new FakeProvider([]), [], 'system');
+  loop.countExternalCall({ content: 'q', toolCalls: [], stopReason: 'end_turn', usage: { inputTokens: 120, outputTokens: 8 } });
+  loop.countExternalCall({ content: 'q', toolCalls: [], stopReason: 'end_turn' });
+  assert.deepEqual({ ...loop.getUsage() }, { inputTokens: 120, outputTokens: 8, requestCount: 2 });
+});

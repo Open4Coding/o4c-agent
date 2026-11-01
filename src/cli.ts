@@ -766,7 +766,11 @@ program
           curatedHistory: (request, budget) =>
             curatedHistory(
               {
-                complete: (completion) => provider.complete(completion),
+                complete: async (completion) => {
+                  const response = await provider.complete(completion);
+                  loop.countExternalCall(response);
+                  return response;
+                },
                 store: history.store,
                 retrieval,
                 currentTask: () => history.recorder.currentTask(),
