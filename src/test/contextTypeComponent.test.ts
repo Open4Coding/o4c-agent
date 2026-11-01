@@ -169,3 +169,26 @@ test('a recalibrated ratio mid-turn does not re-run curated\'s calls', async () 
   await component.buildRequest!({ entries, contextWindow: 10_000, tokenRatio: 1.8 });
   assert.equal(calls, 1);
 });
+
+test('projected ahead of a new message: no turn is protected, nothing is loaded yet, none projects nothing (tmp4 run)', async () => {
+  const round = (id: string) => [
+    aiToolCallEntry({ id, name: 'read_file', input: { path: 'a.ts' } }, false),
+    aiToolCallResponseEntry(id, 'x'.repeat(4000), false),
+  ];
+  // The last turn is a capped 50-call turn - no final answer - exactly like the run.
+  const entries: ContextEntry[] = [
+    userInputEntry('first request'), ...round('a1'), aiResponseEntry('first answer'),
+    userInputEntry('big capped turn'), ...round('b1'), ...round('b2'), ...round('b3'), ...round('b4'),
+  ];
+  let loads = 0;
+  const component = contextTypeComponent({
+    control: contextWindowTypeControl({ type: 'curated' }),
+    retrieval: { curatedHistory: async () => ((loads += 1), '[h]') },
+    recentFraction: 0.5,
+  });
+  const ahead = await component.buildRequest!({ entries, contextWindow: 4000, beforeNewMessage: true });
+  assert.ok(ahead.length < entries.length - 3, 'the previous turn is bounded too, not kept whole');
+  assert.equal(loads, 0, 'history is loaded for the new message, not before it');
+  const none = contextTypeComponent({ control: contextWindowTypeControl({ type: 'none' }) });
+  assert.deepEqual(await none.buildRequest!({ entries, beforeNewMessage: true }), []);
+});

@@ -622,6 +622,7 @@ export class AgentLoop {
   private async refreshRequestProjection(
     options: { contextWindow?: number },
     warn: SeamWarning,
+    beforeNewMessage = false,
   ): Promise<void> {
     if (!this.core.hasRequestHooks()) {
       this.requestProjection = undefined;
@@ -638,6 +639,7 @@ export class AgentLoop {
           ? Math.min(MAX_RESPONSE_TOKENS, Math.floor(options.contextWindow / 4))
           : undefined,
         tokenRatio: this.tokenRatio,
+        beforeNewMessage,
       },
       warn,
     );
@@ -1091,7 +1093,7 @@ export class AgentLoop {
     const COMPACT_PAUSE_RATIO = CONTEXT_PRESSURE_RATIO;
     const COMPACT_TARGET_RATIO = 0.75;
     const MAX_FORCED_COMPACT_ATTEMPTS = 3;
-    const pauseAndCompactIfOverEighty = async (): Promise<void> => {
+    const pauseAndCompactIfOverEighty = async (beforeNewMessage = false): Promise<void> => {
       if (!options.contextWindow) return;
       const contextWindow = options.contextWindow;
       for (let attempt = 0; attempt < MAX_FORCED_COMPACT_ATTEMPTS; attempt++) {
@@ -1136,7 +1138,7 @@ export class AgentLoop {
         // The compaction above changed the entry set, so the cached projection is stale by
         // construction; without this the progress check below would compare the new estimate
         // against a projection taken before the compaction.
-        await this.refreshRequestProjection(options, warnSeam);
+        await this.refreshRequestProjection(options, warnSeam, beforeNewMessage);
         const after = this.hybridPromptTokenEstimate(options.modeInstruction);
         if (after >= before) return; // no progress this round - stop retrying, let hardStopMessage decide
       }
@@ -1146,7 +1148,8 @@ export class AgentLoop {
       const compactionSettings = options.compactionSettings ?? compactionSettingsForWindow(options.contextWindow);
       // Before anything reads an estimate: the triggers below measure what the seam will actually
       // send, and with a request hook registered that is not the same as the visible history.
-      await this.refreshRequestProjection(options, warnSeam);
+      // `true`: the new message is not in history yet - see `RequestBuild.beforeNewMessage`.
+      await this.refreshRequestProjection(options, warnSeam, true);
       this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
       await this.maybeCompact(
         options.contextWindow,
@@ -1157,7 +1160,7 @@ export class AgentLoop {
         options.signal,
         options.modeInstruction,
       );
-      await pauseAndCompactIfOverEighty();
+      await pauseAndCompactIfOverEighty(true);
       const preTurnHardStop = hardStopMessage();
       if (preTurnHardStop) {
         onEvent({ type: 'warning', text: preTurnHardStop });

@@ -84,10 +84,21 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
 
   return {
     name: 'context-window-type',
-    buildRequest: async ({ entries, contextWindow, tokenRatio }: RequestBuild) => {
+    buildRequest: async ({ entries, contextWindow, tokenRatio, beforeNewMessage }: RequestBuild) => {
       // Budgets below are in real tokens; everything here measures in estimated ones.
       const ratio = tokenRatio && tokenRatio > 0 ? tokenRatio : 1;
       const setting = options.control.current();
+      // Ahead of a new message, nothing here is the current turn: project what will actually go out
+      // once it arrives, minus the message itself and anything loaded for it.
+      if (beforeNewMessage) {
+        if (setting.type === 'none') return [];
+        if (setting.type === 'curated') {
+          const recent = entries.slice(recentTurnsStart(entries, Math.max(1, (options.recentExchanges ?? 3) - 1)));
+          if (options.recentFraction === undefined || contextWindow === undefined) return recent;
+          return windowEntries(recent, Math.floor((contextWindow * options.recentFraction) / ratio));
+        }
+        return entries;
+      }
       const turn = currentTurnStart(entries);
       if (turn < 0) return entries;
       const current = entries[turn];

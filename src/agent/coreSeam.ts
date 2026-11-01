@@ -43,6 +43,14 @@ export interface RequestBuild {
    * where code and JSON ran 1.8 real tokens per estimated one (2026-11-01). Absent means 1.
    */
   readonly tokenRatio?: number;
+  /**
+   * True when the loop is projecting the next request before the user's new message is in
+   * history - its pre-turn compaction checks run first, so a pre-turn hard stop can return without
+   * recording the message. No turn in `entries` is running then, which matters to a hook that
+   * treats the last turn as the current one. Found on the tmp4 long run (2026-11-01): curated kept
+   * the previous 50-call turn whole as "current", and the pre-turn check fired at 83% on that.
+   */
+  readonly beforeNewMessage?: boolean;
 }
 
 /** What an `aroundTool` hook is told about the call it may answer instead of executing. */
