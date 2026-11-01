@@ -130,3 +130,42 @@ test('curated: the recent exchanges are bounded to a share of the window; the cu
   // Unknown window: no bound at all.
   assert.equal((await component.buildRequest!({ entries })).length, entries.length);
 });
+
+test('curated budgets are in real tokens: the loop\'s calibrated ratio scales the bound and the history budget (tmp4 run)', async () => {
+  const round = (id: string) => [
+    aiToolCallEntry({ id, name: 'read_file', input: { path: 'a.ts' } }, false),
+    aiToolCallResponseEntry(id, 'x'.repeat(4000), false),
+  ];
+  const entries: ContextEntry[] = [
+    userInputEntry('first request'),
+    ...round('a1'), ...round('a2'), ...round('a3'), ...round('a4'),
+    aiResponseEntry('first answer'),
+    userInputEntry('current request'),
+  ];
+  let budgetSeen: number | undefined;
+  // A fresh component each: within one turn the history is cached, which is the point.
+  const make = () =>
+    contextTypeComponent({
+      control: contextWindowTypeControl({ type: 'curated' }),
+      retrieval: { curatedHistory: async (_r, budget) => ((budgetSeen = budget), undefined) },
+      curatedBudget: () => 3000,
+      recentFraction: 0.5,
+    });
+  const plain = await make().buildRequest!({ entries, contextWindow: 10_000 });
+  const scaled = await make().buildRequest!({ entries, contextWindow: 10_000, tokenRatio: 2 });
+  assert.ok(scaled.length < plain.length, 'a 2x ratio keeps fewer verbatim entries');
+  assert.equal(budgetSeen, 1500, 'the history budget is divided by the ratio');
+});
+
+test('a recalibrated ratio mid-turn does not re-run curated\'s calls', async () => {
+  let calls = 0;
+  const component = contextTypeComponent({
+    control: contextWindowTypeControl({ type: 'curated' }),
+    retrieval: { curatedHistory: async () => ((calls += 1), '[h]') },
+    curatedBudget: () => 3000,
+  });
+  const entries = [userInputEntry('first'), aiResponseEntry('a'), userInputEntry('current request')];
+  await component.buildRequest!({ entries, contextWindow: 10_000, tokenRatio: 1.5 });
+  await component.buildRequest!({ entries, contextWindow: 10_000, tokenRatio: 1.8 });
+  assert.equal(calls, 1);
+});

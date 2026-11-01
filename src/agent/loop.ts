@@ -637,6 +637,7 @@ export class AgentLoop {
         maxTokens: options.contextWindow
           ? Math.min(MAX_RESPONSE_TOKENS, Math.floor(options.contextWindow / 4))
           : undefined,
+        tokenRatio: this.tokenRatio,
       },
       warn,
     );

@@ -84,7 +84,9 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
 
   return {
     name: 'context-window-type',
-    buildRequest: async ({ entries, contextWindow }: RequestBuild) => {
+    buildRequest: async ({ entries, contextWindow, tokenRatio }: RequestBuild) => {
+      // Budgets below are in real tokens; everything here measures in estimated ones.
+      const ratio = tokenRatio && tokenRatio > 0 ? tokenRatio : 1;
       const setting = options.control.current();
       const turn = currentTurnStart(entries);
       if (turn < 0) return entries;
@@ -104,8 +106,11 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
 
       if (setting.type === 'curated') {
         if (!options.retrieval?.curatedHistory) return entries;
-        const budget = options.curatedBudget?.(setting, contextWindow);
-        const key = String(budget);
+        const realBudget = options.curatedBudget?.(setting, contextWindow);
+        const budget = realBudget === undefined ? undefined : Math.floor(realBudget / ratio);
+        // Keyed on the real-token budget: the ratio is recalibrated after every response, and
+        // keying on the scaled budget would re-run both curated calls on every request.
+        const key = String(realBudget);
         if (curatedCache?.entryId !== current.id || curatedCache.key !== key) {
           curatedCache = { entryId: current.id, key, history: await options.retrieval.curatedHistory(current.content, budget) };
         }
@@ -117,7 +122,7 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
         if (options.recentFraction !== undefined && contextWindow !== undefined) {
           const turnStartInKept = kept.length - (entries.length - turn);
           if (turnStartInKept > 0) {
-            const trimmed = windowEntries(kept, Math.floor(contextWindow * options.recentFraction));
+            const trimmed = windowEntries(kept, Math.floor((contextWindow * options.recentFraction) / ratio));
             // A bound smaller than the current turn would cut into it; then only the earlier
             // exchanges go, down to their first message.
             const keepsCurrentTurn = trimmed.length - (trimmed[0] === kept[0] ? 1 : 0) >= kept.length - turnStartInKept;

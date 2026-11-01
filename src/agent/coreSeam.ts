@@ -36,6 +36,13 @@ export interface RequestBuild {
   readonly contextWindow?: number;
   /** What this request will allow the model to generate, so a hook can budget the rest. */
   readonly maxTokens?: number;
+  /**
+   * Real tokens per `estimateTokens` token, as the loop has calibrated it from the provider's own
+   * counts. A hook that budgets in estimated tokens divides a real-token budget by this. Without
+   * it a "35% of the window" bound measured in chars/4 came out near 60% on the tmp4 long run,
+   * where code and JSON ran 1.8 real tokens per estimated one (2026-11-01). Absent means 1.
+   */
+  readonly tokenRatio?: number;
 }
 
 /** What an `aroundTool` hook is told about the call it may answer instead of executing. */
