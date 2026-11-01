@@ -194,3 +194,19 @@ test('a renamed function with the same body is recorded as renamed, not deleted 
   const edited = await snapshotEntities('export function greetUser(name: string): string {\n  return "Hi, " + name;\n}\n', 'greet.ts');
   assert.deepEqual(diffEntities(before, edited!).map((c) => [c.name, c.change]), [['greetUser', 'modified']], 'a body change is still a change');
 });
+
+test('edit_file is linked like write_file: the changed definition is read back after the edit', async () => {
+  await withRecorder(async ({ store, recorder, root }) => {
+    await writeFile(join(root, 'g.ts'), 'export function greet() {\n  return 1;\n}\n');
+    recorder.onEntry(userInputEntry('make greet return two instead of one please'));
+    await recorder.aroundTool(
+      { tool: { name: 'edit_file' } as Tool, input: { path: 'g.ts', old_string: 'return 1;', new_string: 'return 2;' } },
+      async () => {
+        await writeFile(join(root, 'g.ts'), 'export function greet() {\n  return 2;\n}\n');
+        return 'Edited g.ts: replaced 1 occurrence.';
+      },
+    );
+    const rows = store.taskEntities(store.lastTask('s1')!.id).filter((r) => r.name);
+    assert.deepEqual(rows.map((r) => [r.name, r.change]), [['greet', 'modified']]);
+  });
+});

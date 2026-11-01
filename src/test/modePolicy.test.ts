@@ -207,3 +207,10 @@ test('a read-only proxied tool needs no grant, and a grant does not make one mut
     assert.equal(classifyToolAccess(mode, readOnlyProxy), 'allow');
   }
 });
+
+test('edit_file is a file edit: acceptEdits allows it like write_file, manual still confirms it', () => {
+  const editFile = fakeTool('edit_file', true);
+  assert.equal(classifyToolAccess('acceptEdits', editFile), 'allow');
+  assert.equal(classifyToolAccess('manual', editFile), 'confirm');
+  assert.equal(classifyToolAccess('plan', editFile), 'deny');
+});

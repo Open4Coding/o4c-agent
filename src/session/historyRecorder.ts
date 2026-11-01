@@ -95,7 +95,8 @@ export class HistoryRecorder implements CoreComponent {
   async aroundTool(call: ToolCallContext, next: () => Promise<string>): Promise<string> {
     const taskId = this.currentTaskId;
     const path = call.input.path;
-    if (call.tool.name !== 'write_file' || taskId === undefined || typeof path !== 'string' || !this.options.enabled()) {
+    const writes = call.tool.name === 'write_file' || call.tool.name === 'edit_file';
+    if (!writes || taskId === undefined || typeof path !== 'string' || !this.options.enabled()) {
       return next();
     }
     const absolute = isAbsolute(path) ? path : resolve(this.options.projectRoot, path);
@@ -108,7 +109,9 @@ export class HistoryRecorder implements CoreComponent {
       const { store } = this.options;
       store.addTaskFile(taskId, repoPath);
       store.addTaskEntity({ task_id: taskId, path: repoPath, entity_uid: null, name: null, kind: null, change: 'written', hash_before: null, hash_after: null });
-      const after = typeof call.input.content === 'string' ? call.input.content : '';
+      // write_file carries the new content; edit_file only the change, so read the result back.
+      const after =
+        typeof call.input.content === 'string' ? call.input.content : await readFile(absolute, 'utf-8').catch(() => '');
       const [was, now] = await Promise.all([snapshotEntities(before, repoPath), snapshotEntities(after, repoPath)]);
       if (was && now) {
         for (const change of diffEntities(was, now)) store.addTaskEntity({ task_id: taskId, path: repoPath, ...change });

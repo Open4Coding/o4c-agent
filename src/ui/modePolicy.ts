@@ -140,6 +140,12 @@ export function classifyToolAccess(
   return access;
 }
 
+/** The file-writing tools: `edit_file` is an edit as much as `write_file` is, so the modes that
+ * allow file edits (acceptEdits, a plan file in planWrite) allow both. */
+function writesFiles(tool: Tool): boolean {
+  return tool.name === 'write_file' || tool.name === 'edit_file';
+}
+
 function modeAccess(
   mode: Mode,
   tool: Tool,
@@ -150,14 +156,14 @@ function modeAccess(
     case 'plan':
       return 'deny';
     case 'planWrite':
-      if (tool.name === 'write_file' && plansDir && isPlanFilePath(input?.path, plansDir)) {
+      if (writesFiles(tool) && plansDir && isPlanFilePath(input?.path, plansDir)) {
         return 'allow';
       }
       return 'deny';
     case 'auto':
       return 'allow';
     case 'acceptEdits':
-      return tool.name === 'write_file' ? 'allow' : 'confirm';
+      return writesFiles(tool) ? 'allow' : 'confirm';
     case 'manual':
       return 'confirm';
   }
