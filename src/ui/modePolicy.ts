@@ -129,7 +129,11 @@ export function classifyToolAccess(
   input?: Record<string, unknown>,
   plansDir?: string,
 ): ToolAccess {
-  if (!tool.mutating) return 'allow';
+  if (!tool.mutating) {
+    // A sign-off is a person agreeing a step is finished, not a change being made - so Plan mode,
+    // which refuses changes, still asks rather than refusing. Only Auto skips the question.
+    return tool.needsSignOff?.(input ?? {}) && mode !== 'auto' ? 'confirm' : 'allow';
+  }
   const access = modeAccess(mode, tool, input, plansDir);
   // The ONLY place a per-server grant is applied, and it can only ever soften a `confirm`.
   // Written this way so that no mode branch can be edited into turning a `deny` into an `allow`

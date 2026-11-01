@@ -10,8 +10,8 @@ import { formatPlan } from './planView.js';
  * note, one item doing at a time) is the store's, so the model gets the same refusal the user's
  * picker would - as a plain sentence it can act on, never a thrown error.
  *
- * Not `mutating`: it changes plan bookkeeping, not files or the system. Whether a `done` needs the
- * user's confirmation is the mode's call (brief, Q5) and is checklist P4, not this file.
+ * Not `mutating`: it changes plan bookkeeping, not files or the system. A `done` is signed off by
+ * the user in every mode but Auto (brief, Q5) - `needsSignOff`, applied by `classifyToolAccess`.
  */
 
 export interface PlanToolOptions {
@@ -51,6 +51,8 @@ export function createPlanTool(options: PlanToolOptions): Tool {
       },
       required: ['action'],
     },
+    // Q5: finishing an item follows the mode - Auto moves on by itself, every other mode asks.
+    needsSignOff: (input) => input.action === 'done',
     async execute(input) {
       const action = typeof input.action === 'string' ? input.action : 'show';
       const plan = resolvePlan(plans, options.sessionId, input.plan);

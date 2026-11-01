@@ -155,6 +155,15 @@ export function formatConfirmMessage(
     ].join('\n');
   }
 
+  if (toolName === 'update_plan' && input.action === 'done') {
+    // The question is "is this item finished?", so the evidence is the whole preview.
+    const item = typeof input.item === 'number' ? `item ${input.item}` : 'this item';
+    const verification = typeof input.verification === 'string' && input.verification.trim()
+      ? input.verification.trim().split('\n').slice(0, previewLineCount(size.rows)).map((l) => clipLine(l, budget))
+      : ['(no verification given - o4c will refuse it anyway)'];
+    return [`Mark plan ${item} done?`, ...notes, 'Verification:', ...verification].join('\n');
+  }
+
   if (toolName === 'run_shell' && typeof input.command === 'string') {
     const command = input.command;
     const cutByChars = command.length > MAX_COMMAND_CHARS ? command.slice(0, MAX_COMMAND_CHARS) : command;

@@ -214,3 +214,11 @@ test('edit_file is a file edit: acceptEdits allows it like write_file, manual st
   assert.equal(classifyToolAccess('manual', editFile), 'confirm');
   assert.equal(classifyToolAccess('plan', editFile), 'deny');
 });
+
+test('a sign-off call (update_plan done) asks in every mode but Auto; its other calls never ask', () => {
+  const planTool: Tool = { ...fakeTool('update_plan', false), needsSignOff: (input) => input.action === 'done' };
+  for (const mode of MODES.map((m) => m.mode)) {
+    assert.equal(classifyToolAccess(mode, planTool, { action: 'done', item: 1 }), mode === 'auto' ? 'allow' : 'confirm', mode);
+    assert.equal(classifyToolAccess(mode, planTool, { action: 'start', item: 1 }), 'allow', mode);
+  }
+});

@@ -209,3 +209,9 @@ test('a diff summary replaces the content preview and keeps the counts', () => {
   assert.ok(noDiff.split("\n").length > 1, "the preview still appears: " + noDiff);
   assert.ok(!noDiff.includes("+3 -1"));
 });
+
+test('update_plan done: the question is whether the item is finished, so the verification is the preview', () => {
+  const message = formatConfirmMessage('update_plan', { action: 'done', item: 3, verification: 'npm test: 40/40\nbuilt dist' }, { cols: 80, rows: 40 });
+  assert.equal(message, 'Mark plan item 3 done?\nVerification:\nnpm test: 40/40\nbuilt dist');
+  assert.match(formatConfirmMessage('update_plan', { action: 'done', item: 3 }, { cols: 80, rows: 40 }), /no verification given/);
+});

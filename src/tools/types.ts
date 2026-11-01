@@ -46,6 +46,13 @@ export interface Tool {
    * be blocked outright, without needing a hardcoded tool-name list. Read-only tools leave this
    * unset. */
   readonly mutating?: boolean;
+  /**
+   * For a tool that changes nothing on disk but has calls the user signs off on - today only
+   * `update_plan`'s `done` (brief 0005, Q5). True for such a call: every mode except Auto then
+   * asks before it runs, exactly as for a mutating tool in Manual. Consulted only when the tool is
+   * not `mutating`; a mutating tool's access is the mode's alone.
+   */
+  needsSignOff?(input: Record<string, unknown>): boolean;
   /** Set only on a tool proxied from an MCP server; absent on every built-in. Its presence is
    * also the honest answer to "is this ours?" wherever that matters. */
   readonly mcp?: McpToolProvenance;
