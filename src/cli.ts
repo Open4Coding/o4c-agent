@@ -934,15 +934,17 @@ program
       });
 
       process.stdout.write(`\n--- final ---\n${finalAnswer}\n`);
-      // On stderr so it never mixes into an answer a script is reading from stdout.
-      const used = loop.getUsage();
-      process.stderr.write(
-        `--- usage --- requests ${used.requestCount} · input ${used.inputTokens} · output ${used.outputTokens}\n`,
-      );
     } catch (err) {
       printError(err);
       process.exitCode = 1;
     } finally {
+      // On stderr so it never mixes into an answer a script is reading from stdout. In `finally`
+      // so a message that ends on an error - the iteration cap a long scripted run sets on purpose
+      // - still reports what it spent.
+      const used = loop.getUsage();
+      process.stderr.write(
+        `--- usage --- requests ${used.requestCount} · input ${used.inputTokens} · output ${used.outputTokens}\n`,
+      );
       if (oneShotStore && loop.getEntries().length > 0) {
         try {
           await oneShotStore.save(loop.getEntries(), sessionId);
