@@ -35,6 +35,15 @@ export const CURATED_DEFAULT_CAP_TOKENS = 30_000;
 /** How many recent exchanges `curated` keeps verbatim alongside what it loads (brief, Q3). */
 export const CURATED_RECENT_EXCHANGES = 3;
 
+/**
+ * The most of the model's window those recent exchanges may take, verbatim. Found on the tmp4 long
+ * run (2026-11-01): one exchange there is a whole 50-call turn, so three of them filled 190K of a
+ * 229K window by themselves and `curated` sent more than `floating` would. Past this share, the
+ * oldest tool rounds are cut at a safe boundary - the sliding window's own rule - and the current
+ * turn is always kept whole.
+ */
+export const CURATED_RECENT_FRACTION = 0.5;
+
 export interface ContextWindowType {
   readonly type: ContextWindowTypeName;
   /** `curated` only: an explicit budget. Absent means the default above. */

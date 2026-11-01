@@ -98,3 +98,35 @@ test('without retrieval, pointer and curated fall back to floating rather than f
   assert.equal(await build({ type: 'pointer' }, entries), entries);
   assert.equal(await build({ type: 'curated' }, entries), entries);
 });
+
+test('curated: the recent exchanges are bounded to a share of the window; the current turn is always whole (tmp4 run)', async () => {
+  const big = (id: string) => [
+    aiToolCallEntry({ id, name: 'read_file', input: { path: 'a.ts' } }, false),
+    aiToolCallResponseEntry(id, 'x'.repeat(4000), false),
+  ];
+  const entries: ContextEntry[] = [
+    userInputEntry('first request'),
+    ...big('a1'), ...big('a2'), ...big('a3'),
+    aiResponseEntry('first answer'),
+    userInputEntry('current request'),
+    ...big('c1'),
+  ];
+  const component = contextTypeComponent({
+    control: contextWindowTypeControl({ type: 'curated' }),
+    retrieval: { curatedHistory: async () => undefined },
+    recentFraction: 0.5,
+  });
+  // 2,000-token bound: the earlier exchange's three 1,000-token rounds cannot all fit.
+  const sent = await component.buildRequest!({ entries, contextWindow: 4000 });
+  assert.equal(sent[0].content, 'first request', 'the first message stays, pinned');
+  assert.ok(sent.length < entries.length, 'older tool rounds were cut');
+  const tail = sent.slice(-3).map((e) => e.content.slice(0, 15));
+  assert.deepEqual(tail, ['current request', '{"name":"read_f', 'x'.repeat(15)], 'the current turn is whole');
+
+  // A bound smaller than the current turn itself: the earlier exchange shrinks to its first message.
+  const tiny = await component.buildRequest!({ entries, contextWindow: 200 });
+  assert.deepEqual(tiny.map((e) => e.content.slice(0, 15)), ['first request', 'current request', '{"name":"read_f', 'x'.repeat(15)]);
+
+  // Unknown window: no bound at all.
+  assert.equal((await component.buildRequest!({ entries })).length, entries.length);
+});

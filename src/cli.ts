@@ -37,6 +37,7 @@ import { startHistory } from './session/historyStartup.js';
 import {
   CONTEXT_WINDOW_TYPE_CONFIG_KEY,
   CURATED_RECENT_EXCHANGES,
+  CURATED_RECENT_FRACTION,
   contextWindowTypeControl,
   curatedBudgetTokens,
   offersHistorySearch,
@@ -785,6 +786,7 @@ program
         },
         curatedBudget: curatedBudgetTokens,
         recentExchanges: CURATED_RECENT_EXCHANGES,
+        recentFraction: CURATED_RECENT_FRACTION,
       }),
     );
     // `search_history` is offered with the types that point the model at past tasks, and follows

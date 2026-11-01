@@ -1,6 +1,7 @@
 import { CONTINUATION_TAG, type ContextEntry } from './contextEntry.js';
 import type { ContextWindowType, ContextWindowTypeControl } from './contextWindowType.js';
 import type { CoreComponent, RequestBuild } from './coreSeam.js';
+import { windowEntries } from './slidingWindow.js';
 
 /**
  * Shapes each request by the context window type - NextUp item 23, checklist B2/B5/B6.
@@ -33,6 +34,9 @@ export interface ContextTypeComponentOptions {
   readonly curatedBudget?: (setting: ContextWindowType, contextWindow: number | undefined) => number | undefined;
   /** How many recent exchanges `curated` keeps verbatim. */
   readonly recentExchanges?: number;
+  /** The share of the window those exchanges may take - `CURATED_RECENT_FRACTION`. Unset or an
+   * unknown window means no bound, the original behaviour. */
+  readonly recentFraction?: number;
 }
 
 /** Whether an entry is a message a person typed - not the loop's own continue nudge. */
@@ -106,7 +110,20 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
           curatedCache = { entryId: current.id, key, history: await options.retrieval.curatedHistory(current.content, budget) };
         }
         const start = recentTurnsStart(entries, options.recentExchanges ?? 3);
-        const kept = entries.slice(start);
+        let kept: readonly ContextEntry[] = entries.slice(start);
+        // Bounded, never below the current turn: what is cut is the oldest tool rounds of the
+        // earlier exchanges, at the sliding window's safe cut points (never between a call and its
+        // result), with their first message pinned so the preamble below still has a home.
+        if (options.recentFraction !== undefined && contextWindow !== undefined) {
+          const turnStartInKept = kept.length - (entries.length - turn);
+          if (turnStartInKept > 0) {
+            const trimmed = windowEntries(kept, Math.floor(contextWindow * options.recentFraction));
+            // A bound smaller than the current turn would cut into it; then only the earlier
+            // exchanges go, down to their first message.
+            const keepsCurrentTurn = trimmed.length - (trimmed[0] === kept[0] ? 1 : 0) >= kept.length - turnStartInKept;
+            kept = keepsCurrentTurn ? trimmed : [kept[0], ...kept.slice(turnStartInKept)];
+          }
+        }
         const history = curatedCache.history;
         if (!history || kept.length === 0) return kept;
         return [withPreamble(kept[0], history), ...kept.slice(1)];
