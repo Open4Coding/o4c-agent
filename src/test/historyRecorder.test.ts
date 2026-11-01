@@ -10,6 +10,7 @@ import { diffEntities, snapshotEntities, type EntitySnapshot } from '../session/
 import {
   CONTINUATION_TAG,
   aiResponseEntry,
+  aiThinkEntry,
   aiToolCallResponseEntry,
   userInputEntry,
 } from '../agent/contextEntry.js';
@@ -208,5 +209,17 @@ test('edit_file is linked like write_file: the changed definition is read back a
     );
     const rows = store.taskEntities(store.lastTask('s1')!.id).filter((r) => r.name);
     assert.deepEqual(rows.map((r) => [r.name, r.change]), [['greet', 'modified']]);
+  });
+});
+
+test('notes: narration a later response replaced, and the end of each think block, are kept; the answer is not repeated', async () => {
+  await withRecorder(async ({ store, recorder }) => {
+    recorder.onEntry(userInputEntry('make the parser accept every CREATE TABLE form'));
+    recorder.onEntry(aiThinkEntry('Probing showed GENERATED works as a column type name.'));
+    recorder.onEntry(aiResponseEntry('Let me fix parseColumnDef:'));
+    recorder.onEntry(aiResponseEntry('All 168 tests pass.'));
+    const task = store.lastTask('s1')!;
+    assert.equal(task.answer, 'All 168 tests pass.');
+    assert.equal(task.notes, 'Probing showed GENERATED works as a column type name.\nLet me fix parseColumnDef:');
   });
 });

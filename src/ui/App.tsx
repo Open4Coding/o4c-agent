@@ -2239,7 +2239,7 @@ export function App({
               // they happened rather than collected for the end of the turn.
               if (
                 sessionViewRef.current === 'full' &&
-                (event.type === 'compaction' || event.type === 'prune' || event.type === 'warning')
+                (event.type === 'compaction' || event.type === 'prune' || event.type === 'warning' || event.type === 'info')
               ) {
                 // Both buffers, same order, same reason as the tool lines above: a compaction or
                 // warning arriving mid-stream must not jump ahead of reasoning that is still
@@ -2256,7 +2256,7 @@ export function App({
               dispatchTextWindow({ type: 'appendLive', text });
               if (event.type === 'tool_call' || event.type === 'tool_result') {
                 responseLines.push({ kind: event.type, text });
-              } else if (event.type === 'compaction' || event.type === 'prune') {
+              } else if (event.type === 'compaction' || event.type === 'prune' || event.type === 'info') {
                 // Rare and worth a permanent record, unlike plain "text" narration - a user
                 // scrolling back should be able to see exactly when/why older history vanished
                 // from what the model sees.

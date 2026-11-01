@@ -51,6 +51,12 @@ export interface RequestBuild {
    * the previous 50-call turn whole as "current", and the pre-turn check fired at 83% on that.
    */
   readonly beforeNewMessage?: boolean;
+  /**
+   * Shows the user one dim `[info]` line - for a hook that adds something the model will read
+   * but the screen would otherwise never show (the `pointer` hint, found missing on the live check
+   * 2026-10-31). Absent in callers with no screen; a hook must not depend on it.
+   */
+  readonly info?: (text: string) => void;
 }
 
 /** What an `aroundTool` hook is told about the call it may answer instead of executing. */

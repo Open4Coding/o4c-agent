@@ -65,9 +65,12 @@ test('pointer: the hint is added to the current message only, once per turn', as
   const control = contextWindowTypeControl({ type: 'pointer' });
   const component = contextTypeComponent({ control, retrieval });
   const entries = conversation();
-  const first = await component.buildRequest!({ entries });
-  await component.buildRequest!({ entries });
+  const shown: string[] = [];
+  const info = (text: string) => shown.push(text);
+  const first = await component.buildRequest!({ entries, info });
+  await component.buildRequest!({ entries, info });
   assert.equal(searches, 1, 'many requests in one turn, one search');
+  assert.deepEqual(shown, ['history hint sent: [hint for: current request]'], 'shown once, like the search');
   const current = first.find((e) => e.content.startsWith('current request'))!;
   assert.equal(current.content, 'current request\n\n[hint for: current request]');
   assert.equal(first.length, entries.length);

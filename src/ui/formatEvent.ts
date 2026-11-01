@@ -1,6 +1,6 @@
 import { basename, extname } from 'node:path';
 import type { AgentEvent } from '../agent/loop.js';
-import { RESPONSE_TAG, RESULT_TAG, THINK_TAG, labelled, toolTag } from './labels.js';
+import { INFO_TAG, RESPONSE_TAG, RESULT_TAG, THINK_TAG, labelled, toolTag } from './labels.js';
 
 const PREVIEW_LENGTH = 200;
 
@@ -76,6 +76,9 @@ export function formatEvent(event: AgentEvent, view: EventView = 'compact'): str
   }
   if (event.type === 'warning') {
     return event.text ? labelled('[warning]', event.text) : null;
+  }
+  if (event.type === 'info') {
+    return event.text ? labelled(INFO_TAG, event.text) : null;
   }
   if (event.type === 'delta') {
     // Raw, unprefixed, untruncated - callers that want the bracketed/truncated treatment other

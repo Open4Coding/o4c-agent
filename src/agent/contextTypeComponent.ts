@@ -84,7 +84,7 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
 
   return {
     name: 'context-window-type',
-    buildRequest: async ({ entries, contextWindow, tokenRatio, beforeNewMessage }: RequestBuild) => {
+    buildRequest: async ({ entries, contextWindow, tokenRatio, beforeNewMessage, info }: RequestBuild) => {
       // Budgets below are in real tokens; everything here measures in estimated ones.
       const ratio = tokenRatio && tokenRatio > 0 ? tokenRatio : 1;
       const setting = options.control.current();
@@ -109,6 +109,8 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
         if (!options.retrieval?.pointerHint) return entries;
         if (pointerCache?.entryId !== current.id) {
           pointerCache = { entryId: current.id, hint: options.retrieval.pointerHint(current.content) };
+          // Once per message, like the search: the model reads the hint on every request of the turn.
+          if (pointerCache.hint) info?.(`history hint sent: ${pointerCache.hint.replace(/\s+/g, ' ').trim()}`);
         }
         const hint = pointerCache.hint;
         if (!hint) return entries;

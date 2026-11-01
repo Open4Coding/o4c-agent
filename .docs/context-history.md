@@ -38,7 +38,7 @@ meaningful words with it, or one exact file or function name, the model sees a s
 [o4c history] Past tasks that may help: #412 "fix the CRLF bug in the bat installer" (+2 follow-ups). Read one with search_history {"open": "#412"}
 ```
 
-If nothing matches, nothing is added and nothing is spent. A task is marked **stale** when the code it
+You see it too, as a dim `[info] history hint sent: ...` line. If nothing matches, nothing is added and nothing is spent. A task is marked **stale** when the code it
 changed has since been removed or renamed (o4c checks with the Code Graph).
 
 ### `curated` — the model builds its own context
@@ -55,6 +55,10 @@ The two calls make every request start a little later, and on a paid API they co
 
 With `pointer` or `curated`, the model also gets a `search_history` tool: `{"query": "..."}` lists
 matching tasks by number, `{"open": "#412"}` reads one.
+
+What a task keeps: your request, the final answer, errors, the files and functions it changed, and
+**notes**: the model's narration between tool calls and the end of each of its thinking blocks, so
+what a long research turn worked out is still there for the next one. Notes are searched too.
 
 ### `/worked` — tell o4c what worked
 

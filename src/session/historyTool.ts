@@ -14,7 +14,7 @@ import { describeThread, type HistoryRetrieval } from './retrieval.js';
  */
 
 /** Caps per key part when a task is opened - enough to act on, never a wall. */
-const OPEN_CAPS = { request: 2000, answer: 4000, errors: 1200 } as const;
+const OPEN_CAPS = { request: 2000, answer: 4000, notes: 2400, errors: 1200 } as const;
 
 export function createHistoryTool(store: InfiniteContextStore, retrieval: HistoryRetrieval): Tool {
   return {
@@ -72,6 +72,8 @@ export function formatTaskForContext(store: InfiniteContextStore, task: TaskRow,
   // An empty answer on a finished task is what an archived one looks like too (brief, Q10, rule 2):
   // normal, not an error.
   lines.push(`Answer: ${task.answer ? cap(task.answer, OPEN_CAPS.answer) : task.outcome === 'open' ? '(still running)' : '[none recorded, or archived]'}`);
+  // The newest notes, as the store keeps them: later findings build on earlier ones.
+  if (task.notes) lines.push(`Notes on the way:\n${capTail(task.notes, OPEN_CAPS.notes)}`);
   if (task.errors) lines.push(`Errors: ${cap(task.errors, OPEN_CAPS.errors)}`);
   if (task.files) lines.push(`Files written: ${task.files.split('\n').join(', ')}`);
   const changed = store
@@ -96,6 +98,10 @@ function describeOutcome(task: TaskRow): string {
 
 function cap(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}... (+${text.length - max} characters)`;
+}
+
+function capTail(text: string, max: number): string {
+  return text.length <= max ? text : `(${text.length - max} earlier characters left out) ...${text.slice(-max)}`;
 }
 
 function oneLine(text: string, max: number): string {

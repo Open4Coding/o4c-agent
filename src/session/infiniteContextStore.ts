@@ -53,7 +53,7 @@ export interface EntryRow {
 /**
  * One task - **one exchange**: a user message through the final answer, everything in between
  * (design brief 0004, Q6). The unit retrieval works in: search finds tasks, never loose entries,
- * and what it hands back is a task's *key parts* - `request`, `answer`, `errors`, `files` - which
+ * and what it hands back is a task's *key parts* - `request`, `answer`, `notes`, `errors`, `files` - which
  * are kept here, denormalized, so a search never reads the bulky entries (full tool outputs, file
  * contents, think blocks) that design doc 4.8 says drive the store's growth. Those can later be
  * archived without retrieval noticing (brief, Q10).
@@ -69,6 +69,13 @@ export interface TaskRow {
   title: string;
   request: string;
   answer: string;
+  /**
+   * What the task worked out on the way to its answer: the narration between tool calls that a
+   * later response replaced, and the end of each think block, one line each, newest kept
+   * (`TASK_NOTES_CHARS`). Schema 2, 2026-11-01 - on the tmp4 long run a research-heavy turn's
+   * findings lived only in probe output and think blocks, so the next turn re-derived them.
+   */
+  notes: string;
   errors: string;
   /** Paths the task wrote, one per line. */
   files: string;
@@ -162,6 +169,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   title TEXT NOT NULL,
   request TEXT NOT NULL,
   answer TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
   errors TEXT NOT NULL DEFAULT '',
   files TEXT NOT NULL DEFAULT '',
   outcome TEXT NOT NULL DEFAULT 'open',
@@ -176,23 +184,23 @@ CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id, sub_no);
 
 -- What a search reads: the key parts only. Same external-content recipe as entries_fts.
 CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
-  title, request, answer, errors, files, content='tasks', content_rowid='id'
+  title, request, answer, errors, files, notes, content='tasks', content_rowid='id'
 );
 CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
-  INSERT INTO tasks_fts(rowid, title, request, answer, errors, files)
-  VALUES (new.id, new.title, new.request, new.answer, new.errors, new.files);
+  INSERT INTO tasks_fts(rowid, title, request, answer, errors, files, notes)
+  VALUES (new.id, new.title, new.request, new.answer, new.errors, new.files, new.notes);
 END;
 CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
-  INSERT INTO tasks_fts(tasks_fts, rowid, title, request, answer, errors, files)
-  VALUES ('delete', old.id, old.title, old.request, old.answer, old.errors, old.files);
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, request, answer, errors, files, notes)
+  VALUES ('delete', old.id, old.title, old.request, old.answer, old.errors, old.files, old.notes);
 END;
 -- Only when a searchable column changes: used_count and outcome move on every search and every
 -- turn, and re-indexing the whole row for those would be pure waste.
-CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE OF title, request, answer, errors, files ON tasks BEGIN
-  INSERT INTO tasks_fts(tasks_fts, rowid, title, request, answer, errors, files)
-  VALUES ('delete', old.id, old.title, old.request, old.answer, old.errors, old.files);
-  INSERT INTO tasks_fts(rowid, title, request, answer, errors, files)
-  VALUES (new.id, new.title, new.request, new.answer, new.errors, new.files);
+CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE OF title, request, answer, errors, files, notes ON tasks BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, request, answer, errors, files, notes)
+  VALUES ('delete', old.id, old.title, old.request, old.answer, old.errors, old.files, old.notes);
+  INSERT INTO tasks_fts(rowid, title, request, answer, errors, files, notes)
+  VALUES (new.id, new.title, new.request, new.answer, new.errors, new.files, new.notes);
 END;
 
 CREATE TABLE IF NOT EXISTS task_entities (
@@ -280,8 +288,15 @@ CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_tag_id);
 `;
 
 /** Bumped whenever the schema changes shape. Version 1 is the first one that ever reached a real
- * project's `.o4c/db/` (2026-10-31); anything later needs a migration keyed on this. */
-export const HISTORY_SCHEMA_VERSION = 1;
+ * project's `.o4c/db/` (2026-10-31); anything later needs a migration keyed on this.
+ * 2 (2026-11-01): `tasks.notes`, also searched - see `migrate`. */
+export const HISTORY_SCHEMA_VERSION = 2;
+
+/** How much of a task's notes is kept - the newest, since later findings build on earlier ones. */
+export const TASK_NOTES_CHARS = 6000;
+
+/** How much of one note (a narration line, the end of a think block) is kept. */
+export const TASK_NOTE_CHARS = 400;
 
 /** How long a task title may be - the brief's "first line, about 80 characters". */
 export const TASK_TITLE_CHARS = 80;
@@ -322,10 +337,32 @@ export class InfiniteContextStore {
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA synchronous = NORMAL;');
+    const rebuildTaskIndex = this.migrate();
     this.db.exec(SCHEMA);
+    if (rebuildTaskIndex) this.db.exec(`INSERT INTO tasks_fts(tasks_fts) VALUES ('rebuild');`);
     this.db
-      .prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO NOTHING`)
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
       .run(String(HISTORY_SCHEMA_VERSION));
+  }
+
+  /**
+   * Brings a version-1 store up to date before `SCHEMA` runs (whose `IF NOT EXISTS` would
+   * otherwise keep the old shapes): adds `tasks.notes`, and drops the task index and its triggers
+   * so `SCHEMA` recreates them with the new column. Returns whether that index needs rebuilding.
+   */
+  private migrate(): boolean {
+    const columns = this.db.prepare(`PRAGMA table_info(tasks)`).all() as unknown as { name: string }[];
+    if (columns.length === 0 || columns.some((c) => c.name === 'notes')) return false;
+    this.db.exec(`
+      ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+      DROP TRIGGER IF EXISTS tasks_ai;
+      DROP TRIGGER IF EXISTS tasks_ad;
+      DROP TRIGGER IF EXISTS tasks_au;
+      DROP TABLE IF EXISTS tasks_fts;
+    `);
+    return true;
   }
 
   /** Idempotent - `/resume`ing a session, or replaying an already-known one, must not fail on a
@@ -576,6 +613,22 @@ export class InfiniteContextStore {
     this.db.prepare(`UPDATE tasks SET answer = ? WHERE id = ?`).run(answer, id);
   }
 
+  /** Appends one note line, keeping the newest `maxChars` - see `TaskRow.notes`. */
+  addTaskNote(id: number, note: string, maxChars = TASK_NOTES_CHARS): void {
+    const line = note.replace(/\s+/g, ' ').trim();
+    if (!line) return;
+    const task = this.getTask(id);
+    if (!task) return;
+    const clipped = line.length <= TASK_NOTE_CHARS ? line : `...${line.slice(-(TASK_NOTE_CHARS - 3))}`;
+    let notes = task.notes ? `${task.notes}\n${clipped}` : clipped;
+    if (notes.length > maxChars) {
+      // Whole lines only: a note cut in half reads as a different claim.
+      const cut = notes.indexOf('\n', notes.length - maxChars);
+      notes = cut === -1 ? clipped : notes.slice(cut + 1);
+    }
+    this.db.prepare(`UPDATE tasks SET notes = ? WHERE id = ?`).run(notes, id);
+  }
+
   /** Appends one error line, keeping the column bounded - it is a key part, read by every search
    * that returns this task, so it must stay small however badly the exchange went. */
   addTaskError(id: number, error: string, maxChars = 2000): void {
@@ -665,7 +718,7 @@ export class InfiniteContextStore {
   searchTasks(match: string, limit = 50, beforeTaskId?: number): TaskSearchRow[] {
     return this.db
       .prepare(
-        `SELECT t.*, bm25(tasks_fts, 4.0, 2.0, 1.0, 1.0, 3.0) AS bm25
+        `SELECT t.*, bm25(tasks_fts, 4.0, 2.0, 1.0, 1.0, 3.0, 1.0) AS bm25
          FROM tasks_fts JOIN tasks t ON t.id = tasks_fts.rowid
          WHERE tasks_fts MATCH ? AND t.id < ?
          ORDER BY bm25 LIMIT ?`,

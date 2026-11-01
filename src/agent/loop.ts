@@ -55,7 +55,7 @@ import {
 } from '../tools/toolOutput.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'tool_progress';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'info' | 'tool_progress';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -623,6 +623,7 @@ export class AgentLoop {
     options: { contextWindow?: number },
     warn: SeamWarning,
     beforeNewMessage = false,
+    info?: (text: string) => void,
   ): Promise<void> {
     if (!this.core.hasRequestHooks()) {
       this.requestProjection = undefined;
@@ -640,6 +641,7 @@ export class AgentLoop {
           : undefined,
         tokenRatio: this.tokenRatio,
         beforeNewMessage,
+        info,
       },
       warn,
     );
@@ -1021,6 +1023,8 @@ export class AgentLoop {
     const onProviderCall = options.onProviderCall ?? (() => {});
     /** Reports a core component degrading, on the channel App.tsx keeps a permanent record of. */
     const warnSeam = (text: string) => onEvent({ type: 'warning', text });
+    /** What a core component added that the user should see it added - `RequestBuild.info`. */
+    const infoSeam = (text: string) => onEvent({ type: 'info', text });
     // The caller's own `onEntry` runs FIRST and unguarded - it is session persistence, and a
     // failure there should surface rather than be swallowed behind a component's. Core components
     // then observe, each one caught (see `CoreRegistry.notifyEntry`). Left as the bare callback
@@ -1138,7 +1142,7 @@ export class AgentLoop {
         // The compaction above changed the entry set, so the cached projection is stale by
         // construction; without this the progress check below would compare the new estimate
         // against a projection taken before the compaction.
-        await this.refreshRequestProjection(options, warnSeam, beforeNewMessage);
+        await this.refreshRequestProjection(options, warnSeam, beforeNewMessage, infoSeam);
         const after = this.hybridPromptTokenEstimate(options.modeInstruction);
         if (after >= before) return; // no progress this round - stop retrying, let hardStopMessage decide
       }
@@ -1149,7 +1153,7 @@ export class AgentLoop {
       // Before anything reads an estimate: the triggers below measure what the seam will actually
       // send, and with a request hook registered that is not the same as the visible history.
       // `true`: the new message is not in history yet - see `RequestBuild.beforeNewMessage`.
-      await this.refreshRequestProjection(options, warnSeam, true);
+      await this.refreshRequestProjection(options, warnSeam, true, infoSeam);
       this.maybeMicroCompact(options.contextWindow, compactionSettings, onEvent, onEntry, options.modeInstruction);
       await this.maybeCompact(
         options.contextWindow,
@@ -1287,7 +1291,7 @@ export class AgentLoop {
       // `CoreComponent.buildRequest`). Run before the estimate is read, because since 2026-10-22
       // the estimate is of this projection rather than of the whole history; skipped entirely,
       // not merely a no-op pipeline, when nothing is registered.
-      await this.refreshRequestProjection(options, warnSeam);
+      await this.refreshRequestProjection(options, warnSeam, false, infoSeam);
       const requestEntries = this.requestProjection?.entries ?? this.entries;
       // Snapshotted right before the request goes out - response.usage.inputTokens (below) will
       // report what was actually sent as of exactly this moment, so this is the estimate value

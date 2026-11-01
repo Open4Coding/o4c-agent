@@ -19,6 +19,9 @@ import { diffEntities, snapshotEntities } from './taskEntities.js';
  * opens the next; everything until the next one is filed under it. A short message (under
  * `FOLLOW_UP_MAX_WORDS` words) is taken as a follow-up of the previous task and numbered under it
  * (`#502.1`) - the brief's starting rule, whose only failure is a misplaced number.
+ *
+ * Besides the answer, a task keeps **notes** (`TaskRow.notes`): replaced narration and the end of
+ * each think block, so what a research-heavy turn found survives into search and `curated`.
  */
 
 /** A message with fewer words than this is filed as a follow-up of the previous task. */
@@ -76,9 +79,15 @@ export class HistoryRecorder implements CoreComponent {
     store.insertEntry({ ...entry, session_id: sessionId }, this.currentTaskId);
 
     if (entry.type === 'ai' && entry.sub_type === 'response' && entry.content.trim() !== '') {
-      // The last response of the exchange is its answer; narration between tool calls is
-      // overwritten by whatever comes after it.
+      // The last response of the exchange is its answer. Narration between tool calls is replaced
+      // by whatever comes after it, so the replaced text moves to the task's notes.
+      const replaced = store.getTask(this.currentTaskId)?.answer;
+      if (replaced) store.addTaskNote(this.currentTaskId, replaced);
       store.setTaskAnswer(this.currentTaskId, entry.content);
+    } else if (entry.type === 'ai' && entry.sub_type === 'think' && entry.content.trim() !== '') {
+      // Where a think block lands is what the model concluded from the step before - the part
+      // worth keeping; the reasoning that led there stays in `entries`.
+      store.addTaskNote(this.currentTaskId, entry.content);
     } else if (entry.type === 'ai' && entry.sub_type === 'toolcallresponse' && looksLikeToolError(entry.content)) {
       store.addTaskError(this.currentTaskId, entry.content);
     } else if (entry.type === 'system' && entry.sub_type === 'error') {

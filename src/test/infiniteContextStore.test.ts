@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   HISTORY_SCHEMA_VERSION,
   InfiniteContextStore,
   INFINITE_CONTEXT_DB_FILENAME,
+  TASK_NOTE_CHARS,
   TASK_TITLE_CHARS,
   deriveTaskTitle,
   taskNumber,
@@ -311,4 +313,69 @@ test('markWorked sets and clears the manual mark', async () => {
     store.markWorked(task.id, null);
     assert.equal(store.getTask(task.id)!.worked, null);
   });
+});
+
+test('task notes: one line each, a long note keeps its end, the column keeps the newest whole lines', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: 1 });
+    const task = store.startTask({ session_id: 's1', request: 'parse CREATE TABLE' });
+    store.addTaskNote(task.id, '  GENERATED   is a\nkeyword  ');
+    store.addTaskNote(task.id, '   ');
+    store.addTaskNote(task.id, `${'x'.repeat(1000)} so MATCH takes an identifier`);
+    const notes = store.getTask(task.id)!.notes.split('\n');
+    assert.equal(notes[0], 'GENERATED is a keyword');
+    assert.equal(notes.length, 2, 'a blank note adds nothing');
+    assert.equal(notes[1].length, TASK_NOTE_CHARS);
+    assert.ok(notes[1].endsWith('so MATCH takes an identifier'));
+
+    for (let i = 0; i < 10; i++) store.addTaskNote(task.id, `finding ${i}`, 40);
+    assert.equal(store.getTask(task.id)!.notes, 'finding 6\nfinding 7\nfinding 8\nfinding 9');
+  });
+});
+
+test('task notes are searched', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: 1 });
+    const task = store.startTask({ session_id: 's1', request: 'fix the parser' });
+    store.addTaskNote(task.id, 'DEFERRABLE needs INITIALLY before IMMEDIATE');
+    assert.deepEqual(store.searchTasks('"deferrable"').map((t) => t.id), [task.id]);
+  });
+});
+
+test('a version-1 store is migrated: notes column added, old tasks still searchable, version stamped', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-infinitecontext-test-'));
+  const dbPath = join(dir, 'db', INFINITE_CONTEXT_DB_FILENAME);
+  mkdirSync(join(dir, 'db'));
+  const v1 = new DatabaseSync(dbPath);
+  v1.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+    INSERT INTO meta VALUES ('schema_version', '1');
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at INTEGER NOT NULL, worktree_path TEXT) STRICT;
+    INSERT INTO sessions VALUES ('s1', 't', 1, NULL);
+    CREATE TABLE tasks (
+      id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), parent_task_id INTEGER REFERENCES tasks(id),
+      sub_no INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL, request TEXT NOT NULL, answer TEXT NOT NULL DEFAULT '',
+      errors TEXT NOT NULL DEFAULT '', files TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT 'open', worked INTEGER,
+      used_count INTEGER NOT NULL DEFAULT 0, started_at INTEGER NOT NULL, finished_at INTEGER
+    ) STRICT;
+    CREATE VIRTUAL TABLE tasks_fts USING fts5(title, request, answer, errors, files, content='tasks', content_rowid='id');
+    CREATE TRIGGER tasks_ai AFTER INSERT ON tasks BEGIN
+      INSERT INTO tasks_fts(rowid, title, request, answer, errors, files)
+      VALUES (new.id, new.title, new.request, new.answer, new.errors, new.files);
+    END;
+    INSERT INTO tasks (session_id, title, request, answer, started_at) VALUES ('s1', 'lexer', 'write the lexer', 'tokenizer done', 1);
+  `);
+  v1.close();
+
+  const store = new InfiniteContextStore(dbPath);
+  try {
+    assert.equal(store.schemaVersion(), HISTORY_SCHEMA_VERSION);
+    assert.deepEqual(store.searchTasks('"tokenizer"').map((t) => t.title), ['lexer'], 'old rows re-indexed');
+    const old = store.searchTasks('"tokenizer"')[0];
+    store.addTaskNote(old.id, 'quoted identifiers use double quotes');
+    assert.deepEqual(store.searchTasks('"quoted"').map((t) => t.id), [old.id], 'new triggers cover notes');
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
