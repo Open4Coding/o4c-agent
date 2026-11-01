@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ContextEntry } from '../agent/contextEntry.js';
+import { PLANS_SCHEMA, PlanStore } from './planStore.js';
 
 /** `history.db` itself - the WAL sidecars (`-wal`/`-shm`) appear alongside it during normal use
  * and fold back into this file on checkpoint. See docs/o4c-agent-design.md §4.1/§4.2.
@@ -289,8 +290,9 @@ CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_tag_id);
 
 /** Bumped whenever the schema changes shape. Version 1 is the first one that ever reached a real
  * project's `.o4c/db/` (2026-10-31); anything later needs a migration keyed on this.
- * 2 (2026-11-01): `tasks.notes`, also searched - see `migrate`. */
-export const HISTORY_SCHEMA_VERSION = 2;
+ * 2 (2026-11-01): `tasks.notes`, also searched - see `migrate`.
+ * 3 (2026-11-01): plans and their checklists (`planStore.ts`) - new tables only, so no migration. */
+export const HISTORY_SCHEMA_VERSION = 3;
 
 /** How much of a task's notes is kept - the newest, since later findings build on earlier ones. */
 export const TASK_NOTES_CHARS = 6000;
@@ -331,6 +333,7 @@ function toEpochMs(iso: string | undefined, fallback: number): number {
  */
 export class InfiniteContextStore {
   private db: DatabaseSync;
+  private planStore: PlanStore | undefined;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -339,6 +342,7 @@ export class InfiniteContextStore {
     this.db.exec('PRAGMA synchronous = NORMAL;');
     const rebuildTaskIndex = this.migrate();
     this.db.exec(SCHEMA);
+    this.db.exec(PLANS_SCHEMA);
     if (rebuildTaskIndex) this.db.exec(`INSERT INTO tasks_fts(tasks_fts) VALUES ('rebuild');`);
     this.db
       .prepare(
@@ -743,6 +747,12 @@ export class InfiniteContextStore {
     this.db.prepare(`UPDATE search_log SET picked = ? WHERE id = ?`).run(all.join(','), searchId);
     const bump = this.db.prepare(`UPDATE tasks SET used_count = used_count + 1 WHERE id = ?`);
     for (const id of picked) bump.run(id);
+  }
+
+  /** Plans and checklists, on this same connection - see `planStore.ts` for why. */
+  plans(): PlanStore {
+    this.planStore ??= new PlanStore(this.db);
+    return this.planStore;
   }
 
   schemaVersion(): number {
