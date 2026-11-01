@@ -208,6 +208,11 @@ export class PlanStore {
     this.db.prepare(`UPDATE plans SET ${sets}, updated_at = ? WHERE id = ?`).run(...keys.map((k) => fields[k]!), now, id);
   }
 
+  /** Records the file stem a plan was exported to, so the startup import never brings it back in. */
+  setSourceFile(planId: number, stem: string): void {
+    this.db.prepare(`UPDATE plans SET source_file = ? WHERE id = ?`).run(stem, planId);
+  }
+
   items(planId: number): PlanItemRow[] {
     return this.db
       .prepare(`SELECT * FROM plan_items WHERE plan_id = ? ORDER BY position`)

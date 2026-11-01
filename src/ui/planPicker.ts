@@ -23,7 +23,7 @@ export function planPickerRows(plans: PlanStore): ChoiceRow[] {
   });
 }
 
-export type PlanAction = 'view' | 'full' | 'activate' | 'park';
+export type PlanAction = 'view' | 'full' | 'activate' | 'park' | 'export';
 
 export function planActionRows(plan: PlanRow, sessionId: string): ChoiceRow<PlanAction>[] {
   const rows: ChoiceRow<PlanAction>[] = [
@@ -35,6 +35,7 @@ export function planActionRows(plan: PlanRow, sessionId: string): ChoiceRow<Plan
   } else {
     rows.push({ key: 'activate', label: 'Make active - o4c keeps it in view while it works (one active plan at a time)' });
   }
+  rows.push({ key: 'export', label: 'Export - write it to .o4c/plans/ as .plan.md + .checklist.md, for git and editors (a snapshot)' });
   return rows;
 }
 

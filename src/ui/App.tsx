@@ -16,6 +16,7 @@ import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from
 import { parsePlanCommand, planPrompt, savePlanFromAnswer, type PlanHooks } from '../session/planAuthoring.js';
 import { ULTRAPLAN_MAX_ITERATIONS } from '../session/ultraplanResearch.js';
 import { formatPlan } from '../session/planView.js';
+import { exportPlan } from '../session/planExport.js';
 import { PLAN_PICKER_TITLE, planActionRows, planActionTitle, planPickerRows, type ChoiceRow, type PlanAction } from './planPicker.js';
 import { SelectList } from './SelectList.js';
 import { TAB_USED_KEY } from './tabHint.js';
@@ -1476,6 +1477,17 @@ export function App({
             pushBlock([infoLine('No plan chosen.')]);
           } else if (action === 'view' || action === 'full') {
             pushBlock([infoLine(formatPlan(plans.store, plan, { full: action === 'full' }).join('\n'))]);
+          } else if (action === 'export') {
+            if (!projectRoot) {
+              pushBlock([infoLine('Exporting needs a trusted project to write into.')]);
+            } else {
+              try {
+                const files = await exportPlan(projectRoot, plans.store, plan);
+                pushBlock([infoLine(`Exported to ${files.planFile} and ${files.checklistFile}. They are a snapshot - export again after changes.`)]);
+              } catch (err) {
+                pushBlock([{ kind: 'error', text: `Export failed: ${formatError(err)}` }]);
+              }
+            }
           } else if (action === 'activate') {
             plans.store.activate(plan.id, plans.sessionId);
             pushBlock([infoLine(`${planActionTitle(plan).split(' (')[0]} is now the active plan.`)]);

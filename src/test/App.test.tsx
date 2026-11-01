@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -4058,6 +4059,30 @@ test('/view-plan with no plans, or no project, says what to do instead of openin
       const without = await setup({ dir });
       await submit(without.stdin, '/view-plan');
       await waitFor(() => anyFrameSays(without.frames, 'Plans need a trusted project'));
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test('/view-plan Export writes the two files into the project and says where', async () => {
+  await withTempDir(async (dir) => {
+    const store = new PlanTestStore(join(dir, 'history.db'));
+    try {
+      const plans: PlanHooks = { store: store.plans(), sessionId: 's1', changed: () => {}, currentTask: () => undefined };
+      plans.store.createPlan({ name: 'Export Plans', items: [{ text: 'one' }] });
+      const { stdin, frames } = await setup({ dir, plans, projectRoot: dir });
+      await submit(stdin, '/view-plan');
+      await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameIncludes(frames, 'Export - write it to .o4c/plans/'));
+      for (let i = 0; i < 3; i++) {
+        stdin.write(DOWN);
+        await tick(30);
+      }
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameSays(frames, 'They are a snapshot - export again after changes.'));
+      assert.ok(existsSync(join(dir, '.o4c', 'plans', '0001.ExportPlans.checklist.md')));
     } finally {
       store.close();
     }
