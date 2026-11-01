@@ -7,6 +7,7 @@ import {
   aiThinkEntry,
   aiToolCallEntry,
   aiToolCallResponseEntry,
+  systemNoticeEntry,
   userInputEntry,
   type ContextEntry,
 } from '../agent/contextEntry.js';
@@ -179,4 +180,19 @@ test('full view is still bounded, so one enormous result cannot flood the termin
   const line = formatEvent({ type: 'tool_result', toolOutput: huge }, 'full') ?? '';
   assert.ok(line.length < FULL_ENTRY_CAP_CHARS + 200, 'capped at the per-line limit');
   assert.match(line, /\(\+5,000 more characters, full text in the session file\)/);
+});
+
+test('formatEntries shows o4c\'s own notices, and a /plan turn as the command typed, not its planning prompt', () => {
+  const lines = formatEntries([
+    userInputEntry('/plan add sayHello\n\nMake a plan for the goal above...\n## Checklist'),
+    aiResponseEntry('# Plan\n## Checklist\n- [ ] one'),
+    systemNoticeEntry('Saved as plan 0001 "Plan" (1 item), now the active plan.'),
+    userInputEntry('/planned trip\nsecond line'),
+  ]);
+  assert.deepEqual(lines.map((l) => l.text), [
+    '[user]\n/plan add sayHello',
+    '[response]\n# Plan\n## Checklist\n- [ ] one',
+    '[info]\nSaved as plan 0001 "Plan" (1 item), now the active plan.',
+    '[user]\n/planned trip\nsecond line',
+  ]);
 });

@@ -34,7 +34,8 @@ export function parseSessionView(value: unknown): SessionView {
 // rule rather than two copies that drifted apart. Re-exported because callers (and tests) have
 // always imported them from here.
 import { capFull } from './formatEvent.js';
-import { RESPONSE_TAG, RESULT_TAG, THINK_TAG, labelled, toolTag, userLine } from './labels.js';
+import { RESPONSE_TAG, RESULT_TAG, THINK_TAG, infoLine, labelled, toolTag, userLine } from './labels.js';
+import { parsePlanCommand } from '../session/planAuthoring.js';
 export { FULL_ENTRY_CAP_CHARS, capFull } from './formatEvent.js';
 
 function clip(text: string, max: number): string {
@@ -129,8 +130,18 @@ export function formatEntries(
     if (entry.type === 'user' && entry.sub_type === 'input') {
       toolEvents = 0;
       summary = null;
-      lines.push(userLine(entry.content));
+      // A /plan turn sent its planning prompt, whose first line is the command the user typed -
+      // and the command is what was on screen live, so it is what the repaint shows.
+      const firstLine = entry.content.split('\n')[0];
+      lines.push(userLine(parsePlanCommand(firstLine)?.goal ? firstLine : entry.content));
       if (entry.images?.length) lines.push({ kind: 'system', text: `  (attached: ${entry.images.join(', ')})` });
+      return;
+    }
+    // o4c's own notes kept with the session (`AgentLoop.addNotice`), e.g. "Saved as plan 0001".
+    // Skipped until 2026-11-01, so the one line saying where a /plan went vanished with the
+    // per-turn reload's repaint - found on David's first hands-on /plan.
+    if (entry.type === 'system' && entry.sub_type === 'info') {
+      lines.push(infoLine(entry.content));
       return;
     }
     if (entry.type !== 'ai') return;
