@@ -34,6 +34,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { CoreComponent, ToolCallContext } from '../agent/coreSeam.js';
+import { estimateTextTokens } from '../agent/contextEntry.js';
+import { fitToBudget, rankDefinitions } from './ranker.js';
 import type { GraphStore } from './graphStore.js';
 import { indexSource, repoRelative, type IndexRunResult } from './indexer.js';
 import { runIndexPassInProcess, type RunIndexPass } from './indexPass.js';
@@ -325,6 +327,17 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   }
 
   // ---------------------------------------------------------------- the one verb
+
+  /**
+   * The ranked definition map for a focus, fitted to `maxTokens` - `/ultraplan`'s research step
+   * (brief 0005, Q6). Undefined until the first index pass is ready, or when nothing ranks.
+   */
+  rankedMap(focus: { idents: readonly string[]; files: readonly string[] }, maxTokens: number): string | undefined {
+    if (this.status().phase !== 'ready') return undefined;
+    const ranking = rankDefinitions(this.store, { mentionedIdents: focus.idents, mentionedFiles: focus.files });
+    const fitted = fitToBudget(ranking.definitions, { maxTokens, countTokens: estimateTextTokens });
+    return fitted.used > 0 ? fitted.text : undefined;
+  }
 
   describeName(name: string, fromPath?: string): string {
     return renderNameProjection(this.store, name, {

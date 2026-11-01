@@ -14,6 +14,7 @@ import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice }
 
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { parsePlanCommand, planPrompt, savePlanFromAnswer, type PlanHooks } from '../session/planAuthoring.js';
+import { ULTRAPLAN_MAX_ITERATIONS } from '../session/ultraplanResearch.js';
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { listPlans, plansReport } from '../session/plansStore.js';
@@ -2017,7 +2018,10 @@ export function App({
         // `/plan <goal>`: the same turn with a planning prompt, run read-only, its answer saved as a
         // plan below. The echo above stays the user's own short command.
         const planCommand = plans ? parsePlanCommand(input) : undefined;
-        const sent = planCommand ? planPrompt(planCommand) : input;
+        // `/ultraplan` (Q6): o4c's fixed research steps run first and go into the prompt; the model
+        // then thinks harder and gets a bounded follow-up of its own.
+        const ultra = planCommand?.kind === 'ultraplan';
+        const sent = planCommand ? planPrompt(planCommand, ultra ? plans?.research?.(planCommand.goal) : undefined) : input;
         turnModeRef.current = planCommand ? 'plan' : undefined;
 
         const responseLines: Line[] = [];
@@ -2064,8 +2068,8 @@ export function App({
             toolOutputDir,
             // `/think`'s level, read fresh per turn via the ref so a change made while a turn
             // was queued still applies to it.
-            thinkLevel: thinkLevelRef.current,
-            maxIterations,
+            thinkLevel: ultra && THINK_LEVELS.indexOf(thinkLevelRef.current ?? DEFAULT_THINK_LEVEL) < THINK_LEVELS.indexOf('high') ? 'high' : thinkLevelRef.current,
+            maxIterations: ultra ? Math.min(maxIterations ?? ULTRAPLAN_MAX_ITERATIONS, ULTRAPLAN_MAX_ITERATIONS) : maxIterations,
             // The full request/response wire transcript - "the sends", distinct from onEvent's
             // already-derived AgentEvent stream below (which only ever carries the *response*
             // side, split/reshaped for display). Fire-and-forget, same reasoning as runLogger's

@@ -22,6 +22,8 @@ export interface PlanHooks {
   /** Re-offers `update_plan` once a first plan exists (`syncPlanTool` in cli.ts). */
   readonly changed: () => void;
   readonly currentTask: () => number | undefined;
+  /** `/ultraplan`'s fixed research steps for a goal (`ultraplanResearch.ts`). Absent: none run. */
+  readonly research?: (goal: string) => string;
 }
 
 export interface PlanCommand {

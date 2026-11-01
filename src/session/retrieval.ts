@@ -140,7 +140,7 @@ export class HistoryRetrieval {
   }
 
   /** Logs a search and remembers what it showed, so a later `open` can be credited to it. */
-  record(source: 'tool' | 'pointer' | 'curated', query: string, shown: readonly RankedThread[]): number | undefined {
+  record(source: 'tool' | 'pointer' | 'curated' | 'ultraplan', query: string, shown: readonly RankedThread[]): number | undefined {
     try {
       const ids = shown.map((t) => t.root.id);
       const id = this.options.store.recordSearch({ session_id: this.options.sessionId, task_id: this.options.currentTask() ?? null, source, query, shown: ids });

@@ -43,6 +43,7 @@ import { createHistoryTool } from './session/historyTool.js';
 import { createPlanTool } from './session/planTool.js';
 import { importPlanFiles } from './session/planImport.js';
 import type { PlanHooks } from './session/planAuthoring.js';
+import { gatherUltraplanResearch } from './session/ultraplanResearch.js';
 import { curatedHistory } from './session/curated.js';
 import { markWorkedCommand } from './session/workedCommand.js';
 import { contextWindowTypeFromConfig } from './ui/contextWindowSetting.js';
@@ -950,6 +951,12 @@ program
           sessionId,
           changed: () => syncPlanTool(),
           currentTask: () => history.recorder.currentTask(),
+          research: (goal) =>
+            gatherUltraplanResearch(goal, {
+              store: history.store,
+              retrieval,
+              graphMap: graph ? (focus, maxTokens) => graph.component.rankedMap(focus, maxTokens) : undefined,
+            }),
         },
       );
       return;

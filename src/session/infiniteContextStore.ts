@@ -118,7 +118,7 @@ export interface SearchLogInput {
   /** The task that was running when the search happened. */
   task_id: number | null;
   /** Which surface searched: the model's own tool, the pointer hint, or curated context. */
-  source: 'tool' | 'pointer' | 'curated';
+  source: 'tool' | 'pointer' | 'curated' | 'ultraplan';
   query: string;
   shown: readonly number[];
 }

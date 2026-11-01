@@ -3969,3 +3969,28 @@ test('/plan <goal> plans read-only in any mode and saves the answer as the activ
     }
   });
 });
+
+test('/ultraplan puts o4c\'s gathered research into the planning prompt and saves an ultraplan', async () => {
+  await withTempDir(async (dir) => {
+    const store = new PlanTestStore(join(dir, 'history.db'));
+    try {
+      const provider = new PlanAnswerProvider();
+      const goals: string[] = [];
+      const plans: PlanHooks = {
+        store: store.plans(),
+        sessionId: 's1',
+        changed: () => {},
+        currentTask: () => undefined,
+        research: (goal) => (goals.push(goal), 'Past tasks: #4 export draft'),
+      };
+      const { stdin, frames } = await setup({ dir, provider, plans });
+      await submit(stdin, '/ultraplan rework the export');
+      await waitFor(() => anyFrameSays(frames, 'Saved as plan 0001 "Export Plans"'));
+      assert.deepEqual(goals, ['rework the export']);
+      assert.match(provider.lastUser, /--- gathered by o4c ---\nPast tasks: #4 export draft\n--- end ---/);
+      assert.equal(plans.store.activePlan('s1')!.kind, 'ultraplan');
+    } finally {
+      store.close();
+    }
+  });
+});
