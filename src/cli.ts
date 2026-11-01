@@ -40,6 +40,8 @@ import {
 import { contextTypeComponent } from './agent/contextTypeComponent.js';
 import { HistoryRetrieval } from './session/retrieval.js';
 import { createHistoryTool } from './session/historyTool.js';
+import { createPlanTool } from './session/planTool.js';
+import { importPlanFiles } from './session/planImport.js';
 import { curatedHistory } from './session/curated.js';
 import { markWorkedCommand } from './session/workedCommand.js';
 import { contextWindowTypeFromConfig } from './ui/contextWindowSetting.js';
@@ -805,6 +807,26 @@ program
       };
       syncHistoryTool(contextWindowType.current());
       contextWindowType.onChange(syncHistoryTool);
+    }
+
+    // Plans (brief 0005): `.o4c/plans/*.md` written before plans moved into history.db are imported
+    // (once per plan - safe on every start), then `update_plan` is offered while any plan exists.
+    // `syncPlanTool` is re-run by the commands that create a plan.
+    let syncPlanTool = () => {};
+    if (history) {
+      const plans = history.store.plans();
+      const planTool = createPlanTool({ plans, sessionId, currentTask: () => history.recorder.currentTask() });
+      syncPlanTool = () => {
+        loop.removeTools([planTool.name]);
+        if (plans.listPlans().length > 0) loop.addTools([planTool]);
+      };
+      syncPlanTool();
+      void importPlanFiles(trusted ? projectRoot : undefined, plans)
+        .then((result) => {
+          recordLifecycle(lifecycleDir, 'history', { plansImported: result.imported.length, renumbered: result.renumbered });
+          if (result.imported.length > 0) syncPlanTool();
+        })
+        .catch(() => {});
     }
 
     // The Code Graph - build step 4, in the core tier rather than the MCP tier (design doc §5.1's
