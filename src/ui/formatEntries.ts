@@ -1,6 +1,6 @@
 import type { ContextEntry } from '../agent/contextEntry.js';
 import type { AgentEvent } from '../agent/loop.js';
-import { TOOL_CALL_PREVIEW_CHARS, formatEvent } from './formatEvent.js';
+import { TOOL_CALL_PREVIEW_CHARS, formatEvent, toolCallText } from './formatEvent.js';
 
 export { TOOL_CALL_PREVIEW_CHARS };
 import type { Line } from './types.js';
@@ -103,7 +103,7 @@ export function formatEntries(
       // Full view: every tool event, whole, no [scan] collapse.
       const text =
         event.type === 'tool_call'
-          ? labelled(toolTag(event.toolName ?? '?'), capFull(JSON.stringify(event.toolInput ?? {})))
+          ? labelled(toolTag(event.toolName ?? '?'), toolCallText(event.toolName ?? '?', event.toolInput ?? {}, 'full'))
           : labelled(RESULT_TAG, capFull(event.toolOutput ?? ''));
       lines.push({ kind: event.type === 'tool_call' ? 'tool_call' : 'tool_result', text });
       return;

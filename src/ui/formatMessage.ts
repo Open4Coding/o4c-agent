@@ -1,6 +1,7 @@
 import type { Message } from '../providers/types.js';
 import type { Line } from './types.js';
 import { RESPONSE_TAG, RESULT_TAG, labelled, toolTag, userLine } from './labels.js';
+import { toolCallText } from './formatEvent.js';
 
 /**
  * Formats a single raw message (role, content, tool calls, tool results) into display lines.
@@ -17,7 +18,7 @@ export function formatMessage(msg: Message): Line[] {
     for (const call of msg.toolCalls ?? []) {
       lines.push({
         kind: 'tool_call',
-        text: labelled(toolTag(call.name), `${JSON.stringify(call.input)} id=${call.id}`),
+        text: labelled(toolTag(call.name), toolCallText(call.name, call.input, 'full', call.id)),
       });
     }
   } else if (msg.role === 'tool') {

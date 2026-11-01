@@ -532,7 +532,7 @@ function LineText({ line }: { line: Line }) {
       </Text>
     );
   }
-  const segments = line.kind === 'final' && !line.color ? fencedSegments(line.text) : undefined;
+  const segments = (line.kind === 'final' || line.kind === 'tool_call') && !line.color ? fencedSegments(line.text) : undefined;
   if (segments) {
     return (
       <Text>
