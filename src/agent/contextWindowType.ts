@@ -41,8 +41,12 @@ export const CURATED_RECENT_EXCHANGES = 3;
  * 229K window by themselves and `curated` sent more than `floating` would. Past this share, the
  * oldest tool rounds are cut at a safe boundary - the sliding window's own rule - and the current
  * turn is always kept whole.
+ *
+ * 0.35 rather than the half it started at: the cut is measured in the chars/4 estimate, and on
+ * code-heavy content real tokens ran about 1.3x that, so "half" landed near 65% and, with the
+ * curated history on top, tripped the 80% compaction line on the very first request of a turn.
  */
-export const CURATED_RECENT_FRACTION = 0.5;
+export const CURATED_RECENT_FRACTION = 0.35;
 
 export interface ContextWindowType {
   readonly type: ContextWindowTypeName;
