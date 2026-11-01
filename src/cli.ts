@@ -44,6 +44,7 @@ import { createPlanTool } from './session/planTool.js';
 import { importPlanFiles } from './session/planImport.js';
 import type { PlanHooks } from './session/planAuthoring.js';
 import { gatherUltraplanResearch } from './session/ultraplanResearch.js';
+import { planContextComponent } from './session/planContext.js';
 import { curatedHistory } from './session/curated.js';
 import { markWorkedCommand } from './session/workedCommand.js';
 import { contextWindowTypeFromConfig } from './ui/contextWindowSetting.js';
@@ -825,6 +826,11 @@ program
         if (plans.listPlans().length > 0) loop.addTools([planTool]);
       };
       syncPlanTool();
+      // Q7: the active plan's current item rides along with every request. After the context
+      // window type component, so it adds to whatever that projection kept.
+      loop.registerCore(
+        planContextComponent({ plans, sessionId, enabled: () => contextWindowType.current().type !== 'none' }),
+      );
       void importPlanFiles(trusted ? projectRoot : undefined, plans)
         .then((result) => {
           recordLifecycle(lifecycleDir, 'history', { plansImported: result.imported.length, renumbered: result.renumbered });
