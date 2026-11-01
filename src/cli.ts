@@ -379,6 +379,10 @@ program
   )
   .option('--image <path>', 'path to an image file to attach (vision-capable providers only)')
   .option('--resume <sessionId>', 'resume a saved session by id (used internally by /resume)')
+  .option(
+    '--session <sessionId>',
+    'one-shot only: continue the saved session with this id (or start it), and save it afterwards - lets a script drive a multi-turn session without the TUI',
+  )
   .option('--mode <mode>', 'start in this mode: manual, auto, acceptEdits or plan (used internally when the session reloads)')
   .option(
     '--window <size>',
@@ -388,7 +392,7 @@ program
     '--profile <name>',
     'named preset (~/.o4c/profiles/<name>.json) to seed this project\'s config.json from on first trust - only has an effect the one time a project is first trusted; ignored on an already-trusted project. See "o4c-agent-design.md" §1.5/§5.',
   )
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; profile?: string; mode?: string; window?: string }) => {
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; session?: string; profile?: string; mode?: string; window?: string }) => {
     const prompt = promptParts.join(' ');
 
     // Before anything that can block - the trust gate prompts, the server probes wait, and a
@@ -691,7 +695,7 @@ program
     // (/clear, /resume, the per-turn reload) is a fresh process, so one process is one session.
     // The history store files entries under it from the first one; App saves under it too, so the
     // two always agree. See AppProps.sessionId.
-    const sessionId = opts.resume ?? randomUUID();
+    const sessionId = opts.resume ?? opts.session ?? randomUUID();
     // Restored before the first turn, because o4c reloads itself after most of them and
     // `--window` is how the setting gets across - the same mechanism `--mode` uses, for the
     // same reason. An unparseable value is ignored rather than refused: it can only come from
@@ -912,6 +916,16 @@ program
       return;
     }
 
+    // `--session`: a headless multi-turn session, one process per message - how a script drives a
+    // long run (e.g. the C:\tmp.tmp4 test project) through every context window type, which only
+    // differ in what carries across messages. Loaded before the run, saved after it whatever happens,
+    // so a crashed or failed message still leaves the session continuable.
+    const oneShotStore = opts.session ? new SessionStore(sessionsDirFor(projectRoot), sessionsToSave) : undefined;
+    if (oneShotStore && opts.session) {
+      const data = await oneShotStore.load(opts.session);
+      if (data) loop.loadEntries(data.entries);
+    }
+
     try {
       const finalAnswer = await loop.run(prompt, {
         images: opts.image ? [opts.image] : undefined,
@@ -929,6 +943,13 @@ program
       printError(err);
       process.exitCode = 1;
     } finally {
+      if (oneShotStore && loop.getEntries().length > 0) {
+        try {
+          await oneShotStore.save(loop.getEntries(), sessionId);
+        } catch (err) {
+          printError(err);
+        }
+      }
       // One-shot mode ends by falling off the end of the action, with no process.exit() of its
       // own, so without this a spawned server could keep the event loop alive after the answer
       // has already been printed - the same class of hang the explicit exit in runRepl exists for.
