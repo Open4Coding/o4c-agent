@@ -1242,3 +1242,20 @@ test('countExternalCall adds a call made outside the turn (curated\'s pre-turn c
   loop.countExternalCall({ content: 'q', toolCalls: [], stopReason: 'end_turn' });
   assert.deepEqual({ ...loop.getUsage() }, { inputTokens: 120, outputTokens: 8, requestCount: 2 });
 });
+
+test('a tool call cut off at the output limit is reported to the model, not resumed as text (tmp4 run)', async () => {
+  const provider = new FakeProvider([
+    { content: 'Writing the parser now.', toolCalls: [], stopReason: 'max_tokens', truncatedToolCall: { name: 'write_file', argumentChars: 98765 } },
+    { content: 'Split it into three files instead.', toolCalls: [], stopReason: 'end_turn' },
+  ]);
+  const loop = new AgentLoop(provider, [], 'system');
+  const warnings: string[] = [];
+  const result = await loop.run('write the parser', { onEvent: (e) => { if (e.type === 'warning' && e.text) warnings.push(e.text); } });
+
+  assert.equal(result, 'Split it into three files instead.');
+  const second = provider.receivedRequests[1].messages;
+  const last = second[second.length - 1];
+  assert.equal(last.role, 'user', 'the retry ends on the notice, not on a prefill of the cut-off text');
+  assert.match(last.content, /write_file call was cut off at the output limit after 98,765 characters.*file was not written.*smaller calls/s);
+  assert.ok(warnings.some((w) => /write_file call was cut off/.test(w)));
+});

@@ -122,6 +122,14 @@ export interface CompletionResponse {
    * or interprets them itself. */
   thinkingSignature?: string;
   redactedThinking?: string;
+  /**
+   * A tool call the output limit cut off mid-arguments, which the provider had to drop because
+   * its JSON never finished. Without this the loop only sees a cut-off reply and asks the model to
+   * continue its text, so the model never learns its `write_file` was not run - and on the tmp4
+   * long run (2026-11-01) it tried to write a whole parser in one call. Set only alongside
+   * `stopReason: 'max_tokens'`.
+   */
+  truncatedToolCall?: { name: string; argumentChars: number };
 }
 
 export interface LLMProvider {

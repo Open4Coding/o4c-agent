@@ -279,3 +279,17 @@ test('tool-call arguments report their progress as they stream, so a long write_
   assert.deepEqual(progress, [['write_file', 10], ['write_file', 34], ['write_file', 43]]);
   assert.equal(result.toolCalls[0].input.path, 'a.html');
 });
+
+test('a tool call whose arguments the output limit cut off is dropped and reported, only on a length stop', async () => {
+  const cut = () => sseStream([
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'write_file', arguments: '{"path":"p.ts","content":"export ' } }] } }] }),
+  ]);
+  const stopped = await parseSseStream(sseStream([
+    sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'write_file', arguments: '{"path":"p.ts","content":"export ' } }] } }] }),
+    sse({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+  ]));
+  assert.deepEqual(stopped.toolCalls, []);
+  assert.deepEqual(stopped.truncatedToolCall, { name: 'write_file', argumentChars: 33 });
+  const noLength = await parseSseStream(cut());
+  assert.equal(noLength.truncatedToolCall, undefined, 'a malformed call without a length stop is not a cutoff');
+});

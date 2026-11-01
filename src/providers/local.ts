@@ -475,12 +475,13 @@ export class LocalProvider implements LLMProvider {
     const prefill = lastMessage?.role === 'assistant' ? lastMessage.content : '';
     const streamOnToken =
       prefill && request.onToken ? createPrefillEchoFilter(prefill, request.onToken) : request.onToken;
-    const { content, toolCalls, finishReason, usage } = await parseSseStream(idleBody, streamOnToken, request.onToolProgress);
+    const { content, toolCalls, truncatedToolCall, finishReason, usage } = await parseSseStream(idleBody, streamOnToken, request.onToolProgress);
     return {
       content,
       toolCalls,
       stopReason: mapStopReason(finishReason),
       usage,
+      ...(truncatedToolCall ? { truncatedToolCall } : {}),
     };
   }
 }
@@ -563,6 +564,8 @@ interface StreamedOpenAIChunk {
 interface ParsedStream {
   content: string;
   toolCalls: ToolCall[];
+  /** A call dropped because its arguments never finished - see `CompletionResponse`. */
+  truncatedToolCall?: { name: string; argumentChars: number };
   finishReason: string;
   usage: { inputTokens: number; outputTokens: number; tokensPerSecond?: number } | undefined;
 }
@@ -653,12 +656,15 @@ export async function parseSseStream(
   // unparseable call and let the caller's existing max_tokens handling (loop.ts auto-continues on
   // a `max_tokens` stopReason) retry the round, exactly as it would for any other cut-off response.
   const toolCalls: ToolCall[] = [];
+  let truncatedToolCall: ParsedStream['truncatedToolCall'];
   for (const [, call] of [...toolCallsByIndex.entries()].sort(([a], [b]) => a - b)) {
     let input: Record<string, unknown>;
     try {
       input = JSON.parse(call.args || '{}') as Record<string, unknown>;
     } catch {
-      continue; // truncated/malformed arguments - see above
+      // Truncated/malformed arguments - see above. Remembered, so the loop can tell the model.
+      truncatedToolCall = { name: call.name || 'tool', argumentChars: call.args.length };
+      continue;
     }
     toolCalls.push({ id: call.id, name: call.name, input });
   }
@@ -667,5 +673,11 @@ export async function parseSseStream(
   // from every other provider - the rest of the pipeline (AgentLoop, ContextEntry) needs no
   // changes to handle a model whose reasoning arrives via this separate API field instead of
   // inline tags in `content`.
-  return { content: reasoning ? `<think>${reasoning}</think>${content}` : content, toolCalls, finishReason, usage };
+  return {
+    content: reasoning ? `<think>${reasoning}</think>${content}` : content,
+    toolCalls,
+    ...(truncatedToolCall && finishReason === 'length' ? { truncatedToolCall } : {}),
+    finishReason,
+    usage,
+  };
 }

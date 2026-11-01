@@ -1524,7 +1524,28 @@ export class AgentLoop {
       // instead of starting over. Only a cutoff with no tool call is a continuation: with a tool
       // call the loop runs the tools and the request properly ends on their results. Narrower than
       // `cutoffChain`, which is about reclaiming tokens and takes any cutoff.
-      continuationEntries = isMaxTokensCutoff && response.toolCalls.length === 0 ? [...roundEntries] : [];
+      // A cut-off TOOL CALL is not a sentence that can be resumed: its arguments were dropped, so
+      // continuing the text only leads the model to start the same oversized call again. Say what
+      // happened instead, as a message the next request ends on (found on the tmp4 long run,
+      // 2026-11-01). Still counted as a cutoff above, so a model that keeps trying anyway is
+      // stopped by the same guard.
+      const truncated = isMaxTokensCutoff ? response.truncatedToolCall : undefined;
+      if (truncated) {
+        const size = truncated.argumentChars.toLocaleString('en-US');
+        onEvent({ type: 'warning', text: `A ${truncated.name} call was cut off at the output limit after ${size} characters - asking the model to split it.` });
+        this.appendEntry(
+          {
+            ...userInputEntry(
+              `Your ${truncated.name} call was cut off at the output limit after ${size} characters of arguments, so it was not run` +
+                (truncated.name === 'write_file' ? ' and the file was not written' : '') +
+                '. Split the work into smaller calls - for a large file, several smaller files - each well under that size.',
+            ),
+            tags: [CONTINUATION_TAG],
+          },
+          onEntry,
+        );
+      }
+      continuationEntries = isMaxTokensCutoff && response.toolCalls.length === 0 && !truncated ? [...roundEntries] : [];
 
       for (const call of response.toolCalls) {
         checkAborted();
