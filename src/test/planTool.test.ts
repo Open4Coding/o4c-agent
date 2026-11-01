@@ -8,6 +8,7 @@ import { InfiniteContextStore, INFINITE_CONTEXT_DB_FILENAME } from '../session/i
 import { createPlanTool } from '../session/planTool.js';
 import type { PlanStore } from '../session/planStore.js';
 import type { Tool } from '../tools/types.js';
+import { formatItemDetail } from '../session/planView.js';
 
 /** Brief 0005, checklist P3: `update_plan`, the model's side of a plan. */
 
@@ -94,5 +95,26 @@ test('which plan: named, else active, else the only open one, else a list to cho
     assert.match(await tool.execute({ action: 'show' }), /^Plan 0001 Alpha - open, active/);
     assert.match(await tool.execute({ action: 'show', plan: 2 }), /^Plan 0002 Beta/);
     assert.match(await tool.execute({ action: 'show', plan: 9 }), /^There is no plan 0009\./);
+  });
+});
+
+test('formatItemDetail: the item level of /view-plan - text, checks, verification, done time, notes, tasks', async () => {
+  await withTool(async ({ plans }) => {
+    const plan = plans.createPlan({ name: 'p', items: [{ text: 'write it\nin two lines', checks: 'tests pass' }, { text: 'b' }] });
+    plans.setItemStatus(plan.id, 1, 'done', { verification: 'npm test 3/3', note: 'first try' }, Date.UTC(2026, 10, 1, 12, 30));
+    plans.linkTask(plan.id, 1, 7);
+    assert.deepEqual(formatItemDetail(plans, plan, plans.getItem(plan.id, 1)!), [
+      'Item 1 of 2 in plan 0001 - [x] done',
+      'write it',
+      'in two lines',
+      'Checks:',
+      '  - tests pass',
+      'Verification: npm test 3/3',
+      'Done: 2026-11-01 12:30',
+      'Notes:',
+      '  first try',
+      'Worked on in tasks: #7',
+    ]);
+    assert.deepEqual(formatItemDetail(plans, plan, plans.getItem(plan.id, 2)!), ['Item 2 of 2 in plan 0001 - [ ] not started', 'b', 'Worked on in tasks: none yet']);
   });
 });

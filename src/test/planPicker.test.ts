@@ -18,9 +18,9 @@ test('plan rows, action rows (park only for the active plan) and item rows with 
     plans.setItemStatus(plan.id, 1, 'done', { verification: 'ok' });
     assert.deepEqual(planPickerRows(plans), [{ key: String(plan.id), label: '0001 Export - open, 1 of 2 items finished - Two files.' }]);
 
-    assert.deepEqual(planActionRows(plan, 's1').map((r) => r.key), ['view', 'full', 'activate', 'edit', 'export']);
+    assert.deepEqual(planActionRows(plan, 's1').map((r) => r.key), ['view', 'full', 'checklist', 'activate', 'export']);
     plans.activate(plan.id, 's1');
-    assert.deepEqual(planActionRows(plans.getPlan(plan.id)!, 's1').map((r) => r.key), ['view', 'full', 'park', 'edit', 'export']);
+    assert.deepEqual(planActionRows(plans.getPlan(plan.id)!, 's1').map((r) => r.key), ['view', 'full', 'checklist', 'park', 'export']);
 
     assert.deepEqual(planItemRows(plans, plan), [
       { key: '1', label: '[x] 1. a' },
@@ -34,9 +34,9 @@ test('plan rows, action rows (park only for the active plan) and item rows with 
 });
 
 test('item operations leave out the moves that cannot happen', () => {
-  assert.deepEqual(planItemOpRows(1, 3).map((r) => r.key), ['reword', 'down', 'remove', 'add']);
-  assert.deepEqual(planItemOpRows(3, 3).map((r) => r.key), ['reword', 'up', 'remove', 'add']);
-  assert.deepEqual(planItemOpRows(1, 1).map((r) => r.key), ['reword', 'remove', 'add']);
+  assert.deepEqual(planItemOpRows(1, 3).map((r) => r.key), ['none', 'reword', 'down', 'remove', 'add']);
+  assert.deepEqual(planItemOpRows(3, 3).map((r) => r.key), ['none', 'reword', 'up', 'remove', 'add']);
+  assert.deepEqual(planItemOpRows(1, 1).map((r) => r.key), ['none', 'reword', 'remove', 'add']);
 });
 
 test('parsePlanEditCommand: the two hidden commands, with their text; anything else is not one', () => {

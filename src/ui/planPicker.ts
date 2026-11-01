@@ -23,24 +23,24 @@ export function planPickerRows(plans: PlanStore): ChoiceRow[] {
   });
 }
 
-export type PlanAction = 'view' | 'full' | 'activate' | 'park' | 'export' | 'edit';
+export type PlanAction = 'view' | 'full' | 'checklist' | 'activate' | 'park' | 'export';
 
 export function planActionRows(plan: PlanRow, sessionId: string): ChoiceRow<PlanAction>[] {
   const rows: ChoiceRow<PlanAction>[] = [
     { key: 'view', label: 'View - summary, then the checklist' },
     { key: 'full', label: 'View full - the whole plan, then the checklist' },
+    { key: 'checklist', label: 'Checklist - open an item for its checks, notes and tasks, or change it' },
   ];
   if (plan.active_session === sessionId) {
     rows.push({ key: 'park', label: 'Park - stop sending it with every request; it stays saved' });
   } else {
     rows.push({ key: 'activate', label: 'Make active - o4c keeps it in view while it works (one active plan at a time)' });
   }
-  rows.push({ key: 'edit', label: 'Edit items - reword, move, remove or add checklist items, no model call' });
   rows.push({ key: 'export', label: 'Export - write it to .o4c/plans/ as .plan.md + .checklist.md, for git and editors (a snapshot)' });
   return rows;
 }
 
-/** Edit items, step 1: which item - every item with its mark, plus adding one at the end. */
+/** The checklist level: every item with its mark, plus adding one at the end. */
 export function planItemRows(plans: PlanStore, plan: PlanRow): ChoiceRow[] {
   const rows: ChoiceRow[] = plans.items(plan.id).map((item) => ({
     key: String(item.position),
@@ -50,11 +50,17 @@ export function planItemRows(plans: PlanStore, plan: PlanRow): ChoiceRow[] {
   return rows;
 }
 
-export type PlanItemOp = 'reword' | 'up' | 'down' | 'remove' | 'add';
+export type PlanItemOp = 'none' | 'reword' | 'up' | 'down' | 'remove' | 'add';
 
-/** Edit items, step 2: what to do with item `position` of `count`. Moves that cannot happen are left out. */
+/**
+ * The item level, shown under the item's details: what to do with item `position` of `count`.
+ * "Leave it" first, so Enter after reading changes nothing. Moves that cannot happen are left out.
+ */
 export function planItemOpRows(position: number, count: number): ChoiceRow<PlanItemOp>[] {
-  const rows: ChoiceRow<PlanItemOp>[] = [{ key: 'reword', label: 'Reword - edit its text in the input box, then Enter' }];
+  const rows: ChoiceRow<PlanItemOp>[] = [
+    { key: 'none', label: 'Leave it - just looking' },
+    { key: 'reword', label: 'Reword - edit its text in the input box, then Enter' },
+  ];
   if (position > 1) rows.push({ key: 'up', label: 'Move up' });
   if (position < count) rows.push({ key: 'down', label: 'Move down' });
   rows.push({ key: 'remove', label: 'Remove - the items after it move up' });

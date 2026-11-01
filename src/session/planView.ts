@@ -54,4 +54,24 @@ export function formatChecklist(plans: PlanStore, plan: PlanRow, items = plans.i
   return lines;
 }
 
+const STATUS_WORDS: Record<PlanItemStatus, string> = { open: 'not started', doing: 'in progress', done: 'done', skipped: 'skipped' };
+
+/**
+ * One checklist item in full - the level under the checklist in `/view-plan` (plan -> checklist ->
+ * item). Everything the row stores, readable: its checks, how it was verified, its notes, and the
+ * history tasks that worked on it (`#N`, the numbers `search_history` opens).
+ */
+export function formatItemDetail(plans: PlanStore, plan: PlanRow, item: PlanItemRow): string[] {
+  const count = plans.items(plan.id).length;
+  const lines = [`Item ${item.position} of ${count} in plan ${formatPlanNo(plan.number)} - ${MARK[item.status]} ${STATUS_WORDS[item.status]}`, ...item.text.split('\n')];
+  const checks = item.checks.split('\n').filter(Boolean);
+  if (checks.length > 0) lines.push('Checks:', ...checks.map((c) => `  - ${c}`));
+  if (item.verification) lines.push(`Verification: ${item.verification}`);
+  if (item.done_at) lines.push(`Done: ${new Date(item.done_at).toISOString().replace('T', ' ').slice(0, 16)}`);
+  if (item.notes) lines.push('Notes:', ...item.notes.split('\n').map((n) => `  ${n}`));
+  const tasks = plans.itemTasks(item.id);
+  lines.push(tasks.length > 0 ? `Worked on in tasks: ${tasks.map((t) => `#${t}`).join(', ')}` : 'Worked on in tasks: none yet');
+  return lines;
+}
+
 export const PLAN_STATUS_MARKS = MARK;

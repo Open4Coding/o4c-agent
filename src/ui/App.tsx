@@ -15,7 +15,7 @@ import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice }
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { parsePlanCommand, planPrompt, savePlanFromAnswer, type PlanHooks } from '../session/planAuthoring.js';
 import { ULTRAPLAN_MAX_ITERATIONS } from '../session/ultraplanResearch.js';
-import { formatChecklist, formatPlan } from '../session/planView.js';
+import { formatChecklist, formatItemDetail, formatPlan } from '../session/planView.js';
 import { exportPlan } from '../session/planExport.js';
 import { importPlanFiles } from '../session/planImport.js';
 import {
@@ -1521,14 +1521,17 @@ export function App({
             pushBlock([infoLine('No plan chosen.')]);
           } else if (action === 'view' || action === 'full') {
             pushBlock([infoLine(formatPlan(plans.store, plan, { full: action === 'full' }).join('\n'))]);
-          } else if (action === 'edit') {
-            const which = await pickChoice(planActionTitle(plan).replace(' (', ' - which item? ('), planItemRows(plans.store, plan));
+          } else if (action === 'checklist') {
+            // The nested level: plan -> its checklist -> one item, shown in full, then what to do with it.
+            const which = await pickChoice(planActionTitle(plan).replace(' (', ' - checklist ('), planItemRows(plans.store, plan));
             const count = plans.store.items(plan.id).length;
             const no = formatPlanNo(plan.number);
-            const op: PlanItemOp | undefined =
-              which === undefined ? undefined : which === 'end' ? 'add' : await pickChoice<PlanItemOp>(`Item ${which} (↑/↓ to choose, Enter to select, Esc to cancel):`, planItemOpRows(Number(which), count));
             const position = which === 'end' ? count : Number(which);
-            if (!op) {
+            const item = which === undefined || which === 'end' ? undefined : plans.store.getItem(plan.id, position);
+            if (item) pushBlock([infoLine(formatItemDetail(plans.store, plan, item).join('\n'))]);
+            const op: PlanItemOp | undefined =
+              which === undefined ? undefined : which === 'end' ? 'add' : await pickChoice<PlanItemOp>(`Item ${which} (↑/↓ to choose, Enter to select, Esc to cancel):`, planItemOpRows(position, count));
+            if (!op || op === 'none') {
               pushBlock([infoLine('Nothing changed.')]);
             } else if (op === 'reword') {
               // The text is the part a dropdown cannot collect: hand it to the input box, finished there.

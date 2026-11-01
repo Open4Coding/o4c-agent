@@ -37,3 +37,11 @@ picker, and any future one) follows these rules:
   future source of dynamic rows needs the same treatment.
 - Do not start a command description with the picker's own title text: tests (and people) detect a picker by its
   title, and the `/set` list shows every description.
+
+## Every database and table gets a `/view-` command
+
+David's rule (2026-11-01): whenever a database or a table is created - a new `.db` file, a new
+table in `history.db` / `datagraph.db`, or a new column set that changes what a table holds - the
+same change adds a way to look into it from the terminal: a `/view-...` command that opens a
+dropdown (built on `SelectList`, per the rules above) and shows the rows in readable form. No
+database content should ever need an outside SQLite tool to inspect. `/view-plan` is the first one.

@@ -31,8 +31,10 @@ and gets up to 15 tool rounds to look into what is still unclear.
   - **View** - the header and summary, then the checklist (Enter, Enter is this).
   - **View full** - the whole plan text, then the checklist.
   - **Make active** / **Park** - only the active plan is kept in view while o4c works.
-  - **Edit items** - pick an item, then reword, move, remove, or add one after it. No model call.
-    Rewording and adding put a command with the text in the input box for you to finish.
+  - **Checklist** - the checklist as a level of its own: pick an item to see it in full (checks,
+    verification, notes, the past tasks that worked on it), then leave it, or reword, move, remove,
+    or add one after it. No model call. Rewording and adding put a command with the text in the
+    input box for you to finish.
   - **Export** - writes `.o4c/plans/NNNN.Name.plan.md` and `.checklist.md`, for git and editors.
 
 The checklist always comes last, so it ends right above the input box. Marks: `[ ]` not started,

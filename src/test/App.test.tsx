@@ -4030,10 +4030,10 @@ test('/view-plan: pick a plan, then View (checklist last) / View full / Make act
       await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
       stdin.write(ENTER);
       await waitFor(() => anyFrameIncludes(frames, 'Make active'));
-      stdin.write(DOWN);
-      await tick(30);
-      stdin.write(DOWN);
-      await tick(30);
+      for (let i = 0; i < 3; i++) {
+        stdin.write(DOWN);
+        await tick(30);
+      }
       stdin.write(ENTER);
       await waitFor(() => anyFrameSays(frames, 'Plan 0002 Export Plans is now the active plan.'));
       assert.equal(plans.store.activePlan('s1')!.id, p.id);
@@ -4089,7 +4089,7 @@ test('/view-plan Export writes the two files into the project and says where', a
   });
 });
 
-test('/view-plan Edit items: move without a model call, and reword through the input box', async () => {
+test('/view-plan Checklist: an item opens in full, then moves without a model call or rewords through the input box', async () => {
   await withTempDir(async (dir) => {
     const store = new PlanTestStore(join(dir, 'history.db'));
     try {
@@ -4100,20 +4100,23 @@ test('/view-plan Edit items: move without a model call, and reword through the i
         await submit(stdin, '/view-plan');
         await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
         stdin.write(ENTER);
-        await waitFor(() => anyFrameIncludes(frames, 'Edit items'));
-        for (let i = 0; i < 3; i++) {
+        await waitFor(() => anyFrameIncludes(frames, 'Checklist - open an item'));
+        for (let i = 0; i < 2; i++) {
           stdin.write(DOWN);
           await tick(30);
         }
         stdin.write(ENTER);
-        await waitFor(() => anyFrameIncludes(frames, 'which item?'));
+        await waitFor(() => anyFrameIncludes(frames, '- checklist ('));
       };
 
       await openEdit();
       stdin.write(ENTER); // item 1
       await waitFor(() => anyFrameIncludes(frames, 'Move down'));
-      stdin.write(DOWN);
-      await tick(30);
+      assert.ok(anyFrameSays(frames, 'Item 1 of 2 in plan 0001 - [ ] not started'), 'the item is shown in full first');
+      for (let i = 0; i < 2; i++) {
+        stdin.write(DOWN);
+        await tick(30);
+      }
       stdin.write(ENTER); // Move down
       await waitFor(() => anyFrameSays(frames, 'Plan 0001: moved item 1 down.'));
       assert.deepEqual(plans.store.items(plan.id).map((i) => i.text), ['beta', 'alpha']);
@@ -4121,6 +4124,8 @@ test('/view-plan Edit items: move without a model call, and reword through the i
       await openEdit();
       stdin.write(ENTER); // item 1 (beta)
       await waitFor(() => anyFrameIncludes(frames, 'Reword - edit its text'));
+      stdin.write(DOWN);
+      await tick(30);
       stdin.write(ENTER); // Reword
       await waitFor(() => anyFrameIncludes(frames, '/plan-reword 1 1 beta'));
       stdin.write(' gamma');
