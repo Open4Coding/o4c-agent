@@ -17,6 +17,7 @@ const MAX_TOKEN_RATIO = 3;
 const MAX_RESPONSE_TOKENS = 32768;
 
 import {
+  CONTINUATION_TAG,
   aiCompactionEntry,
   aiPruneEntry,
   aiResponseEntry,
@@ -1446,7 +1447,7 @@ export class AgentLoop {
             ? 'The model returned an empty reply - asking it to continue once.'
             : 'The model stopped mid-reply - asking it to continue once.',
         });
-        this.appendEntry(userInputEntry('Continue with the task.'), onEntry);
+        this.appendEntry({ ...userInputEntry('Continue with the task.'), tags: [CONTINUATION_TAG] }, onEntry);
         continue;
       }
       if (isToolUse) {

@@ -4,6 +4,7 @@ import React from 'react';
 import { render } from 'ink';
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { RESTART_EXIT_CODE, buildRestartArgs, runSupervisor, writeHandoff } from './restartHandoff.js';
 import { parseWindowSetting, windowArgFor } from './ui/windowSetting.js';
@@ -32,6 +33,7 @@ import { ConfigStore } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
 import { startMcpSession, type McpSession } from './mcp/startup.js';
 import { startCodeGraph, type CodeGraphSession } from './graph/startup.js';
+import { startHistory } from './session/historyStartup.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import type { ThinkCaps } from './agent/thinkLevel.js';
 
@@ -185,6 +187,7 @@ async function runRepl(
   showTabHint?: boolean,
   mcp?: McpSession,
   graph?: CodeGraphSession,
+  sessionId?: string,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -252,6 +255,7 @@ async function runRepl(
       runLogger,
       fullContextLogger,
       initialSession,
+      sessionId,
       restart,
       initialMode,
       sessionView,
@@ -664,6 +668,11 @@ program
     }
 
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
+    // This process's session id, decided now rather than at the first save - every session switch
+    // (/clear, /resume, the per-turn reload) is a fresh process, so one process is one session.
+    // The history store files entries under it from the first one; App saves under it too, so the
+    // two always agree. See AppProps.sessionId.
+    const sessionId = opts.resume ?? randomUUID();
     // Restored before the first turn, because o4c reloads itself after most of them and
     // `--window` is how the setting gets across - the same mechanism `--mode` uses, for the
     // same reason. An unparseable value is ignored rather than refused: it can only come from
@@ -693,6 +702,21 @@ program
     // flush in runRepl. Synchronous because 'exit' permits nothing else; the graceful close is
     // attempted first, below, on the paths that can await.
     process.on('exit', () => mcp.killAllNow());
+
+    // The history store - NextUp item 13. Registered BEFORE the graph, which makes it the outer of
+    // the two `aroundTool` wrappers and leaves the graph innermost, as the graph's own note below
+    // asks. The recorder only observes - it reads a file before a write and diffs it after, and
+    // returns the tool's result untouched - so wrapping the graph changes nothing the graph sees.
+    const history = startHistory({
+      projectRoot: trusted ? projectRoot : undefined,
+      sessionId,
+      enabled: () => true,
+    });
+    if (history) {
+      loop.registerCore(history.recorder);
+      process.on('exit', () => history.close());
+    }
+    recordLifecycle(lifecycleDir, 'history', { opened: history !== undefined });
 
     // The Code Graph - build step 4, in the core tier rather than the MCP tier (design doc §5.1's
     // revision: it has to change what a tool call *returns*, which a server cannot express).
@@ -803,6 +827,7 @@ program
         showTabHint,
         mcp,
         graph,
+        sessionId,
       );
       return;
     }

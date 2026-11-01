@@ -4,7 +4,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { InfiniteContextStore, INFINITE_CONTEXT_DB_FILENAME } from '../session/infiniteContextStore.js';
+import {
+  HISTORY_SCHEMA_VERSION,
+  InfiniteContextStore,
+  INFINITE_CONTEXT_DB_FILENAME,
+  TASK_TITLE_CHARS,
+  deriveTaskTitle,
+  taskNumber,
+} from '../session/infiniteContextStore.js';
 import { userInputEntry, aiResponseEntry, aiToolCallEntry, type ContextEntry } from '../agent/contextEntry.js';
 
 async function withStore(fn: (store: InfiniteContextStore, dbPath: string) => void): Promise<void> {
@@ -174,5 +181,134 @@ test('insertEntry writes tags carried directly on ContextEntry.tags', async () =
     const found = store.entriesByTag('error');
     assert.equal(found.length, 1);
     assert.equal(found[0].entry_uid, entry.id);
+  });
+});
+
+// ---- Tasks, follow-ups, entity links, search log (brief 0004, NextUp items 13/23) ----
+
+test('a fresh store stamps its schema version', async () => {
+  await withStore((store) => {
+    assert.equal(store.schemaVersion(), HISTORY_SCHEMA_VERSION);
+  });
+});
+
+test('deriveTaskTitle: first non-empty line, whitespace collapsed, cut at the limit', () => {
+  assert.equal(deriveTaskTitle('\n\n  fix   the CRLF bug\nin the installer'), 'fix the CRLF bug');
+  const long = deriveTaskTitle('word '.repeat(40));
+  assert.equal(long.length, TASK_TITLE_CHARS);
+  assert.ok(long.endsWith('...'));
+  assert.equal(deriveTaskTitle(''), '');
+});
+
+test('startTask opens a top-level task titled from the request; entries are filed under it', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: Date.now() });
+    const task = store.startTask({ session_id: 's1', request: 'create a copy of the game tetris in html' });
+    assert.equal(task.title, 'create a copy of the game tetris in html');
+    assert.equal(task.parent_task_id, null);
+    assert.equal(task.sub_no, 0);
+    assert.equal(task.outcome, 'open');
+    assert.equal(taskNumber(task), `#${task.id}`);
+
+    const entry = withSessionId(userInputEntry('create a copy of the game tetris in html'), 's1');
+    store.insertEntry(entry, task.id);
+    assert.equal(store.getByUid(entry.id)!.task_id, task.id);
+  });
+});
+
+test('follow-ups number under the top-level task, and a follow-up of a follow-up joins the same thread', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: Date.now() });
+    const root = store.startTask({ session_id: 's1', request: 'make tetris' });
+    const first = store.startTask({ session_id: 's1', request: 'try again', followUpOf: root.id });
+    const second = store.startTask({ session_id: 's1', request: 'faster', followUpOf: first.id });
+    assert.equal(taskNumber(first), `#${root.id}.1`);
+    assert.equal(taskNumber(second), `#${root.id}.2`);
+    assert.deepEqual(store.followUps(root.id).map((t) => t.id), [first.id, second.id]);
+    assert.equal(store.getTaskByNumber(`#${root.id}.2`)!.id, second.id);
+    assert.equal(store.getTaskByNumber(String(root.id))!.id, root.id);
+    assert.equal(store.getTaskByNumber('nonsense'), undefined);
+    assert.equal(store.lastTask('s1')!.id, second.id);
+  });
+});
+
+test('key parts: answer, bounded errors, files once; finishTask decides done or incomplete', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: Date.now() });
+    const answered = store.startTask({ session_id: 's1', request: 'a' });
+    store.setTaskAnswer(answered.id, 'the answer');
+    store.addTaskFile(answered.id, 'src/a.ts');
+    store.addTaskFile(answered.id, 'src/a.ts');
+    store.addTaskFile(answered.id, 'src/b.ts');
+    for (let i = 0; i < 50; i++) store.addTaskError(answered.id, `Command failed ${i} ${'x'.repeat(500)}`);
+    store.finishTask(answered.id);
+
+    const row = store.getTask(answered.id)!;
+    assert.equal(row.files, 'src/a.ts\nsrc/b.ts');
+    assert.ok(row.errors.length <= 2000, 'errors stay bounded');
+    assert.equal(row.outcome, 'done');
+    assert.ok(row.finished_at);
+
+    const silent = store.startTask({ session_id: 's1', request: 'b' });
+    store.finishTask(silent.id);
+    assert.equal(store.getTask(silent.id)!.outcome, 'incomplete');
+  });
+});
+
+test('searchTasks ranks over the key parts and leaves out the running task', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: Date.now() });
+    const crlf = store.startTask({ session_id: 's1', request: 'fix the CRLF bug in the bat installer' });
+    store.addTaskFile(crlf.id, 'scripts/install.bat');
+    const other = store.startTask({ session_id: 's1', request: 'write a README' });
+    const running = store.startTask({ session_id: 's1', request: 'the installer CRLF bug is back' });
+
+    const hits = store.searchTasks('"crlf" OR "installer"', 10, running.id);
+    assert.deepEqual(hits.map((h) => h.id), [crlf.id]);
+    assert.ok(hits[0].bm25 < 0, 'FTS5 bm25: more negative is more relevant');
+    assert.equal(store.searchTasks('"readme"').map((h) => h.id)[0], other.id);
+  });
+});
+
+test('task_entities link a task to definitions and files, both directions', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: Date.now() });
+    const task = store.startTask({ session_id: 's1', request: 'rotate fix' });
+    store.addTaskEntity({
+      task_id: task.id, path: 'tetris.js', entity_uid: 'uid-tryRotate', name: 'tryRotate', kind: 'function',
+      change: 'modified', hash_before: 'h1', hash_after: 'h2',
+    });
+    store.addTaskEntity({
+      task_id: task.id, path: 'tetris.html', entity_uid: null, name: null, kind: null,
+      change: 'written', hash_before: null, hash_after: null,
+    });
+    assert.equal(store.taskEntities(task.id).length, 2);
+    assert.equal(store.tasksForEntity('uid-tryRotate')[0].id, task.id);
+    assert.equal(store.tasksForPath('tetris.html')[0].id, task.id);
+  });
+});
+
+test('search_log: a search records what it showed, picks are recorded and counted as used', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: Date.now() });
+    const a = store.startTask({ session_id: 's1', request: 'a' });
+    const b = store.startTask({ session_id: 's1', request: 'b' });
+    const searchId = store.recordSearch({ session_id: 's1', task_id: b.id, source: 'tool', query: 'x', shown: [a.id] });
+    store.recordPicks(searchId, [a.id]);
+    store.recordPicks(searchId, [a.id]);
+    assert.equal(store.getTask(a.id)!.used_count, 2);
+    assert.equal(store.getTask(b.id)!.used_count, 0);
+  });
+});
+
+test('markWorked sets and clears the manual mark', async () => {
+  await withStore((store) => {
+    store.ensureSession({ id: 's1', title: 't', started_at: Date.now() });
+    const task = store.startTask({ session_id: 's1', request: 'a' });
+    assert.equal(task.worked, null);
+    store.markWorked(task.id, true);
+    assert.equal(store.getTask(task.id)!.worked, 1);
+    store.markWorked(task.id, null);
+    assert.equal(store.getTask(task.id)!.worked, null);
   });
 });

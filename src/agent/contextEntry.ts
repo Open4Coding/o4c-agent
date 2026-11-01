@@ -116,6 +116,10 @@ function newEntry(partial: Omit<ContextEntry, 'id' | 'session_id' | 'created_at'
   };
 }
 
+/** Tags the loop's own "Continue with the task." nudge - a `user`/`input` entry nobody typed, so
+ * the history recorder must not open a new task for it. */
+export const CONTINUATION_TAG = 'continuation';
+
 export function userInputEntry(content: string, images?: string[]): ContextEntry {
   return newEntry({ type: 'user', sub_type: 'input', content, images });
 }

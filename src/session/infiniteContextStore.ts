@@ -44,7 +44,75 @@ export interface EntryRow {
   is_correct: number | null;
   redacted: number;
   tool_call_id: string | null;
+  /** The task (one exchange) this entry belongs to - see `TaskRow`. Null for entries written
+   * outside any task, e.g. a system notice before the first message. */
+  task_id: number | null;
   content: string;
+}
+
+/**
+ * One task - **one exchange**: a user message through the final answer, everything in between
+ * (design brief 0004, Q6). The unit retrieval works in: search finds tasks, never loose entries,
+ * and what it hands back is a task's *key parts* - `request`, `answer`, `errors`, `files` - which
+ * are kept here, denormalized, so a search never reads the bulky entries (full tool outputs, file
+ * contents, think blocks) that design doc 4.8 says drive the store's growth. Those can later be
+ * archived without retrieval noticing (brief, Q10).
+ */
+export interface TaskRow {
+  id: number;
+  session_id: string;
+  /** The task this one follows up, always a top-level task. Null for a top-level task. */
+  parent_task_id: number | null;
+  /** 0 for a top-level task, 1..n for its follow-ups - shown as `#502.1`. */
+  sub_no: number;
+  /** The user's own message, first line, trimmed (brief, Q7). Never model-written. */
+  title: string;
+  request: string;
+  answer: string;
+  errors: string;
+  /** Paths the task wrote, one per line. */
+  files: string;
+  /** `open` while the exchange runs; `done` once a later task starts after it answered,
+   * `incomplete` if it never produced an answer. Not a judgement of correctness - that is
+   * `worked`, which is only ever set by hand. */
+  outcome: 'open' | 'done' | 'incomplete';
+  /** The manual "worked" mark (design doc 4.6's no-auto-inference rule, moved up to the task):
+   * null never marked, 1 worked, 0 did not. */
+  worked: number | null;
+  /** How often a search showed this task and the model picked it. Automatic; feeds ranking. */
+  used_count: number;
+  started_at: number;
+  finished_at: number | null;
+}
+
+/** A `TaskRow` with the BM25 relevance its search gave it - lower is better, SQLite's sign. */
+export interface TaskSearchRow extends TaskRow {
+  bm25: number;
+}
+
+/** One definition a task changed - the link to the Code Graph (brief, Q9). `entity_uid` and the
+ * hashes are `src/graph/entityId.ts`'s; null `entity_uid` means the file's language is not charted
+ * and only the file itself is linked. */
+export interface TaskEntityRow {
+  task_id: number;
+  path: string;
+  entity_uid: string | null;
+  name: string | null;
+  kind: string | null;
+  change: 'added' | 'modified' | 'renamed' | 'deleted' | 'written';
+  hash_before: string | null;
+  hash_after: string | null;
+}
+
+/** One search, as `search_log` keeps it: what was asked, what was shown, what was picked. */
+export interface SearchLogInput {
+  session_id: string;
+  /** The task that was running when the search happened. */
+  task_id: number | null;
+  /** Which surface searched: the model's own tool, the pointer hint, or curated context. */
+  source: 'tool' | 'pointer' | 'curated';
+  query: string;
+  shown: readonly number[];
 }
 
 export interface SearchFilters {
@@ -74,11 +142,82 @@ export interface SearchFilters {
  *    consolidated §4.7 SQL block was written before that note and never picked it up. Added here.
  */
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   started_at INTEGER NOT NULL,
   worktree_path TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  parent_task_id INTEGER REFERENCES tasks(id),
+  sub_no INTEGER NOT NULL DEFAULT 0,
+  title TEXT NOT NULL,
+  request TEXT NOT NULL,
+  answer TEXT NOT NULL DEFAULT '',
+  errors TEXT NOT NULL DEFAULT '',
+  files TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL DEFAULT 'open',
+  worked INTEGER,
+  used_count INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id, sub_no);
+
+-- What a search reads: the key parts only. Same external-content recipe as entries_fts.
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+  title, request, answer, errors, files, content='tasks', content_rowid='id'
+);
+CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
+  INSERT INTO tasks_fts(rowid, title, request, answer, errors, files)
+  VALUES (new.id, new.title, new.request, new.answer, new.errors, new.files);
+END;
+CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, request, answer, errors, files)
+  VALUES ('delete', old.id, old.title, old.request, old.answer, old.errors, old.files);
+END;
+-- Only when a searchable column changes: used_count and outcome move on every search and every
+-- turn, and re-indexing the whole row for those would be pure waste.
+CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE OF title, request, answer, errors, files ON tasks BEGIN
+  INSERT INTO tasks_fts(tasks_fts, rowid, title, request, answer, errors, files)
+  VALUES ('delete', old.id, old.title, old.request, old.answer, old.errors, old.files);
+  INSERT INTO tasks_fts(rowid, title, request, answer, errors, files)
+  VALUES (new.id, new.title, new.request, new.answer, new.errors, new.files);
+END;
+
+CREATE TABLE IF NOT EXISTS task_entities (
+  task_id INTEGER NOT NULL REFERENCES tasks(id),
+  path TEXT NOT NULL,
+  entity_uid TEXT,
+  name TEXT,
+  kind TEXT,
+  change TEXT NOT NULL,
+  hash_before TEXT,
+  hash_after TEXT
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_task_entities_task ON task_entities(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_entities_uid ON task_entities(entity_uid) WHERE entity_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_task_entities_path ON task_entities(path);
+
+CREATE TABLE IF NOT EXISTS search_log (
+  id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id INTEGER,
+  at INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  query TEXT NOT NULL,
+  shown TEXT NOT NULL,
+  picked TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS entries (
@@ -99,8 +238,11 @@ CREATE TABLE IF NOT EXISTS entries (
   is_correct INTEGER,
   redacted INTEGER NOT NULL DEFAULT 0,
   tool_call_id TEXT,
+  task_id INTEGER REFERENCES tasks(id),
   content TEXT NOT NULL
 ) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_entries_task ON entries(task_id);
 
 CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type, sub_type);
 CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id);
@@ -137,6 +279,25 @@ CREATE INDEX IF NOT EXISTS idx_entry_tags_tag ON entry_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_tag_id);
 `;
 
+/** Bumped whenever the schema changes shape. Version 1 is the first one that ever reached a real
+ * project's `.o4c/db/` (2026-10-31); anything later needs a migration keyed on this. */
+export const HISTORY_SCHEMA_VERSION = 1;
+
+/** How long a task title may be - the brief's "first line, about 80 characters". */
+export const TASK_TITLE_CHARS = 80;
+
+/** A task's title: the first non-empty line of what the user typed, whitespace collapsed, cut at
+ * `TASK_TITLE_CHARS`. Free and never wrong, because it is what was asked (brief, Q7). */
+export function deriveTaskTitle(request: string): string {
+  const line = request.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).find((l) => l !== '') ?? '';
+  return line.length > TASK_TITLE_CHARS ? `${line.slice(0, TASK_TITLE_CHARS - 3).trimEnd()}...` : line;
+}
+
+/** `#502` or `#502.1` - how a task is named everywhere it is shown. */
+export function taskNumber(task: Pick<TaskRow, 'id' | 'parent_task_id' | 'sub_no'>): string {
+  return task.parent_task_id === null ? `#${task.id}` : `#${task.parent_task_id}.${task.sub_no}`;
+}
+
 function toIntBool(value: boolean | undefined): number | null {
   return value === undefined ? null : value ? 1 : 0;
 }
@@ -162,6 +323,9 @@ export class InfiniteContextStore {
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA synchronous = NORMAL;');
     this.db.exec(SCHEMA);
+    this.db
+      .prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO NOTHING`)
+      .run(String(HISTORY_SCHEMA_VERSION));
   }
 
   /** Idempotent - `/resume`ing a session, or replaying an already-known one, must not fail on a
@@ -182,7 +346,7 @@ export class InfiniteContextStore {
    * (the `sessions` foreign key can't be satisfied) - a future `onEntry` subscriber must only call
    * this once a session id has actually been stamped in, not at raw append time.
    */
-  insertEntry(entry: ContextEntry): void {
+  insertEntry(entry: ContextEntry, taskId?: number): void {
     if (!entry.session_id) {
       throw new Error('InfiniteContextStore.insertEntry: entry.session_id must be set before persisting');
     }
@@ -194,8 +358,8 @@ export class InfiniteContextStore {
         `INSERT INTO entries (
           entry_uid, type, sub_type, session_id, created_at, processed_at,
           model_id, think_effort, mutating, duration_ms, retry_count,
-          input_tokens, output_tokens, is_correct, redacted, tool_call_id, content
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          input_tokens, output_tokens, is_correct, redacted, tool_call_id, task_id, content
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.id,
@@ -214,6 +378,7 @@ export class InfiniteContextStore {
         toIntBool(entry.is_correct ?? undefined),
         toIntBool(entry.redacted) ?? 0,
         entry.tool_call_id ?? null,
+        taskId ?? null,
         entry.content,
       );
 
@@ -341,6 +506,174 @@ export class InfiniteContextStore {
         ORDER BY e.id DESC
       `;
     return this.db.prepare(sql).all(tagName) as unknown as EntryRow[];
+  }
+
+  // ---- Tasks (brief 0004) ----
+
+  /**
+   * Opens a task for a new exchange. `followUpOf` makes it a follow-up: it is filed under that
+   * task's top-level task (a follow-up of a follow-up joins the same thread rather than nesting)
+   * with the next sub-number.
+   */
+  startTask(input: { session_id: string; request: string; started_at?: number; followUpOf?: number }): TaskRow {
+    let parent: number | null = null;
+    let subNo = 0;
+    if (input.followUpOf !== undefined) {
+      const of = this.getTask(input.followUpOf);
+      if (of) {
+        parent = of.parent_task_id ?? of.id;
+        const max = this.db
+          .prepare(`SELECT COALESCE(MAX(sub_no), 0) AS n FROM tasks WHERE parent_task_id = ?`)
+          .get(parent) as { n: number };
+        subNo = max.n + 1;
+      }
+    }
+    const result = this.db
+      .prepare(
+        `INSERT INTO tasks (session_id, parent_task_id, sub_no, title, request, started_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.session_id, parent, subNo, deriveTaskTitle(input.request), input.request, input.started_at ?? Date.now());
+    return this.getTask(Number(result.lastInsertRowid))!;
+  }
+
+  getTask(id: number): TaskRow | undefined {
+    return this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as TaskRow | undefined;
+  }
+
+  /** Resolves a task number as shown (`502`, `#502`, `502.1`, `#502.1`). */
+  getTaskByNumber(number: string): TaskRow | undefined {
+    const match = /^#?(\d+)(?:\.(\d+))?$/.exec(number.trim());
+    if (!match) return undefined;
+    const id = Number(match[1]);
+    if (match[2] === undefined) return this.getTask(id);
+    return this.db
+      .prepare(`SELECT * FROM tasks WHERE parent_task_id = ? AND sub_no = ?`)
+      .get(id, Number(match[2])) as TaskRow | undefined;
+  }
+
+  /** The session's most recent task, or undefined before its first. */
+  lastTask(sessionId: string): TaskRow | undefined {
+    return this.db
+      .prepare(`SELECT * FROM tasks WHERE session_id = ? ORDER BY id DESC LIMIT 1`)
+      .get(sessionId) as TaskRow | undefined;
+  }
+
+  /** A top-level task's follow-ups, in order. */
+  followUps(rootId: number): TaskRow[] {
+    return this.db
+      .prepare(`SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY sub_no`)
+      .all(rootId) as unknown as TaskRow[];
+  }
+
+  setTaskAnswer(id: number, answer: string): void {
+    this.db.prepare(`UPDATE tasks SET answer = ? WHERE id = ?`).run(answer, id);
+  }
+
+  /** Appends one error line, keeping the column bounded - it is a key part, read by every search
+   * that returns this task, so it must stay small however badly the exchange went. */
+  addTaskError(id: number, error: string, maxChars = 2000): void {
+    const task = this.getTask(id);
+    if (!task || task.errors.length >= maxChars) return;
+    const line = error.replace(/\s+/g, ' ').trim().slice(0, 300);
+    const errors = task.errors ? `${task.errors}\n${line}` : line;
+    this.db.prepare(`UPDATE tasks SET errors = ? WHERE id = ?`).run(errors.slice(0, maxChars), id);
+  }
+
+  /** Records a path the task wrote, once. */
+  addTaskFile(id: number, path: string): void {
+    const task = this.getTask(id);
+    if (!task || task.files.split('\n').includes(path)) return;
+    this.db.prepare(`UPDATE tasks SET files = ? WHERE id = ?`).run(task.files ? `${task.files}\n${path}` : path, id);
+  }
+
+  /** Closes a task: `done` if it answered, `incomplete` if not. */
+  finishTask(id: number, finishedAt = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE tasks SET outcome = CASE WHEN answer <> '' THEN 'done' ELSE 'incomplete' END, finished_at = ?
+         WHERE id = ? AND outcome = 'open'`,
+      )
+      .run(finishedAt, id);
+  }
+
+  /** The manual "worked" mark. `null` clears it. */
+  markWorked(id: number, worked: boolean | null): void {
+    this.db.prepare(`UPDATE tasks SET worked = ? WHERE id = ?`).run(worked === null ? null : worked ? 1 : 0, id);
+  }
+
+  addTaskEntity(row: TaskEntityRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO task_entities (task_id, path, entity_uid, name, kind, change, hash_before, hash_after)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.task_id, row.path, row.entity_uid, row.name, row.kind, row.change, row.hash_before, row.hash_after);
+  }
+
+  taskEntities(taskId: number): TaskEntityRow[] {
+    return this.db.prepare(`SELECT * FROM task_entities WHERE task_id = ?`).all(taskId) as unknown as TaskEntityRow[];
+  }
+
+  /** Tasks that touched a definition, newest first - the code-to-history direction (brief, Q9). */
+  tasksForEntity(entityUid: string, limit = 20): TaskRow[] {
+    return this.db
+      .prepare(
+        `SELECT DISTINCT t.* FROM task_entities te JOIN tasks t ON t.id = te.task_id
+         WHERE te.entity_uid = ? ORDER BY t.id DESC LIMIT ?`,
+      )
+      .all(entityUid, limit) as unknown as TaskRow[];
+  }
+
+  /** Tasks that wrote a file, newest first. */
+  tasksForPath(path: string, limit = 20): TaskRow[] {
+    return this.db
+      .prepare(
+        `SELECT DISTINCT t.* FROM task_entities te JOIN tasks t ON t.id = te.task_id
+         WHERE te.path = ? ORDER BY t.id DESC LIMIT ?`,
+      )
+      .all(path, limit) as unknown as TaskRow[];
+  }
+
+  /**
+   * FTS5 over the tasks' key parts, best first. `match` is an FTS5 query the caller has already
+   * built and quoted (`retrieval.ts` does) - raw user text is not a safe MATCH expression.
+   * Weights: the title and the files changed say most about what a task was. `beforeTaskId` keeps
+   * the running task (and anything newer) out, so a search never finds the exchange it runs in.
+   */
+  searchTasks(match: string, limit = 50, beforeTaskId?: number): TaskSearchRow[] {
+    return this.db
+      .prepare(
+        `SELECT t.*, bm25(tasks_fts, 4.0, 2.0, 1.0, 1.0, 3.0) AS bm25
+         FROM tasks_fts JOIN tasks t ON t.id = tasks_fts.rowid
+         WHERE tasks_fts MATCH ? AND t.id < ?
+         ORDER BY bm25 LIMIT ?`,
+      )
+      .all(match, beforeTaskId ?? Number.MAX_SAFE_INTEGER, limit) as unknown as TaskSearchRow[];
+  }
+
+  /** Logs a search and returns its id, for `recordPicks`. */
+  recordSearch(input: SearchLogInput): number {
+    const result = this.db
+      .prepare(`INSERT INTO search_log (session_id, task_id, at, source, query, shown) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(input.session_id, input.task_id, Date.now(), input.source, input.query, input.shown.join(','));
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Records which shown tasks were picked, and counts each pick toward that task's `used_count`. */
+  recordPicks(searchId: number, picked: readonly number[]): void {
+    if (picked.length === 0) return;
+    const row = this.db.prepare(`SELECT picked FROM search_log WHERE id = ?`).get(searchId) as { picked: string } | undefined;
+    if (!row) return;
+    const all = [...new Set([...(row.picked ? row.picked.split(',').map(Number) : []), ...picked])];
+    this.db.prepare(`UPDATE search_log SET picked = ? WHERE id = ?`).run(all.join(','), searchId);
+    const bump = this.db.prepare(`UPDATE tasks SET used_count = used_count + 1 WHERE id = ?`);
+    for (const id of picked) bump.run(id);
+  }
+
+  schemaVersion(): number {
+    const row = this.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string } | undefined;
+    return row ? Number(row.value) : 0;
   }
 
   /** Folds the WAL back into the main `.db` file - §4.1's confirmed `wal_checkpoint(TRUNCATE)`

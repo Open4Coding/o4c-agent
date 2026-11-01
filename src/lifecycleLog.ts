@@ -52,6 +52,7 @@ export type LifecyclePhase =
   | 'spawn'
   | 'trusted'
   | 'provider'
+  | 'history'
   | 'graph'
   | 'render'
   | 'handoff'

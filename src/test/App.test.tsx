@@ -474,6 +474,8 @@ async function setup(opts: {
   // that is not about them, exactly like an untrusted run, where the footer falls back to this
   // process's own figures.
   usageStore?: UsageStore;
+  // The id cli.ts decides at startup (NextUp item 13). Omitted, the first save mints one, as before.
+  sessionId?: string;
   // The loop's tool list. Only the MCP test below passes this; everything else gets the real
   // built-ins, as a real launch does.
   tools?: Tool[];
@@ -506,6 +508,7 @@ async function setup(opts: {
       runLogger,
       fullContextLogger,
       initialSession: opts.initialSession,
+      sessionId: opts.sessionId,
       restart,
       projectRoot: opts.projectRoot,
       model: 'test-model',
@@ -1617,6 +1620,19 @@ test('a real turn autosaves the session, and /clear hands off to a restart with 
     // The pre-clear session must still be on disk and resumable.
     const manifestAfterClear = await store.readManifest();
     assert.ok(manifestAfterClear.some((m) => m.id === firstId));
+  });
+});
+
+test('the first autosave uses the session id decided at startup, so the history store and the session file agree', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, store } = await setup({ dir, sessionId: 'planned-at-startup' });
+
+    await submit(stdin, 'first session message');
+
+    await waitFor(async () => (await store.readManifest()).length === 1);
+    assert.equal((await store.readManifest())[0].id, 'planned-at-startup');
+    const saved = await store.load('planned-at-startup');
+    assert.ok(saved?.entries.every((e) => e.session_id === 'planned-at-startup'));
   });
 });
 

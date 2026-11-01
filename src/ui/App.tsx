@@ -124,6 +124,14 @@ export interface AppProps {
    * scrollback and currentSessionIdRef on mount, since a fresh process handoff (see `restart`
    * below) never gets a chance to append it mid-session. */
   initialSession?: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] };
+  /**
+   * The id this session is saved under, decided at startup rather than at the first save (design
+   * doc section 4's 2026-09-28 `session_id` resolution, NextUp item 13). The history store files
+   * every entry under it from the very first one, so the session file and the store have to agree
+   * on it before either has written anything. Nothing is written any earlier than before: an id
+   * that never gets a save is simply never used. Absent in tests, where the first save mints one.
+   */
+  sessionId?: string;
   /** Requests that /clear or /resume hand off to a brand-new process instead of resetting
    * state in-place - see cli.ts's spawnRestart for why. Call this, then exit() (as /exit does),
    * never both without the other: cli.ts only spawns the replacement after this process's Ink
@@ -564,6 +572,7 @@ export function App({
   runLogger,
   fullContextLogger,
   initialSession,
+  sessionId: plannedSessionId,
   restart,
   initialMode,
   os = detectCurrentOs(),
@@ -944,7 +953,7 @@ export function App({
         .catch(() => {})
         .then(async () => {
           if (entries.length === 0) return undefined;
-          const id = await sessionStore.save(entries, currentSessionIdRef.current, inputHistory);
+          const id = await sessionStore.save(entries, currentSessionIdRef.current ?? plannedSessionId, inputHistory);
           currentSessionIdRef.current = id;
           // A brand-new session gets its id at its first save, and the usage store needs it before
           // this process exits, or the session subtotal is filed under no id (see usageStore.ts).
