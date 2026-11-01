@@ -3994,3 +3994,72 @@ test('/ultraplan puts o4c\'s gathered research into the planning prompt and save
     }
   });
 });
+
+test('/view-plan: pick a plan, then View (checklist last) / View full / Make active - Esc picks nothing', async () => {
+  await withTempDir(async (dir) => {
+    const store = new PlanTestStore(join(dir, 'history.db'));
+    try {
+      const plans: PlanHooks = { store: store.plans(), sessionId: 's1', changed: () => {}, currentTask: () => undefined };
+      plans.store.createPlan({ name: 'Older', summary: 'the older one' }, 1);
+      const p = plans.store.createPlan(
+        { name: 'Export Plans', summary: 'Write plans out as markdown.', body: 'BODY-ONLY-IN-FULL', items: [{ text: 'Write exportPlan', checks: 'its test passes' }] },
+        2,
+      );
+      const { stdin, frames } = await setup({ dir, plans });
+
+      await submit(stdin, '/view-plan');
+      await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
+      assert.ok(anyFrameIncludes(frames, '0002 Export Plans - open, 0 of 1 items finished - Write plans out as markdown.'));
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameIncludes(frames, 'View - summary, then the checklist'));
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameSays(frames, 'Current: item 1 of 1 - Write exportPlan'));
+      assert.ok(!anyFrameIncludes(frames, 'BODY-ONLY-IN-FULL'), 'the default view shows the summary, not the body');
+
+      await submit(stdin, '/view-plan');
+      await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameIncludes(frames, 'View full - the whole plan'));
+      stdin.write(DOWN);
+      await tick(30);
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameSays(frames, 'BODY-ONLY-IN-FULL'));
+
+      await submit(stdin, '/view-plan');
+      await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameIncludes(frames, 'Make active'));
+      stdin.write(DOWN);
+      await tick(30);
+      stdin.write(DOWN);
+      await tick(30);
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameSays(frames, 'Plan 0002 Export Plans is now the active plan.'));
+      assert.equal(plans.store.activePlan('s1')!.id, p.id);
+
+      await submit(stdin, '/view-plan');
+      await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
+      stdin.write(ESCAPE);
+      await waitFor(() => anyFrameSays(frames, 'No plan chosen.'));
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test('/view-plan with no plans, or no project, says what to do instead of opening an empty list', async () => {
+  await withTempDir(async (dir) => {
+    const store = new PlanTestStore(join(dir, 'history.db'));
+    try {
+      const withStore = await setup({ dir, plans: { store: store.plans(), sessionId: 's1', changed: () => {}, currentTask: () => undefined } });
+      await submit(withStore.stdin, '/view-plan');
+      await waitFor(() => anyFrameSays(withStore.frames, 'No plans yet. Make one with /plan <goal>'));
+      withStore.unmount();
+      const without = await setup({ dir });
+      await submit(without.stdin, '/view-plan');
+      await waitFor(() => anyFrameSays(without.frames, 'Plans need a trusted project'));
+    } finally {
+      store.close();
+    }
+  });
+});

@@ -74,6 +74,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Like /plan, but researches first (past tasks, the code graph, the files involved) and thinks harder. Usage: /ultraplan <goal>',
   },
   {
+    name: '/view-plan',
+    select: 'run',
+    description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
+  },
+  {
     name: '/plans',
     // Runs on Enter rather than prefilling: it takes no argument, so there is nothing to fill in.
     select: 'run',

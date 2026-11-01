@@ -15,6 +15,9 @@ import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice }
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { parsePlanCommand, planPrompt, savePlanFromAnswer, type PlanHooks } from '../session/planAuthoring.js';
 import { ULTRAPLAN_MAX_ITERATIONS } from '../session/ultraplanResearch.js';
+import { formatPlan } from '../session/planView.js';
+import { PLAN_PICKER_TITLE, planActionRows, planActionTitle, planPickerRows, type ChoiceRow, type PlanAction } from './planPicker.js';
+import { SelectList } from './SelectList.js';
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { listPlans, plansReport } from '../session/plansStore.js';
@@ -1013,6 +1016,20 @@ export function App({
     globalLevel: ThinkLevel | undefined;
     resolve: (c: ThinkScopeChoice | undefined) => void;
   } | null>(null);
+  // A plain dropdown of labelled choices - `/view-plan`'s plan list and its action list, and any
+  // later list that needs nothing more than "pick one of these". Same pending-Promise pattern.
+  const [choicePicker, setChoicePicker] = useState<{
+    title: string;
+    rows: readonly ChoiceRow[];
+    resolve: (key: string | undefined) => void;
+  } | null>(null);
+  const pickChoice = useCallback(
+    <K extends string>(title: string, rows: readonly ChoiceRow<K>[]) =>
+      new Promise<K | undefined>((resolve) => {
+        setChoicePicker({ title, rows, resolve: resolve as (key: string | undefined) => void });
+      }),
+    [],
+  );
   const [viewPicker, setViewPicker] = useState<{
     scope: ConfigScope;
     currentValue: SessionView;
@@ -1444,6 +1461,29 @@ export function App({
         pushBlock([userLine(input)]);
         pushBlock(colorViewLines());
         void runLogger.log({ type: 'system', sub_type: 'info', command: '/colorview' });
+      } else if (commandName(input) === '/view-plan') {
+        // Local and display-only like /plans: picking and viewing never reach loop.run().
+        pushBlock([userLine(input)]);
+        if (!plans) {
+          pushBlock([infoLine('Plans need a trusted project - o4c keeps them in .o4c/db/history.db.')]);
+        } else if (plans.store.listPlans().length === 0) {
+          pushBlock([infoLine('No plans yet. Make one with /plan <goal> (or /ultraplan <goal> to research first).')]);
+        } else {
+          const picked = await pickChoice(PLAN_PICKER_TITLE, planPickerRows(plans.store));
+          const plan = picked === undefined ? undefined : plans.store.getPlan(Number(picked));
+          const action = plan ? await pickChoice<PlanAction>(planActionTitle(plan), planActionRows(plan, plans.sessionId)) : undefined;
+          if (!plan || !action) {
+            pushBlock([infoLine('No plan chosen.')]);
+          } else if (action === 'view' || action === 'full') {
+            pushBlock([infoLine(formatPlan(plans.store, plan, { full: action === 'full' }).join('\n'))]);
+          } else if (action === 'activate') {
+            plans.store.activate(plan.id, plans.sessionId);
+            pushBlock([infoLine(`${planActionTitle(plan).split(' (')[0]} is now the active plan.`)]);
+          } else {
+            plans.store.park(plan.id);
+            pushBlock([infoLine(`${planActionTitle(plan).split(' (')[0]} is parked - still saved, no longer active.`)]);
+          }
+        }
       } else if (input === '/mode') {
         pushBlock([userLine(input)]);
         const chosen = await new Promise<Mode | undefined>((resolve) => {
@@ -2434,7 +2474,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans, pickChoice],
   );
 
   const handleModePickerSelect = useCallback(
@@ -2487,6 +2527,19 @@ export function App({
     viewPicker?.resolve(undefined);
     setViewPicker(null);
   }, [viewPicker]);
+
+  const handleChoiceSelect = useCallback(
+    (row: ChoiceRow) => {
+      choicePicker?.resolve(row.key);
+      setChoicePicker(null);
+    },
+    [choicePicker],
+  );
+
+  const handleChoiceCancel = useCallback(() => {
+    choicePicker?.resolve(undefined);
+    setChoicePicker(null);
+  }, [choicePicker]);
 
 
 
@@ -2818,6 +2871,7 @@ export function App({
     !resumePicker &&
     !modePicker &&
     !viewPicker &&
+    !choicePicker &&
     !thinkScopePicker &&
     !stopConfirm &&
     !clearConfirm &&
@@ -2859,6 +2913,7 @@ export function App({
     !resumePicker &&
     !modePicker &&
     !viewPicker &&
+    !choicePicker &&
     !thinkScopePicker &&
     !stopConfirm &&
     !clearConfirm &&
@@ -2907,7 +2962,7 @@ export function App({
       )}
       <InputBox
         disabled={isProcessing}
-        active={!confirmDialog && !stopConfirm && !clearConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker}
+        active={!confirmDialog && !stopConfirm && !clearConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker && !choicePicker}
         suppressNav={paletteOpen || familyOpen}
         onChange={handleInputChange}
         resetToken={inputResetToken}
@@ -2999,6 +3054,16 @@ export function App({
           onSelect={handleViewPickerSelect}
           onCancel={handleViewPickerCancel}
           highlightColor={highlightColor}
+        />
+      ) : choicePicker ? (
+        <SelectList
+          items={choicePicker.rows}
+          getKey={(r) => r.key}
+          title={choicePicker.title}
+          borderColor={highlightColor}
+          onSelect={handleChoiceSelect}
+          onCancel={handleChoiceCancel}
+          rowText={(r) => r.label}
         />
       ) : familyOpen ? (
         <CommandFamilyPicker
