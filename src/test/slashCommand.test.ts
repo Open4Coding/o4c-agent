@@ -48,6 +48,8 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/plan',
     '/ultraplan',
     '/view-plan',
+    '/plan-reword',
+    '/plan-add',
     '/plans',
     '/keyboard',
     '/keyboard-windows',

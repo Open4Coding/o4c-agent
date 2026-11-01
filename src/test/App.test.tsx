@@ -4076,13 +4076,58 @@ test('/view-plan Export writes the two files into the project and says where', a
       await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
       stdin.write(ENTER);
       await waitFor(() => anyFrameIncludes(frames, 'Export - write it to .o4c/plans/'));
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 4; i++) {
         stdin.write(DOWN);
         await tick(30);
       }
       stdin.write(ENTER);
       await waitFor(() => anyFrameSays(frames, 'They are a snapshot - export again after changes.'));
       assert.ok(existsSync(join(dir, '.o4c', 'plans', '0001.ExportPlans.checklist.md')));
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test('/view-plan Edit items: move without a model call, and reword through the input box', async () => {
+  await withTempDir(async (dir) => {
+    const store = new PlanTestStore(join(dir, 'history.db'));
+    try {
+      const plans: PlanHooks = { store: store.plans(), sessionId: 's1', changed: () => {}, currentTask: () => undefined };
+      const plan = plans.store.createPlan({ name: 'P', items: [{ text: 'alpha' }, { text: 'beta' }] });
+      const { stdin, frames } = await setup({ dir, plans });
+      const openEdit = async () => {
+        await submit(stdin, '/view-plan');
+        await waitFor(() => anyFrameIncludes(frames, 'Choose a plan'));
+        stdin.write(ENTER);
+        await waitFor(() => anyFrameIncludes(frames, 'Edit items'));
+        for (let i = 0; i < 3; i++) {
+          stdin.write(DOWN);
+          await tick(30);
+        }
+        stdin.write(ENTER);
+        await waitFor(() => anyFrameIncludes(frames, 'which item?'));
+      };
+
+      await openEdit();
+      stdin.write(ENTER); // item 1
+      await waitFor(() => anyFrameIncludes(frames, 'Move down'));
+      stdin.write(DOWN);
+      await tick(30);
+      stdin.write(ENTER); // Move down
+      await waitFor(() => anyFrameSays(frames, 'Plan 0001: moved item 1 down.'));
+      assert.deepEqual(plans.store.items(plan.id).map((i) => i.text), ['beta', 'alpha']);
+
+      await openEdit();
+      stdin.write(ENTER); // item 1 (beta)
+      await waitFor(() => anyFrameIncludes(frames, 'Reword - edit its text'));
+      stdin.write(ENTER); // Reword
+      await waitFor(() => anyFrameIncludes(frames, '/plan-reword 1 1 beta'));
+      stdin.write(' gamma');
+      await waitFor(() => anyFrameIncludes(frames, '/plan-reword 1 1 beta gamma'));
+      stdin.write(ENTER);
+      await waitFor(() => anyFrameSays(frames, 'Plan 0001: reworded item 1.'));
+      assert.equal(plans.store.getItem(plan.id, 1)!.text, 'beta gamma');
     } finally {
       store.close();
     }

@@ -1,5 +1,5 @@
 import { formatPlanNo, type PlanRow, type PlanStore } from '../session/planStore.js';
-import { planHeader } from '../session/planView.js';
+import { PLAN_STATUS_MARKS, planHeader } from '../session/planView.js';
 
 /**
  * `/view-plan`'s two dropdowns - brief 0005, decision 4 / checklist P7. Pure row builders, so the
@@ -23,7 +23,7 @@ export function planPickerRows(plans: PlanStore): ChoiceRow[] {
   });
 }
 
-export type PlanAction = 'view' | 'full' | 'activate' | 'park' | 'export';
+export type PlanAction = 'view' | 'full' | 'activate' | 'park' | 'export' | 'edit';
 
 export function planActionRows(plan: PlanRow, sessionId: string): ChoiceRow<PlanAction>[] {
   const rows: ChoiceRow<PlanAction>[] = [
@@ -35,8 +35,42 @@ export function planActionRows(plan: PlanRow, sessionId: string): ChoiceRow<Plan
   } else {
     rows.push({ key: 'activate', label: 'Make active - o4c keeps it in view while it works (one active plan at a time)' });
   }
+  rows.push({ key: 'edit', label: 'Edit items - reword, move, remove or add checklist items, no model call' });
   rows.push({ key: 'export', label: 'Export - write it to .o4c/plans/ as .plan.md + .checklist.md, for git and editors (a snapshot)' });
   return rows;
+}
+
+/** Edit items, step 1: which item - every item with its mark, plus adding one at the end. */
+export function planItemRows(plans: PlanStore, plan: PlanRow): ChoiceRow[] {
+  const rows: ChoiceRow[] = plans.items(plan.id).map((item) => ({
+    key: String(item.position),
+    label: `${PLAN_STATUS_MARKS[item.status]} ${item.position}. ${oneLine(item.text, 160)}`,
+  }));
+  rows.push({ key: 'end', label: '+ Add an item at the end' });
+  return rows;
+}
+
+export type PlanItemOp = 'reword' | 'up' | 'down' | 'remove' | 'add';
+
+/** Edit items, step 2: what to do with item `position` of `count`. Moves that cannot happen are left out. */
+export function planItemOpRows(position: number, count: number): ChoiceRow<PlanItemOp>[] {
+  const rows: ChoiceRow<PlanItemOp>[] = [{ key: 'reword', label: 'Reword - edit its text in the input box, then Enter' }];
+  if (position > 1) rows.push({ key: 'up', label: 'Move up' });
+  if (position < count) rows.push({ key: 'down', label: 'Move down' });
+  rows.push({ key: 'remove', label: 'Remove - the items after it move up' });
+  rows.push({ key: 'add', label: 'Add an item after this one - type it in the input box, then Enter' });
+  return rows;
+}
+
+/**
+ * The hidden commands Reword and Add put in the input box: `/plan-reword <plan> <item> <text>`
+ * and `/plan-add <plan> <after> <text>`. Typed by o4c, finished by the user - the text is the part
+ * the dropdown cannot collect. Returns undefined for anything that is not one.
+ */
+export function parsePlanEditCommand(input: string): { op: 'reword' | 'add'; plan: number; item: number; text: string } | undefined {
+  const match = /^\/plan-(reword|add)\s+(\d+)\s+(\d+)(?:\s+([\s\S]*))?$/.exec(input.trim());
+  if (!match) return undefined;
+  return { op: match[1] as 'reword' | 'add', plan: Number(match[2]), item: Number(match[3]), text: (match[4] ?? '').trim() };
 }
 
 export function planActionTitle(plan: PlanRow): string {

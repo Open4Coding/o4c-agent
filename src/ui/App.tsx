@@ -15,9 +15,21 @@ import { ThinkPicker, ThinkScopePicker, type ThinkScope, type ThinkScopeChoice }
 import { MODES, classifyToolAccess, modeInfo, modeSystemPrompt, type Mode } from './modePolicy.js';
 import { parsePlanCommand, planPrompt, savePlanFromAnswer, type PlanHooks } from '../session/planAuthoring.js';
 import { ULTRAPLAN_MAX_ITERATIONS } from '../session/ultraplanResearch.js';
-import { formatPlan } from '../session/planView.js';
+import { formatChecklist, formatPlan } from '../session/planView.js';
 import { exportPlan } from '../session/planExport.js';
-import { PLAN_PICKER_TITLE, planActionRows, planActionTitle, planPickerRows, type ChoiceRow, type PlanAction } from './planPicker.js';
+import {
+  PLAN_PICKER_TITLE,
+  parsePlanEditCommand,
+  planActionRows,
+  planActionTitle,
+  planItemOpRows,
+  planItemRows,
+  planPickerRows,
+  type ChoiceRow,
+  type PlanAction,
+  type PlanItemOp,
+} from './planPicker.js';
+import { PlanRuleError, formatPlanNo } from '../session/planStore.js';
 import { SelectList } from './SelectList.js';
 import { TAB_USED_KEY } from './tabHint.js';
 import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
@@ -1020,14 +1032,19 @@ export function App({
   // A plain dropdown of labelled choices - `/view-plan`'s plan list and its action list, and any
   // later list that needs nothing more than "pick one of these". Same pending-Promise pattern.
   const [choicePicker, setChoicePicker] = useState<{
+    /** A new id per list opened: it is the SelectList's React key, so a list opened straight after
+     * another (a plan, then what to do with it) mounts fresh instead of inheriting the previous
+     * list's highlighted row - which pointed past the end of a shorter list and crashed it. */
+    id: number;
     title: string;
     rows: readonly ChoiceRow[];
     resolve: (key: string | undefined) => void;
   } | null>(null);
+  const choicePickerIdRef = useRef(0);
   const pickChoice = useCallback(
     <K extends string>(title: string, rows: readonly ChoiceRow<K>[]) =>
       new Promise<K | undefined>((resolve) => {
-        setChoicePicker({ title, rows, resolve: resolve as (key: string | undefined) => void });
+        setChoicePicker({ id: ++choicePickerIdRef.current, title, rows, resolve: resolve as (key: string | undefined) => void });
       }),
     [],
   );
@@ -1462,6 +1479,23 @@ export function App({
         pushBlock([userLine(input)]);
         pushBlock(colorViewLines());
         void runLogger.log({ type: 'system', sub_type: 'info', command: '/colorview' });
+      } else if (parsePlanEditCommand(input)) {
+        const command = parsePlanEditCommand(input)!;
+        pushBlock([userLine(input)]);
+        const plan = plans?.store.getPlanByNumber(command.plan);
+        if (!plans || !plan) {
+          pushBlock([infoLine(`There is no plan ${formatPlanNo(command.plan)}.`)]);
+        } else if (!command.text) {
+          pushBlock([infoLine('Nothing changed - the item text was empty.')]);
+        } else {
+          try {
+            if (command.op === 'reword') plans.store.rewordItem(plan.id, command.item, command.text);
+            else plans.store.addItem(plan.id, { text: command.text }, command.item);
+            pushBlock([infoLine([`Plan ${formatPlanNo(plan.number)}: ${command.op === 'reword' ? `reworded item ${command.item}` : `added after item ${command.item}`}.`, ...formatChecklist(plans.store, plans.store.getPlan(plan.id)!)].join('\n'))]);
+          } catch (err) {
+            pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
+          }
+        }
       } else if (commandName(input) === '/view-plan') {
         // Local and display-only like /plans: picking and viewing never reach loop.run().
         pushBlock([userLine(input)]);
@@ -1477,6 +1511,36 @@ export function App({
             pushBlock([infoLine('No plan chosen.')]);
           } else if (action === 'view' || action === 'full') {
             pushBlock([infoLine(formatPlan(plans.store, plan, { full: action === 'full' }).join('\n'))]);
+          } else if (action === 'edit') {
+            const which = await pickChoice(planActionTitle(plan).replace(' (', ' - which item? ('), planItemRows(plans.store, plan));
+            const count = plans.store.items(plan.id).length;
+            const no = formatPlanNo(plan.number);
+            const op: PlanItemOp | undefined =
+              which === undefined ? undefined : which === 'end' ? 'add' : await pickChoice<PlanItemOp>(`Item ${which} (↑/↓ to choose, Enter to select, Esc to cancel):`, planItemOpRows(Number(which), count));
+            const position = which === 'end' ? count : Number(which);
+            if (!op) {
+              pushBlock([infoLine('Nothing changed.')]);
+            } else if (op === 'reword') {
+              // The text is the part a dropdown cannot collect: hand it to the input box, finished there.
+              const current = plans.store.getItem(plan.id, position)!.text.replace(/\s*\n\s*/g, ' ');
+              const text = `/plan-reword ${plan.number} ${position} ${current}`;
+              setInputValue(text);
+              setPrefill({ token: nextPrefillToken++, text });
+              pushBlock([infoLine(`Edit item ${position}'s text in the input box, then press Enter.`)]);
+            } else if (op === 'add') {
+              const text = `/plan-add ${plan.number} ${position} `;
+              setInputValue(text);
+              setPrefill({ token: nextPrefillToken++, text });
+              pushBlock([infoLine(`Type the new item after "${position}" in the input box, then press Enter.`)]);
+            } else {
+              try {
+                if (op === 'remove') plans.store.removeItem(plan.id, position);
+                else plans.store.moveItem(plan.id, position, op === 'up' ? position - 1 : position + 1);
+                pushBlock([infoLine([`Plan ${no}: ${op === 'remove' ? `removed item ${position}` : `moved item ${position} ${op}`}.`, ...formatChecklist(plans.store, plans.store.getPlan(plan.id)!)].join('\n'))]);
+              } catch (err) {
+                pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
+              }
+            }
           } else if (action === 'export') {
             if (!projectRoot) {
               pushBlock([infoLine('Exporting needs a trusted project to write into.')]);
@@ -3069,6 +3133,7 @@ export function App({
         />
       ) : choicePicker ? (
         <SelectList
+          key={choicePicker.id}
           items={choicePicker.rows}
           getKey={(r) => r.key}
           title={choicePicker.title}

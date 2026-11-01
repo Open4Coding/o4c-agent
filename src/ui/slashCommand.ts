@@ -79,6 +79,16 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/plan-reword',
+    hidden: true,
+    description: "Rewords a plan item - put in the input box by /view-plan's Edit items. Usage: /plan-reword <plan> <item> <text>",
+  },
+  {
+    name: '/plan-add',
+    hidden: true,
+    description: "Adds a plan item - put in the input box by /view-plan's Edit items. Usage: /plan-add <plan> <after item> <text>",
+  },
+  {
     name: '/plans',
     // Runs on Enter rather than prefilling: it takes no argument, so there is nothing to fill in.
     select: 'run',
