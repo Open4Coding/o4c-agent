@@ -1240,7 +1240,8 @@ test('countExternalCall adds a call made outside the turn (curated\'s pre-turn c
   const loop = new AgentLoop(new FakeProvider([]), [], 'system');
   loop.countExternalCall({ content: 'q', toolCalls: [], stopReason: 'end_turn', usage: { inputTokens: 120, outputTokens: 8 } });
   loop.countExternalCall({ content: 'q', toolCalls: [], stopReason: 'end_turn' });
-  assert.deepEqual({ ...loop.getUsage() }, { inputTokens: 120, outputTokens: 8, requestCount: 2 });
+  const { inputTokens, outputTokens, requestCount } = loop.getUsage();
+  assert.deepEqual({ inputTokens, outputTokens, requestCount }, { inputTokens: 120, outputTokens: 8, requestCount: 2 });
 });
 
 test('a tool call cut off at the output limit is reported to the model, not resumed as text (tmp4 run)', async () => {

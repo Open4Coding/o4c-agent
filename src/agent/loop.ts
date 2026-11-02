@@ -1,4 +1,4 @@
-import type { CompletionRequest, CompletionResponse, LLMProvider, Message } from '../providers/types.js';
+import type { CompletionRequest, CompletionResponse, LLMProvider, Message, Usage } from '../providers/types.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
 import { CoreRegistry, type CoreComponent, type SeamWarning } from './coreSeam.js';
@@ -176,6 +176,32 @@ export interface CumulativeUsage {
   outputTokens: number;
   /** Number of completion requests actually sent to the provider, not turns or tool calls. */
   requestCount: number;
+  /** Sums of the cache/prefill/draft figures (plan 0006 A1), over the requests that reported them. */
+  cachedTokens: number;
+  processedPromptTokens: number;
+  prefillMs: number;
+  draftTokens: number;
+  draftAccepted: number;
+  /** The most recent response's usage, for `/context`'s "last request" line. */
+  last?: Usage;
+}
+
+export function emptyUsage(): CumulativeUsage {
+  return { inputTokens: 0, outputTokens: 0, requestCount: 0, cachedTokens: 0, processedPromptTokens: 0, prefillMs: 0, draftTokens: 0, draftAccepted: 0 };
+}
+
+/** Adds one response's usage into the running totals. */
+export function addUsage(total: CumulativeUsage, usage: Usage | undefined): void {
+  total.requestCount += 1;
+  if (!usage) return;
+  total.inputTokens += usage.inputTokens;
+  total.outputTokens += usage.outputTokens;
+  total.cachedTokens += usage.cachedTokens ?? 0;
+  total.processedPromptTokens += usage.processedPromptTokens ?? 0;
+  total.prefillMs += usage.prefillMs ?? 0;
+  total.draftTokens += usage.draftTokens ?? 0;
+  total.draftAccepted += usage.draftAccepted ?? 0;
+  total.last = usage;
 }
 
 /**
@@ -240,7 +266,7 @@ export class AgentLoop {
   private requestProjection:
     | { readonly version: number; readonly entries: readonly ContextEntry[]; readonly estimate: number }
     | undefined;
-  private usage: CumulativeUsage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
+  private usage: CumulativeUsage = emptyUsage();
   /** The real, API-reported prompt-token count from the most recent request, and what
    * `visibleTokenEstimate` was at that exact moment - together let `hybridPromptTokenEstimate()`
    * report `realCount + estimatedDelta` instead of re-estimating the whole history from scratch
@@ -433,7 +459,7 @@ export class AgentLoop {
     this.visibleTokenEstimate = 0;
     // Explicitly, because this drops the entries without deindexing them one by one.
     this.entryVersion++;
-    this.usage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
+    this.usage = emptyUsage();
   }
 
   /** Conversation history projected to the provider wire format - see `toWireMessages()` in
@@ -462,11 +488,7 @@ export class AgentLoop {
    * understate exactly the type whose cost a user is deciding about.
    */
   countExternalCall(response: CompletionResponse): void {
-    this.usage.requestCount += 1;
-    if (response.usage) {
-      this.usage.inputTokens += response.usage.inputTokens;
-      this.usage.outputTokens += response.usage.outputTokens;
-    }
+    addUsage(this.usage, response.usage);
   }
 
   /** Estimated token size of exactly what `getMessages()`/`toWireMessages()` would send right now
@@ -498,7 +520,7 @@ export class AgentLoop {
     // Explicitly: loading an empty session indexes nothing, so the loop below would not bump it.
     this.entryVersion++;
     for (const entry of this.entries) this.indexEntry(entry);
-    this.usage = { inputTokens: 0, outputTokens: 0, requestCount: 0 };
+    this.usage = emptyUsage();
   }
 
   private appendEntry(entry: ContextEntry, onEntry: (entry: ContextEntry) => void): void {
@@ -1393,11 +1415,7 @@ export class AgentLoop {
         throw err;
       }
 
-      this.usage.requestCount += 1;
-      if (response.usage) {
-        this.usage.inputTokens += response.usage.inputTokens;
-        this.usage.outputTokens += response.usage.outputTokens;
-      }
+      addUsage(this.usage, response.usage);
 
       // Real bug found via direct reproduction: a response cut off by the provider's own
       // max_tokens cap (most often mid-<think>, before the model ever reaches real content or a

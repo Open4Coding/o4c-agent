@@ -117,3 +117,36 @@ export function renderProgressBar(fraction: number, width = 10): string {
   const filled = progressBarFilledCells(fraction, width);
   return `[${'█'.repeat(filled)}${'░'.repeat(width - filled)}]`;
 }
+
+/**
+ * Share of prompt tokens the server served from its cache (plan 0006 A1), as a whole percent, or
+ * undefined until a response has reported either figure - the footer then leaves the field out
+ * rather than claiming 0%.
+ */
+export function cacheSharePercent(cached: number, processed: number): number | undefined {
+  const total = cached + processed;
+  if (!(total > 0)) return undefined;
+  return Math.round((cached / total) * 100);
+}
+
+/** `/context`'s prompt-cache lines, from session sums plus the last request. Empty when the provider
+ * reports none of it. */
+export function cacheReportLines(
+  session: { cached: number; processed: number; prefillMs: number; draftN: number; draftAccepted: number },
+  last?: { cachedTokens?: number; processedPromptTokens?: number; prefillMs?: number },
+): string[] {
+  const share = cacheSharePercent(session.cached, session.processed);
+  if (share === undefined) return [];
+  const lines = [
+    `  Prompt cache:  ${share}% of prompt tokens served from cache (${session.cached} cached, ${session.processed} processed)`,
+    `  Prefill time:  ${(session.prefillMs / 1000).toFixed(1)} s this session`,
+  ];
+  if (last?.processedPromptTokens !== undefined) {
+    const secs = last.prefillMs !== undefined ? ` in ${(last.prefillMs / 1000).toFixed(1)} s` : '';
+    lines.push(`  Last request:  ${last.cachedTokens ?? 0} cached, ${last.processedPromptTokens} processed${secs}`);
+  }
+  if (session.draftN > 0) {
+    lines.push(`  MTP drafts:    ${Math.round((session.draftAccepted / session.draftN) * 100)}% accepted (${session.draftAccepted}/${session.draftN})`);
+  }
+  return lines;
+}

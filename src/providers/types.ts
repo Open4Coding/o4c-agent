@@ -108,6 +108,21 @@ export interface Usage {
    * that reports neither.
    */
   tokensPerSecond?: number;
+  /**
+   * Prompt tokens the server served from its prompt cache instead of processing again
+   * (llama.cpp `timings.cache_n`, Anthropic `cache_read_input_tokens`). With
+   * `processedPromptTokens` it is the only way to see whether the cache is working - a measured 8 h
+   * run was 94% prompt tokens, and how many of those were re-processed was unknowable (plan 0006
+   * item A1). Optional and never fabricated: absent when the provider does not say.
+   */
+  cachedTokens?: number;
+  /** Prompt tokens actually processed (prefilled) for this request (`timings.prompt_n`). */
+  processedPromptTokens?: number;
+  /** Time spent processing them, in ms (`timings.prompt_ms`). */
+  prefillMs?: number;
+  /** Speculative-decoding tokens drafted and accepted (`timings.draft_n` / `draft_n_accepted`). */
+  draftTokens?: number;
+  draftAccepted?: number;
 }
 
 export interface CompletionResponse {

@@ -228,6 +228,13 @@ export class AnthropicProvider implements LLMProvider {
       usage: {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
+        // Anthropic's input_tokens excludes cache reads, so processed = input (+ cache writes).
+        ...(typeof response.usage.cache_read_input_tokens === 'number'
+          ? {
+              cachedTokens: response.usage.cache_read_input_tokens,
+              processedPromptTokens: response.usage.input_tokens + (response.usage.cache_creation_input_tokens ?? 0),
+            }
+          : {}),
         // Anthropic reports no throughput of its own (llama.cpp hands back
         // `timings.predicted_per_second` directly), so this is measured here instead. It includes
         // the time to first token, so it reads slightly lower than pure decode speed on a long

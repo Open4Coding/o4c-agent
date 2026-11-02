@@ -39,8 +39,11 @@ import { dirname } from 'node:path';
  * read as 0 and start counting from this launch. The version still had to move, because the
  * freeze-on-newer rule above is what stops a v2 binary from dropping the two new fields on its
  * next write; left at 2, an older build would silently discard them.
+ *
+ * v4 (plan 0006 A1) added the prompt-cache figures to each session: `cached` and `processed` prompt
+ * tokens, `prefillMs`, and speculative `draftN`/`draftAccepted`. Same rule as v3: absent reads as 0.
  */
-export const USAGE_FILE_VERSION = 3;
+export const USAGE_FILE_VERSION = 4;
 
 /** How many sessions' subtotals to keep. Bounded so the file cannot grow without limit, but more
  * than one: concurrent o4c sessions in the same project are a supported case, and a single
@@ -61,7 +64,16 @@ export interface TokenSpend {
 export interface ProcessSpend extends TokenSpend {
   /** Provider round-trips (`CumulativeUsage.requestCount`), for `/context`'s "Requests sent". */
   requests: number;
+  /** Prompt-cache figures (v4): served from cache, actually processed, prefill time, MTP drafts. */
+  cached: number;
+  processed: number;
+  prefillMs: number;
+  draftN: number;
+  draftAccepted: number;
 }
+
+/** The v4 counters, in one list so parse, add and zero cannot drift apart. */
+const CACHE_FIELDS = ['cached', 'processed', 'prefillMs', 'draftN', 'draftAccepted'] as const;
 
 /** A session's stored counters: what it has spent, and how long it has been open. */
 export interface SessionSpend extends ProcessSpend {
@@ -88,7 +100,14 @@ function zero(): TokenSpend {
 }
 
 function zeroSession(): SessionSpend {
-  return { input: 0, output: 0, requests: 0, activeMs: 0 };
+  return { input: 0, output: 0, requests: 0, activeMs: 0, cached: 0, processed: 0, prefillMs: 0, draftN: 0, draftAccepted: 0 };
+}
+
+/** `a + b` for every v4 counter. */
+function addCache(a: Pick<ProcessSpend, (typeof CACHE_FIELDS)[number]>, b: Pick<ProcessSpend, (typeof CACHE_FIELDS)[number]>) {
+  const out = {} as Pick<ProcessSpend, (typeof CACHE_FIELDS)[number]>;
+  for (const f of CACHE_FIELDS) out[f] = sane(a[f]) + sane(b[f]);
+  return out;
 }
 
 function emptyUsage(): StoredUsage {
@@ -115,11 +134,14 @@ function saneSpend(value: unknown): TokenSpend {
  * as 0 and start counting from this launch. */
 function saneSessionSpend(value: unknown): SessionSpend {
   const tokens = saneSpend(value);
+  const session = { ...zeroSession(), ...tokens };
   if (value && typeof value === 'object') {
     const obj = value as Record<string, unknown>;
-    return { ...tokens, requests: sane(obj.requests), activeMs: sane(obj.activeMs) };
+    session.requests = sane(obj.requests);
+    session.activeMs = sane(obj.activeMs);
+    for (const f of CACHE_FIELDS) session[f] = sane(obj[f]);
   }
-  return { ...tokens, requests: 0, activeMs: 0 };
+  return session;
 }
 
 function parseUsage(text: string): StoredUsage {
@@ -220,6 +242,7 @@ export class UsageStore {
         output: this.sessionBaseline.output + output,
         requests: this.sessionBaseline.requests + requests,
         activeMs: this.sessionBaseline.activeMs + this.elapsed(),
+        ...addCache(this.sessionBaseline, spent),
       },
     };
   }
@@ -260,11 +283,12 @@ export class UsageStore {
       };
       if (this.sessionId) {
         const base = current.sessions[this.sessionId] ?? this.sessionBaseline;
-        const total = {
+        const total: SessionSpend = {
           input: base.input + input,
           output: base.output + output,
           requests: base.requests + requests,
           activeMs: base.activeMs + activeMs,
+          ...addCache({ ...zeroSession(), ...base }, spent),
         };
         // Delete before setting so the touched session moves to the end, making the key order a
         // real recency order for the trim below.

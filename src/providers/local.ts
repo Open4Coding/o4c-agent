@@ -15,6 +15,7 @@ import type {
   Message,
   StopReason,
   ToolCall,
+  Usage,
 } from './types.js';
 import { ServerUnavailableError } from './types.js';
 
@@ -553,12 +554,33 @@ interface StreamedOpenAIChunk {
     };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens: number; completion_tokens: number };
+  usage?: { prompt_tokens: number; completion_tokens: number; prompt_tokens_details?: { cached_tokens?: number } };
   /** llama-server's own timing block, sent on the final chunk alongside `usage` (not part of the
    * OpenAI API - an llama.cpp extension). `predicted_per_second` is decode throughput with prefill
    * excluded, which is what the status bar shows; `prompt_per_second` is prefill and is deliberately
    * ignored, being a one-off that says nothing about how fast the answer is arriving. */
-  timings?: { predicted_per_second?: number };
+  timings?: {
+    predicted_per_second?: number;
+    cache_n?: number;
+    prompt_n?: number;
+    prompt_ms?: number;
+    draft_n?: number;
+    draft_n_accepted?: number;
+  };
+}
+
+/** The final chunk's `timings` block as `Usage` fields - only the ones actually present, so a server
+ * that does not send one leaves it undefined rather than a fabricated 0. Exported for tests. */
+export function timingsToUsage(timings: StreamedOpenAIChunk['timings'], cachedFromUsage?: number): Partial<Usage> {
+  const out: Partial<Usage> = {};
+  const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (num(timings?.cache_n)) out.cachedTokens = timings.cache_n;
+  else if (num(cachedFromUsage)) out.cachedTokens = cachedFromUsage;
+  if (num(timings?.prompt_n)) out.processedPromptTokens = timings.prompt_n;
+  if (num(timings?.prompt_ms)) out.prefillMs = timings.prompt_ms;
+  if (num(timings?.draft_n)) out.draftTokens = timings.draft_n;
+  if (num(timings?.draft_n_accepted)) out.draftAccepted = timings.draft_n_accepted;
+  return out;
 }
 
 interface ParsedStream {
@@ -567,7 +589,7 @@ interface ParsedStream {
   /** A call dropped because its arguments never finished - see `CompletionResponse`. */
   truncatedToolCall?: { name: string; argumentChars: number };
   finishReason: string;
-  usage: { inputTokens: number; outputTokens: number; tokensPerSecond?: number } | undefined;
+  usage: Usage | undefined;
 }
 
 /**
@@ -613,7 +635,11 @@ export async function parseSseStream(
         }
 
         if (chunk.usage) {
-          usage = { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens };
+          usage = { ...usage, inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens };
+        }
+        if (chunk.timings || chunk.usage?.prompt_tokens_details) {
+          const extra = timingsToUsage(chunk.timings, chunk.usage?.prompt_tokens_details?.cached_tokens);
+          if (Object.keys(extra).length > 0) usage = { inputTokens: 0, outputTokens: 0, ...usage, ...extra };
         }
         // Separate from the `usage` block above, and merged rather than assigned: the two arrive on
         // the same final chunk in practice, but nothing in the protocol guarantees that, and losing

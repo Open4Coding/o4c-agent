@@ -33,8 +33,11 @@ function storeWith(file: string, spend: Spend, clock = { ms: 0 }): UsageStore {
 
 /** A session's record as `totals()` reports it, for the tests that only care about tokens. */
 function spentOnly(input: number, output: number): SessionSpend {
-  return { input, output, requests: 0, activeMs: 0 };
+  return { input, output, requests: 0, activeMs: 0, ...NO_CACHE };
 }
+
+/** The v4 prompt-cache counters at zero - these tests are about tokens and time, not the cache. */
+const NO_CACHE = { cached: 0, processed: 0, prefillMs: 0, draftN: 0, draftAccepted: 0 };
 
 async function read(file: string): Promise<{ version: number; project: TokenSpend; sessions: Record<string, SessionSpend> }> {
   return JSON.parse(await readFile(file, 'utf-8'));
@@ -175,7 +178,7 @@ test('time alone is worth a write, once there is a session to file it under', as
   store.flush();
   const stored = await read(file);
   assert.deepEqual(stored.project, { input: 0, output: 0 }, 'no tokens were spent, and none are claimed');
-  assert.deepEqual(stored.sessions.s, { input: 0, output: 0, requests: 0, activeMs: 45_000 });
+  assert.deepEqual(stored.sessions.s, { input: 0, output: 0, requests: 0, activeMs: 45_000, ...NO_CACHE });
 });
 
 test('a clock that steps backwards never produces a negative', async () => {
@@ -264,12 +267,12 @@ test('a v2 file starts the two new counters at zero rather than at NaN', async (
   const clock = { ms: 0 };
   const store = storeWith(file, { input: 0, output: 0 }, clock);
   store.load('s');
-  assert.deepEqual(store.totals().session, { input: 400, output: 40, requests: 0, activeMs: 0 });
+  assert.deepEqual(store.totals().session, { input: 400, output: 40, requests: 0, activeMs: 0, ...NO_CACHE });
   clock.ms = 10_000;
   store.flush();
   const stored = await read(file);
   assert.equal(stored.version, USAGE_FILE_VERSION);
-  assert.deepEqual(stored.sessions.s, { input: 400, output: 40, requests: 0, activeMs: 10_000 });
+  assert.deepEqual(stored.sessions.s, { input: 400, output: 40, requests: 0, activeMs: 10_000, ...NO_CACHE });
 });
 
 test('a corrupt or hand-edited file degrades to zero instead of NaN forever', async () => {

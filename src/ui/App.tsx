@@ -111,6 +111,8 @@ import {
   elapsedTickMs,
   renderProgressBar,
   progressBarFilledCells,
+  cacheSharePercent,
+  cacheReportLines,
 } from './statusBar.js';
 import { AbortedError, CONTEXT_PRESSURE_RATIO, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
@@ -483,6 +485,9 @@ function UsageBar({
   const spent = loop.getUsage();
   const totals = usage?.totals();
   const session = totals?.session ?? { input: spent.inputTokens, output: spent.outputTokens };
+  const cacheShare = totals
+    ? cacheSharePercent(totals.session.cached, totals.session.processed)
+    : cacheSharePercent(spent.cachedTokens, spent.processedPromptTokens);
   // `0 t/s` before any response has reported a rate, rather than a `n/s` placeholder: the column
   // keeps one shape, so the eye does not have to re-read it to see what it is showing.
   const rateText = formatTokenRate(loop.getTokensPerSecond() ?? 0);
@@ -520,6 +525,12 @@ function UsageBar({
       <Text color={theme.border}>/</Text>
       <Text color={theme.accent}>{rateText}</Text>
       <Text color={theme.border}> t/s</Text>
+      {cacheShare !== undefined && (
+        <Text>
+          <Text color={theme.border}> | cache </Text>
+          <Text color={theme.accent}>{cacheShare}%</Text>
+        </Text>
+      )}
     </Text>
   );
 }
@@ -1400,6 +1411,11 @@ export function App({
           input: thisProcess.inputTokens,
           output: thisProcess.outputTokens,
           requests: thisProcess.requestCount,
+          cached: thisProcess.cachedTokens,
+          processed: thisProcess.processedPromptTokens,
+          prefillMs: thisProcess.prefillMs,
+          draftN: thisProcess.draftTokens,
+          draftAccepted: thisProcess.draftAccepted,
         };
         const totalTokens = usage.input + usage.output;
         const visible = loop.getVisibleTokenEstimate();
@@ -1423,6 +1439,7 @@ export function App({
           `  Input tokens:  ${usage.input}`,
           `  Output tokens: ${usage.output}`,
           `  Total tokens:  ${totalTokens}`,
+          ...cacheReportLines(usage, thisProcess.last),
           `  Messages in history: ${loop.getMessages().length}`,
           // Only when it is on. A window makes the model stop seeing part of the conversation,
           // so the one place that reports context has to say so - but a line saying "off" on

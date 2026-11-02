@@ -905,7 +905,16 @@ program
       const usageStore = usageFile
         ? new UsageStore(usageFile, () => {
             const used = loop.getUsage();
-            return { input: used.inputTokens, output: used.outputTokens, requests: used.requestCount };
+            return {
+              input: used.inputTokens,
+              output: used.outputTokens,
+              requests: used.requestCount,
+              cached: used.cachedTokens,
+              processed: used.processedPromptTokens,
+              prefillMs: used.prefillMs,
+              draftN: used.draftTokens,
+              draftAccepted: used.draftAccepted,
+            };
           })
         : undefined;
       usageStore?.load(opts.resume);
