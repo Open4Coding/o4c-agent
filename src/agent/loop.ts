@@ -91,6 +91,9 @@ export interface AgentEvent {
 /** What to do when a turn reaches its step limit (plan 0006 B18). */
 export type StepLimitChoice = 'continue' | 'summarize' | 'stop';
 
+/** A tool-policy answer; a decline may carry the user's reason, which the model is told (plan 0006 C2). */
+export type PolicyAnswer = 'allow' | 'deny' | 'declined' | { verdict: 'declined'; reason: string };
+
 export interface RunOptions {
   /**
    * Asked when the turn reaches `maxIterations` (B18): `continue` grants another block of steps,
@@ -130,7 +133,7 @@ export interface RunOptions {
    * conclude "probably shell execution is disabled in this manual mode. I'll decide not to rely on
    * this", and it abandoned shell for the rest of the turn over one refused command.
    */
-  toolPolicy?: (tool: Tool, input: Record<string, unknown>) => Promise<'allow' | 'deny' | 'declined'>;
+  toolPolicy?: (tool: Tool, input: Record<string, unknown>) => Promise<PolicyAnswer>;
   /** Called once per `ContextEntry` the instant it's appended during this `run()` call - §7's
    * infinite-context plugin (not built yet) is the intended subscriber, persisting the exact
    * object it's handed with no translation step (§5.1). Omitted entirely, entries are still
@@ -1885,6 +1888,7 @@ export class AgentLoop {
         this.appendEntry(aiToolCallEntry(call, tool?.mutating), onEntry);
         let output: string;
         let verdict: 'allow' | 'deny' | 'declined' = 'allow';
+        let policyAnswer: PolicyAnswer = 'allow';
         // Checked against the schema before approval, so what is approved is what runs (B4).
         const checked = tool && !call.argumentError ? checkArgs(call.input, tool) : { input: call.input, errors: [] };
         const input = checked.input;
@@ -1898,12 +1902,18 @@ export class AgentLoop {
           output = `Error: this ${tool.name} call was not run: ${checked.errors.join('; ')}.`;
         } else if (this.loopGuardEnabled && (output = loopGuard.refuse(tool.name, input) ?? '')) {
           loopGuard.stopped = true;
-        } else if (options.toolPolicy && (verdict = await options.toolPolicy(tool, input)) !== 'allow') {
+        } else if (
+          options.toolPolicy &&
+          ((policyAnswer = await options.toolPolicy(tool, input)), (verdict = typeof policyAnswer === 'string' ? policyAnswer : policyAnswer.verdict)) !== 'allow'
+        ) {
           // Worded to match what actually happened - see `toolPolicy`'s own comment on why the
           // difference matters to the model rather than only to the reader.
+          const reason = typeof policyAnswer === 'object' ? policyAnswer.reason.trim() : '';
           output =
             verdict === 'declined'
-              ? `You declined this ${call.name} call, so it was not executed. The tool is available and you may ask for it again.`
+              ? reason
+                ? `The user declined this ${call.name} call, so it was not executed, and said why: "${reason}". Take that into account before doing anything else.`
+                : `You declined this ${call.name} call, so it was not executed. The tool is available and you may ask for it again.`
               : `Blocked by the current mode: ${call.name} was not executed.`;
         } else {
           // §5.7's tool-dispatch hook. Reached only on the approved path - every `deny`/`declined`

@@ -28,7 +28,17 @@ export interface ConfirmDialogProps {
    * (not a considered No) triggers the decline, so the caller can abort the whole turn instead of
    * only denying this single call and leaving the model free to keep trying. */
   onEscape?: () => void;
+  /**
+   * The four-way tool confirmation (plan 0006 C2): when set, the dialog offers No, Yes, "Yes, and
+   * always allow", and "No, and tell the model why" (which asks for a one-line reason), and answers
+   * here instead of `onResolve`. Hotkeys y / n / a / t.
+   */
+  onChoice?: (choice: ConfirmChoice, reason?: string) => void;
+  /** What "always allow" covers, e.g. `run_shell(npm test*)`. */
+  alwaysLabel?: string;
 }
+
+export type ConfirmChoice = 'no' | 'yes' | 'always' | 'tell';
 
 /**
  * A generic yes/no confirmation, used before any destructive action (run_shell execution,
@@ -38,21 +48,57 @@ export interface ConfirmDialogProps {
  * cancelling choice, never the destructive one. Esc also cancels - and additionally signals
  * `onEscape`, since it means "stop," not just "not this one" (see that prop's own comment).
  */
-export function ConfirmDialog({ message, diff, yesNote, onResolve, onEscape }: ConfirmDialogProps) {
-  const [selected, setSelected] = useState<'no' | 'yes'>('no');
+export function ConfirmDialog({ message, diff, yesNote, onResolve, onEscape, onChoice, alwaysLabel }: ConfirmDialogProps) {
+  const choices: readonly ConfirmChoice[] = onChoice ? ['no', 'yes', 'always', 'tell'] : ['no', 'yes'];
+  const [selected, setSelected] = useState<ConfirmChoice>('no');
+  // 'tell': a one-line reason being typed (C2); undefined while choosing.
+  const [reason, setReason] = useState<string | undefined>(undefined);
   // The round border and paddingX={1} take two columns each side.
   const innerWidth = Math.max(10, (process.stdout.columns ?? 80) - 4);
 
-  useInput((_input, key) => {
+  const choose = (choice: ConfirmChoice) => {
+    if (onChoice) {
+      if (choice === 'tell') setReason('');
+      else onChoice(choice);
+    } else {
+      onResolve(choice === 'yes');
+    }
+  };
+
+  useInput((input, key) => {
+    if (reason !== undefined) {
+      // Typing the reason: Enter sends it with the "no", Esc goes back to the choices.
+      if (key.return) onChoice?.('tell', reason);
+      else if (key.escape) setReason(undefined);
+      else if (key.backspace || key.delete) setReason((r) => (r ?? '').slice(0, -1));
+      else if (input && !key.ctrl && !key.meta) setReason((r) => `${r ?? ''}${input}`);
+      return;
+    }
     if (key.upArrow || key.downArrow) {
-      setSelected((s) => (s === 'no' ? 'yes' : 'no'));
+      setSelected((s) => {
+        const i = choices.indexOf(s);
+        return choices[(i + (key.downArrow ? 1 : choices.length - 1)) % choices.length]!;
+      });
     } else if (key.return) {
-      onResolve(selected === 'yes');
+      choose(selected);
     } else if (key.escape) {
-      onResolve(false);
+      if (onChoice) onChoice('no');
+      else onResolve(false);
       onEscape?.();
+    } else {
+      // Hotkeys (C2): y / n, and a / t where those choices exist.
+      const hot = ({ y: 'yes', n: 'no', a: 'always', t: 'tell' } as const)[input?.toLowerCase() as 'y' | 'n' | 'a' | 't'];
+      if (hot && choices.includes(hot)) choose(hot);
     }
   });
+
+  const label: Record<ConfirmChoice, string> = {
+    no: 'No',
+    yes: `Yes${yesNote ? ` — ${yesNote}` : ''}`,
+    always: `Yes, and always allow ${alwaysLabel ?? 'this'}`,
+    tell: 'No, and tell the model why',
+  };
+  const key: Record<ConfirmChoice, string> = { no: 'n', yes: 'y', always: 'a', tell: 't' };
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
@@ -68,12 +114,19 @@ export function ConfirmDialog({ message, diff, yesNote, onResolve, onEscape }: C
           ))}
         </Box>
       ) : null}
-      <Text color={selected === 'no' ? 'cyan' : undefined} inverse={selected === 'no'}>
-        {selected === 'no' ? '> ' : '  '}No
-      </Text>
-      <Text color={selected === 'yes' ? 'cyan' : undefined} inverse={selected === 'yes'}>
-        {selected === 'yes' ? '> ' : '  '}Yes{yesNote ? ` — ${yesNote}` : ''}
-      </Text>
+      {reason !== undefined ? (
+        <Text>
+          Why not? (Enter sends, Esc goes back): <Text color="cyan">{reason}</Text>
+          <Text inverse> </Text>
+        </Text>
+      ) : (
+        choices.map((c) => (
+          <Text key={c} color={selected === c ? 'cyan' : undefined} inverse={selected === c}>
+            {selected === c ? '> ' : '  '}
+            {label[c]} <Text dimColor>({key[c]})</Text>
+          </Text>
+        ))
+      )}
     </Box>
   );
 }

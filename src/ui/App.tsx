@@ -2,7 +2,14 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { Box, Static, Text, useApp, useInput } from 'ink';
 import { InputBox } from './InputBox.js';
 import { SessionPicker } from './SessionPicker.js';
-import { ConfirmDialog } from './ConfirmDialog.js';
+import { ConfirmDialog, type ConfirmChoice } from './ConfirmDialog.js';
+import { matchesPattern, patternFor } from '../session/permissionRules.js';
+
+/** The tool-confirmation answer (C2). */
+interface ConfirmAnswer {
+  choice: ConfirmChoice;
+  reason?: string;
+}
 import { CommandPalette } from './CommandPalette.js';
 import { ModePicker } from './ModePicker.js';
 import { SessionViewPicker, type SessionViewChoice } from './SessionViewPicker.js';
@@ -114,7 +121,7 @@ import {
   cacheSharePercent,
   cacheReportLines,
 } from './statusBar.js';
-import { AbortedError, CONTEXT_PRESSURE_RATIO, type AgentLoop, type AgentEvent } from '../agent/loop.js';
+import { AbortedError, CONTEXT_PRESSURE_RATIO, type AgentLoop, type AgentEvent, type PolicyAnswer } from '../agent/loop.js';
 import { describeCacheBreak } from '../agent/cacheBreak.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import { createProviderCallLogger, type RunLogger } from '../session/runLog.js';
@@ -1121,7 +1128,9 @@ export function App({
     diff?: readonly StyledDiffLine[];
     tool: Tool;
     input: Record<string, unknown>;
-    resolve: (confirmed: boolean) => void;
+    /** What "always allow" would cover (C2). */
+    alwaysLabel?: string;
+    resolve: (answer: ConfirmAnswer) => void;
   } | null>(null);
 
   const askConfirm = useCallback(
@@ -1130,13 +1139,17 @@ export function App({
       tool: Tool,
       input: Record<string, unknown>,
       diff?: readonly StyledDiffLine[],
-    ): Promise<boolean> => {
+      alwaysLabel?: string,
+    ): Promise<ConfirmAnswer> => {
       return new Promise((resolve) => {
-        setConfirmDialog({ id: nextDialogId++, message, diff, tool, input, resolve });
+        setConfirmDialog({ id: nextDialogId++, message, diff, tool, input, alwaysLabel, resolve });
       });
     },
     [],
   );
+  // "Always allow" answers given this session (C2): consulted before asking again. Also saved to
+  // config as allow rules, which C3's rule engine reads on later runs.
+  const alwaysAllowRef = useRef<string[]>([]);
 
   // Real bug found via hands-on testing, 2026-09-26: switching to Auto mid-turn (Tab or /mode,
   // while a long multi-tool-call turn was already running) kept confirming every remaining
@@ -1234,10 +1247,12 @@ export function App({
   // mode/plansDir variables directly) so a mode change takes effect on the very next tool call,
   // even mid-turn - see the comment on those refs above for why that distinction matters.
   const toolPolicy = useCallback(
-    async (tool: Tool, input: Record<string, unknown>): Promise<'allow' | 'deny' | 'declined'> => {
+    async (tool: Tool, input: Record<string, unknown>): Promise<PolicyAnswer> => {
       const access = classifyToolAccess(turnModeRef.current ?? modeRef.current, tool, input, plansDirRef.current);
       if (access === 'allow') return 'allow';
       if (access === 'deny') return 'deny';
+      if (alwaysAllowRef.current.some((p) => matchesPattern(p, tool, input))) return 'allow';
+      const pattern = patternFor(tool, input);
       // `tool.mcp` is undefined for every built-in; for a proxied tool it is what puts the
       // server, the egress and the server's own claims about the tool in front of the user
       // before they answer. Nothing here decides anything - see confirmPreview.ts.
@@ -1292,17 +1307,29 @@ export function App({
           );
         }
       }
-      const ok = await askConfirm(
+      const answer = await askConfirm(
         formatConfirmMessage(tool.name, input, undefined, tool.mcp, diffSummary, diff !== undefined && !diffSummary),
         tool,
         input,
         diff,
+        pattern,
       );
+      if (answer.choice === 'always') {
+        alwaysAllowRef.current.push(pattern);
+        // Saved where the project's own settings live; read back by the C3 rule engine.
+        void (async () => {
+          const scope = projectRoot ? 'local' : 'global';
+          const current = ((await configStore.readScope(scope)).permissions ?? {}) as { allow?: string[] };
+          const allow = [...new Set([...(current.allow ?? []), pattern])];
+          await configStore.set(scope, 'permissions', { ...current, allow });
+        })().catch(() => undefined);
+      }
+      if (answer.choice === 'yes' || answer.choice === 'always') return 'allow';
       // `declined`, not `deny`: the mode permits this tool and only this call was refused. The loop
       // tells the model which of the two happened, because it changes what the model does next.
-      return ok ? 'allow' : 'declined';
+      return answer.choice === 'tell' && answer.reason?.trim() ? { verdict: 'declined', reason: answer.reason } : 'declined';
     },
-    [askConfirm],
+    [askConfirm, configStore, projectRoot],
   );
 
   // A mode switch (Tab/`/mode`) should take effect immediately on an already-*open* confirmation
@@ -1321,7 +1348,7 @@ export function App({
     if (!confirmDialog) return;
     const access = classifyToolAccess(mode, confirmDialog.tool, confirmDialog.input, plansDir);
     if (access === 'confirm') return;
-    confirmDialog.resolve(access === 'allow');
+    confirmDialog.resolve({ choice: access === 'allow' ? 'yes' : 'no' });
     setConfirmDialog(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
@@ -2816,9 +2843,9 @@ export function App({
     setResumePicker(null);
   }, [resumePicker]);
 
-  const handleConfirmResolve = useCallback(
-    (confirmed: boolean) => {
-      confirmDialog?.resolve(confirmed);
+  const handleConfirmChoice = useCallback(
+    (choice: ConfirmChoice, reason?: string) => {
+      confirmDialog?.resolve({ choice, reason });
       setConfirmDialog(null);
     },
     [confirmDialog],
@@ -3249,7 +3276,9 @@ export function App({
           key={confirmDialog.id}
           message={confirmDialog.message}
           diff={confirmDialog.diff}
-          onResolve={handleConfirmResolve}
+          onResolve={(ok) => handleConfirmChoice(ok ? 'yes' : 'no')}
+          onChoice={handleConfirmChoice}
+          alwaysLabel={confirmDialog.alwaysLabel}
           onEscape={abortTurn}
         />
       ) : stopConfirm ? (
