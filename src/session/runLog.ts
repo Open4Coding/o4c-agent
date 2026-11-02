@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -6,24 +6,29 @@ export function defaultLogsDir(): string {
   return join(homedir(), '.o4c', 'logs');
 }
 
+/** How long entries wait in memory before one batched write - design §3.7's 100 ms. */
+export const RUN_LOG_DRAIN_MS = 100;
+
 /**
  * Records the full, untruncated agent-event stream (tool calls, tool results, model text) as
  * newline-delimited JSON, one file per process run. The REPL itself only ever shows a capped
  * number of lines per turn (see App.tsx) - a codebase-exploration turn that reads dozens of
  * files would otherwise flood the terminal. This is where the full detail actually goes, so
  * nothing is lost even when the screen shows a collapsed summary.
+ *
+ * Writes go through a queue (design §3.7, adopted 2026-09-28, built 2026-11-02). Before it, every
+ * `log()` did its own fire-and-forget `appendFile`, and a FULLCONTEXT entry can be megabytes - Node
+ * writes those in several pieces, and a second append landing between the pieces spliced one
+ * entry into the middle of another (a real corrupted log). Now `log()` only queues the line, and
+ * one synchronous append per drain writes the whole batch, so there is never more than one write
+ * in flight and a line is always written whole. The drain timer is unref'd so a pending drain never
+ * keeps the process alive; `flush()` writes whatever is still queued and is called on every exit
+ * path (cli.ts), because `process.on('exit')` permits no asynchronous work.
  */
 export class RunLogger {
   private filePath: string | undefined;
-  // Memoizes the in-flight *initialization* itself, not just its eventual result - callers
-  // never await log() (App.tsx's `void runLogger.log(...)` is deliberately fire-and-forget for
-  // every event), so several calls can genuinely be concurrent. Checking only `this.filePath`
-  // before it's set is a check-then-act race: multiple concurrent calls could each see it unset
-  // before the first one's `await mkdir()` resolves, each compute a different timestamp, and
-  // split writes across separate files - some events silently landing in a file nothing ever
-  // reads back. Awaiting a single shared promise here means only the first call ever does the
-  // computation; every other concurrent call awaits that same result instead of racing it.
-  private initPromise: Promise<string> | undefined;
+  private queue: string[] = [];
+  private timer: NodeJS.Timeout | undefined;
 
   constructor(
     private dir: string = defaultLogsDir(),
@@ -32,6 +37,7 @@ export class RunLogger {
      * one-file-per-run naming convention in the same directory without colliding with the
      * first. Omitted (the default, plain event log) keeps the original `<timestamp>.jsonl`. */
     private suffix?: string,
+    private drainMs: number = RUN_LOG_DRAIN_MS,
   ) {}
 
   /** The log file's path, once the first entry has been written - undefined before that. */
@@ -39,50 +45,59 @@ export class RunLogger {
     return this.filePath;
   }
 
-  private ensureFile(): Promise<string> {
-    if (!this.initPromise) {
-      this.initPromise = (async () => {
-        await mkdir(this.dir, { recursive: true });
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        this.filePath = join(this.dir, this.suffix ? `${stamp}.${this.suffix}.jsonl` : `${stamp}.jsonl`);
-        return this.filePath;
-      })();
+  private ensureFile(): string {
+    if (!this.filePath) {
+      mkdirSync(this.dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      this.filePath = join(this.dir, this.suffix ? `${stamp}.${this.suffix}.jsonl` : `${stamp}.jsonl`);
     }
-    return this.initPromise;
+    return this.filePath;
   }
 
   /**
-   * Must never reject. Every caller is fire-and-forget (`void runLogger.log(...)` in App.tsx -
-   * never awaited, never caught), so a rejection here becomes an unhandled promise rejection -
-   * and Node >=15 kills the whole process on those by default. A `JSON.stringify` throw is a
-   * real risk, not hypothetical: the FULLCONTEXT log's `provider_call` entries carry a raw
-   * provider request/response, not the small display-derived shapes this class originally only
-   * ever logged, and a large/unusual one (a circular reference, a BigInt, whatever a future
-   * provider's SDK happens to attach) would throw. A disk failure surfacing as a rejection is
-   * the same risk from the other side. Swallowing here is the correct degradation - this entry
-   * is lost, the session continues, exactly like a full disk already silently loses entries
-   * today, just without also killing the process. Best-effort to still leave a trace: writes a
-   * minimal one-line marker instead of the entry that failed, itself guarded so a second failure
-   * (e.g. the disk failure case) can't reject either.
+   * Queues one entry. Must never throw or reject: every caller is fire-and-forget
+   * (`void runLogger.log(...)` in App.tsx), and an unhandled rejection kills the process on
+   * Node >= 15. A `JSON.stringify` throw is a real risk - FULLCONTEXT `provider_call` entries carry
+   * raw provider payloads, and a circular reference or BigInt would throw - so a failed entry is
+   * replaced by a one-line `log_write_failed` marker instead. Still returns a promise (resolved
+   * once queued) so existing call sites keep their shape.
    */
-  async log(entry: Record<string, unknown>): Promise<void> {
+  log(entry: Record<string, unknown>): Promise<void> {
+    let line: string;
     try {
-      const path = await this.ensureFile();
-      const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
-      await appendFile(path, `${line}\n`, 'utf-8');
+      line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
     } catch (err) {
-      try {
-        const path = await this.ensureFile();
-        const marker = JSON.stringify({
-          ts: new Date().toISOString(),
-          type: 'log_write_failed',
-          error: err instanceof Error ? err.message : String(err),
-        });
-        await appendFile(path, `${marker}\n`, 'utf-8');
-      } catch {
-        // Truly nothing left to do - even the marker write failed (e.g. the disk itself is the
-        // problem). Swallow for real this time.
-      }
+      line = JSON.stringify({
+        ts: new Date().toISOString(),
+        type: 'log_write_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    this.queue.push(line);
+    if (!this.timer) {
+      this.timer = setTimeout(() => this.flush(), this.drainMs);
+      this.timer.unref();
+    }
+    return Promise.resolve();
+  }
+
+  /**
+   * Writes everything queued, synchronously, in one append. Idempotent and safe to call from
+   * `process.on('exit')`. A disk failure loses this batch and nothing else - the session goes on,
+   * as a full disk always silently lost entries.
+   */
+  flush(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    if (this.queue.length === 0) return;
+    const batch = `${this.queue.join('\n')}\n`;
+    this.queue = [];
+    try {
+      appendFileSync(this.ensureFile(), batch, 'utf-8');
+    } catch {
+      // Nothing left to do: the disk itself is the problem.
     }
   }
 }

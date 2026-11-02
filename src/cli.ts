@@ -257,16 +257,21 @@ async function runRepl(
   // hard exit again (today App.tsx's Ctrl+C is a reset, not an exit - see the hint line). It
   // permits no asynchronous work, which is exactly why UsageStore writes synchronously, and
   // `flush()` is idempotent so this backstop cannot double-count the explicit call below.
-  if (usageStore) {
-    process.on('exit', () => usageStore.flush());
-    // A kill from outside the app (or any terminal that delivers the signal rather than the raw
-    // byte) would otherwise skip 'exit' entirely.
-    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
-      process.on(signal, () => {
-        usageStore.flush();
-        process.exit(0);
-      });
-    }
+  // The run logs queue their lines (design §3.7) and write them on a short timer; whatever is
+  // still queued is written here, on the same every-path hook.
+  const flushOnExit = () => {
+    usageStore?.flush();
+    runLogger.flush();
+    fullContextLogger.flush();
+  };
+  process.on('exit', flushOnExit);
+  // A kill from outside the app (or any terminal that delivers the signal rather than the raw
+  // byte) would otherwise skip 'exit' entirely.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    process.on(signal, () => {
+      flushOnExit();
+      process.exit(0);
+    });
   }
   let pendingRestart:
     | { resumeId: string | undefined; mode: Mode | undefined; window: string | undefined }
