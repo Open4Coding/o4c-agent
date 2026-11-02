@@ -17,8 +17,11 @@ import { estimateTextTokens } from '../agent/contextEntry.js';
  * code_graph and no environment or O4C.md: default 519, qwen 756 (adds the worked example in
  * Qwen's own tool-call notation), small 119. Worth it if the eval delta says so - recorded in the
  * 0006 checklist under B1.
+ * Tools re-pinned 2026-11-02 for B7, 857 -> 961: edit_file's `edits` list (several changes in one
+ * call, all or nothing). One multi-edit call saves more than that against separate calls, each
+ * re-reading its result.
  */
-const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 857 };
+const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 961 };
 const TOLERANCE = 0.05;
 const ALL_TOOLS = [...defaultTools.map((t) => t.name), 'code_graph'];
 

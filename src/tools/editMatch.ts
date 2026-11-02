@@ -89,10 +89,24 @@ function lineRanges(content: string, old: string, same: (a: string, b: string) =
   return out;
 }
 
-function reindent(text: string, from: string, to: string): string {
+/**
+ * new_string re-indented to the file. A new line indented like the old line in the same position
+ * takes the indentation of the file line that old line matched - which recovers nesting even when
+ * the model dropped all indentation; any other line is shifted by the first line's difference.
+ */
+function reindent(text: string, oldLines: readonly string[], fileLines: readonly string[]): string {
+  const k0 = oldLines.findIndex((l) => l.trim() !== '');
+  const from = leading(oldLines[k0] ?? '');
+  const to = leading(fileLines[k0] ?? '');
   return text
     .split('\n')
-    .map((line) => (line.trim() === '' ? line : line.startsWith(from) ? to + line.slice(from.length) : to + line.trimStart()))
+    .map((line, k) => {
+      if (line.trim() === '') return line;
+      if (k < oldLines.length && k < fileLines.length && oldLines[k].trim() !== '' && leading(oldLines[k]) === leading(line)) {
+        return leading(fileLines[k]) + line.trimStart();
+      }
+      return line.startsWith(from) ? to + line.slice(from.length) : to + line.trimStart();
+    })
     .join('\n');
 }
 
@@ -113,9 +127,9 @@ function ladder(content: string, oldString: string, newString: string): EditMatc
 
   const indented = lineRanges(content, oldString, (a, b) => a.trim() === b.trim());
   if (indented.length) {
-    const oldFirst = oldString.replace(/\r\n/g, '\n').split('\n').find((l) => l.trim() !== '') ?? '';
-    const fileFirst = linesOf(content.slice(indented[0].range[0], indented[0].range[1])).find((l) => l.text.trim() !== '')?.text ?? '';
-    const replacement = toEol(reindent(newString.replace(/\r\n/g, '\n'), leading(oldFirst), leading(fileFirst)), eol);
+    const oldLines = oldString.replace(/\r\n/g, '\n').split('\n');
+    const fileLines = linesOf(content.slice(indented[0].range[0], indented[0].range[1])).map((l) => l.text);
+    const replacement = toEol(reindent(newString.replace(/\r\n/g, '\n'), oldLines, fileLines), eol);
     return { rung: 'indentation', ranges: indented.map((m) => m.range), replacement };
   }
   return undefined;

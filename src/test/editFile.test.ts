@@ -21,7 +21,7 @@ async function withFile(content: string, fn: (path: string) => Promise<void>): P
 
 test('replaces a unique match and leaves the rest of the file alone', async () => {
   await withFile('const a = 1;\nconst b = 2;\n', async (path) => {
-    assert.equal(await editFileTool.execute({ path, old_string: 'const b = 2;', new_string: 'const b = 3;' }), `Edited ${path}: replaced 1 occurrence.`);
+    assert.equal(await editFileTool.execute({ path, old_string: 'const b = 2;', new_string: 'const b = 3;' }), `Edited ${path}: replaced 1 occurrence.\n    1  const a = 1;\n    2  const b = 3;`);
     assert.equal(await readFile(path, 'utf-8'), 'const a = 1;\nconst b = 3;\n');
   });
 });
