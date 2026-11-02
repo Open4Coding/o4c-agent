@@ -1,0 +1,5 @@
+{
+  "category": "bug-fix",
+  "prompt": "`node test/run.mjs` fails. Make it pass without changing the tests.",
+  "tier": "hard"
+}

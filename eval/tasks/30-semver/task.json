@@ -1,0 +1,5 @@
+{
+  "category": "feature",
+  "prompt": "compare() in src/semver.js compares versions as plain strings, so '1.10.0' sorts before '1.9.0'. Make it follow semver precedence, including pre-release versions (1.0.0-alpha < 1.0.0-alpha.1 < 1.0.0-beta.2 < 1.0.0-beta.11 < 1.0.0-rc.1 < 1.0.0). Build metadata (the part after +) is ignored.",
+  "tier": "hard"
+}

@@ -1,0 +1,5 @@
+{
+  "category": "bug-fix",
+  "prompt": "Both handleCreate and handleUpdate in src/handlers.js accept a name made only of spaces (and crash on a non-string name). A name must be a string that is not blank; otherwise return the 'name is required' error. Fix both.",
+  "tier": "hard"
+}

@@ -1,0 +1,5 @@
+{
+  "category": "refactor",
+  "prompt": "In shapes.py, Circle, Square and Rect each repeat the same describe() and scaled() methods. Move them into a common base class Shape that all three inherit from. Behaviour must not change; `python -m unittest` must still pass.",
+  "tier": "hard"
+}

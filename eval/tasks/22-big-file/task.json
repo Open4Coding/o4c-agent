@@ -1,0 +1,5 @@
+{
+  "category": "bug-fix",
+  "prompt": "Converting 10 ounces to grams with our unit library gives 28.3495 instead of about 283.5. Find and fix the bug in src/.",
+  "tier": "hard"
+}

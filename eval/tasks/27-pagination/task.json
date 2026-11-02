@@ -1,0 +1,5 @@
+{
+  "category": "multi-file",
+  "prompt": "Add pagination to GET /users: query parameters limit (default 20, at most 100) and offset (default 0), both non-negative whole numbers. Anything else (a negative, non-numeric or too-large value) is a 400. The response body becomes { users, total }, where total is how many users match the filter before paging. Do the paging in src/db.js, not by slicing in the API layer.",
+  "tier": "hard"
+}

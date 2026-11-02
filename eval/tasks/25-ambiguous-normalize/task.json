@@ -1,0 +1,5 @@
+{
+  "category": "bug-fix",
+  "prompt": "Requests to '/users/' (with a trailing slash) get a 404, but '/users' works. Fix it.",
+  "tier": "hard"
+}

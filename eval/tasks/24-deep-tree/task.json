@@ -1,0 +1,5 @@
+{
+  "category": "bug-fix",
+  "prompt": "The server starts on port 3000 when PORT is not set, but the README says the default is 8080. Fix the default. Don't change anything else.",
+  "tier": "hard"
+}

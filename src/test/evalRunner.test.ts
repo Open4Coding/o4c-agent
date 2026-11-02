@@ -35,9 +35,11 @@ function result(task: string, pass: boolean, tokens = 100, wallS = 10): EvalResu
   };
 }
 
-test('the shipped eval set: 20 tasks, each with a prompt and a category', () => {
+test('the shipped eval set: 20 base and 10 hard tasks, each with a prompt and a category', () => {
   const tasks = loadTasks(defaultEvalDir());
-  assert.equal(tasks.length, 20);
+  assert.equal(tasks.length, 30);
+  assert.equal(loadTasks(defaultEvalDir(), undefined, 'hard').length, 10);
+  assert.equal(loadTasks(defaultEvalDir(), undefined, 'base').length, 20);
   for (const t of tasks) {
     assert.ok(t.prompt.length > 20, t.id);
     assert.ok(['bug-fix', 'feature', 'refactor', 'tests', 'multi-file'].includes(t.category), t.id);
@@ -109,7 +111,7 @@ test('runTask: fresh copy, config written, agent stats parsed, pass script decid
 test('o4c eval list prints every task; an unknown subcommand prints usage', async () => {
   const lines: string[] = [];
   assert.equal(await runEvalCli(['list'], (l) => lines.push(l)), 0);
-  assert.equal(lines.length, 20);
+  assert.equal(lines.length, 30);
   const usage: string[] = [];
   assert.equal(await runEvalCli(['nope'], (l) => usage.push(l)), 2);
   assert.match(usage.join('\n'), /o4c eval run/);

@@ -46,3 +46,8 @@
 # Tree-sitter query files are ordinary text and want the repository default (LF), stated so the
 # pairing with *.wasm above is obvious to the next reader.
 *.scm text eol=lf
+
+# The eval task that tests CRLF handling (plan 0006 J1b) needs its fixture checked out as CRLF -
+# under the LF rule above it would quietly become an ordinary LF task.
+eval/tasks/21-crlf-tabs/repo/** text eol=crlf
+eval/tasks/21-crlf-tabs/solution/** text eol=crlf

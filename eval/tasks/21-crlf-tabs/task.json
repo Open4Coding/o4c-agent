@@ -1,0 +1,5 @@
+{
+  "category": "bug-fix",
+  "prompt": "formatList in src/format.js should produce English lists like its comment says (\"a and b\", \"a, b, and c\") but it just joins with commas. Fix it. Keep the file's existing style.",
+  "tier": "hard"
+}

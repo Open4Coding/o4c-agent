@@ -18,6 +18,8 @@ export interface EvalTask {
   category: string;
   prompt: string;
   timeoutS: number;
+  /** 'base' (the first 20) or 'hard' (J1b: tasks the baseline does not always pass). */
+  tier: string;
 }
 
 export interface EvalResult {
@@ -58,7 +60,7 @@ export function defaultEvalDir(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'eval');
 }
 
-export function loadTasks(evalDir: string, only?: string[]): EvalTask[] {
+export function loadTasks(evalDir: string, only?: string[], tier?: string): EvalTask[] {
   const tasksDir = join(evalDir, 'tasks');
   const ids = readdirSync(tasksDir, { withFileTypes: true })
     .filter((d) => d.isDirectory())
@@ -69,6 +71,7 @@ export function loadTasks(evalDir: string, only?: string[]): EvalTask[] {
     if (only && only.length > 0 && !only.some((o) => id === o || id.startsWith(`${o}-`))) continue;
     const dir = join(tasksDir, id);
     const spec = JSON.parse(readFileSync(join(dir, 'task.json'), 'utf-8')) as Partial<EvalTask>;
+    if (tier && (spec.tier ?? 'base') !== tier) continue;
     if (typeof spec.prompt !== 'string' || !existsSync(join(dir, 'repo')) || !existsSync(join(dir, 'check.mjs'))) {
       throw new Error(`eval task ${id}: needs task.json with "prompt", repo/ and check.mjs`);
     }
@@ -78,6 +81,7 @@ export function loadTasks(evalDir: string, only?: string[]): EvalTask[] {
       category: spec.category ?? 'other',
       prompt: spec.prompt,
       timeoutS: typeof spec.timeoutS === 'number' ? spec.timeoutS : DEFAULT_TIMEOUT_S,
+      tier: spec.tier ?? 'base',
     });
   }
   return tasks;
@@ -256,7 +260,7 @@ function resultsFile(evalDir: string, name: string): string {
 }
 
 const USAGE = `usage:
-  o4c eval run [--tasks id,id] [--name run] [--config json|file] [--timeout s] [--dir eval] [-- o4c flags]
+  o4c eval run [--tasks id,id] [--tier base|hard] [--name run] [--config json|file] [--timeout s] [--dir eval] [-- o4c flags]
   o4c eval diff <runA> <runB> [--dir eval]
   o4c eval list [--dir eval]
 
@@ -303,7 +307,7 @@ export async function runEvalCli(argv: string[], out: (line: string) => void = (
       ? (JSON.parse(existsSync(configArg) ? readFileSync(configArg, 'utf-8') : configArg) as Record<string, unknown>)
       : undefined;
     const timeout = flag('timeout');
-    const tasks = loadTasks(evalDir, flag('tasks')?.split(','));
+    const tasks = loadTasks(evalDir, flag('tasks')?.split(','), flag('tier'));
     const file = resultsFile(evalDir, name);
     mkdirSync(dirname(file), { recursive: true });
     const done = new Set(readResults(file).map((r) => r.task));

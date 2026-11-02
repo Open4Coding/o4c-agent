@@ -1,0 +1,5 @@
+{
+  "category": "bug-fix",
+  "prompt": "Some tests in test/stats.test.js fail. Fix src/stats.js so they all pass; don't change the tests.",
+  "tier": "hard"
+}
