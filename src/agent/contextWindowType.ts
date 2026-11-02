@@ -99,3 +99,15 @@ export function contextWindowTypeControl(initial: ContextWindowType): ContextWin
 export function offersHistorySearch(setting: ContextWindowType): boolean {
   return setting.type === 'pointer' || setting.type === 'curated';
 }
+
+/**
+ * Model-initiated history search (plan 0006 D11, design doc 2.4): config `modelInitiatedSearches`.
+ * `true` offers search_history with every type, `false` never (and then no hint points at it),
+ * unset follows the type - which, with the default type (`floating`), is off.
+ */
+export function historySearchAllowed(setting: ContextWindowType, configured: unknown): boolean {
+  if (configured === true) return true;
+  if (configured === false) return false;
+  return offersHistorySearch(setting);
+}
+export const MODEL_INITIATED_SEARCHES_KEY = 'modelInitiatedSearches';

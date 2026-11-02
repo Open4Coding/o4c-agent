@@ -304,6 +304,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'What o4c remembers across sessions (rules, facts, lessons; project or global): pick one to edit or delete - no LLM call.',
   },
   {
+    name: '/config-contextwindow-modelinitiatedsearches',
+    hidden: true,
+    description: 'Whether the model may search past tasks on its own (search_history): on, off, or auto (only with the pointer and curated context window types - the default).',
+  },
+  {
     name: '/review',
     description: "Have the model review this session's changes (read-only): bugs, missing tests, callers left behind. Optional focus. Usage: /review [focus]",
   },

@@ -49,7 +49,8 @@ import {
   CURATED_RECENT_FRACTION,
   contextWindowTypeControl,
   curatedBudgetTokens,
-  offersHistorySearch,
+  historySearchAllowed,
+  MODEL_INITIATED_SEARCHES_KEY,
   type ContextWindowType,
   type ContextWindowTypeControl,
 } from './agent/contextWindowType.js';
@@ -875,6 +876,8 @@ program
           sessionId,
           currentTask: () => history.recorder.currentTask(),
           entityExists: (uid) => entityExists?.(uid),
+          // No pointer hint at a tool the model was not given (D11).
+          searchAllowed: () => historySearchAllowed(contextWindowType.current(), resolvedConfig[MODEL_INITIATED_SEARCHES_KEY]),
         })
       : undefined;
     loop.registerCore(
@@ -911,7 +914,7 @@ program
       const historyTool = createHistoryTool(history.store, retrieval);
       const syncHistoryTool = (setting: ContextWindowType) => {
         loop.removeTools([historyTool.name]);
-        if (offersHistorySearch(setting)) loop.addTools([historyTool]);
+        if (historySearchAllowed(setting, resolvedConfig[MODEL_INITIATED_SEARCHES_KEY])) loop.addTools([historyTool]);
       };
       syncHistoryTool(contextWindowType.current());
       contextWindowType.onChange(syncHistoryTool);

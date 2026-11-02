@@ -89,6 +89,8 @@ export interface HistoryRetrievalOptions {
   /** The Code Graph's identity lookup, `undefined` while it cannot say (see `entityExists`). */
   readonly entityExists?: (entityUid: string) => boolean | undefined;
   readonly now?: () => number;
+  /** Whether the model may use search_history now (D11); the pointer hint is only given when it can. */
+  readonly searchAllowed?: () => boolean;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -166,6 +168,7 @@ export class HistoryRetrieval {
   /** `pointer`'s one-line hint, or `undefined` when nothing qualifies - then nothing is sent and
    * nothing is spent (brief, Q8). */
   pointerHint(request: string): string | undefined {
+    if (this.options.searchAllowed && !this.options.searchAllowed()) return undefined;
     const threads = this.rank(request, { qualify: true, limit: 3 });
     if (threads.length === 0) return undefined;
     this.record('pointer', request, threads);

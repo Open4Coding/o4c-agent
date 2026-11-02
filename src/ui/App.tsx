@@ -2280,6 +2280,16 @@ export function App({
             setPrefill({ token: nextPrefillToken++, text: `/memory-edit ${row.scope}:${row.id} ${row.text}` });
           }
         }
+      } else if (commandName(input) === '/config-contextwindow-modelinitiatedsearches') {
+        // D11 (design 2.4): whether the model may search past tasks on its own.
+        pushBlock([userLine(input)]);
+        const arg = input.trim().split(/\s+/)[1]?.toLowerCase();
+        if (arg !== 'on' && arg !== 'off' && arg !== 'auto') {
+          pushBlock([infoLine('Usage: /config-contextwindow-modelinitiatedsearches on|off|auto - on: the model gets search_history with every context window type; off: never; auto (default): with the pointer and curated types only.')]);
+        } else {
+          await configStore.set('global', 'modelInitiatedSearches', arg === 'auto' ? undefined : arg === 'on').catch(() => undefined);
+          pushBlock([infoLine(`Model-initiated history search: ${arg}. Takes effect from your next message.`)]);
+        }
       } else if (commandName(input) === '/compact') {
         // D6: compaction now, optionally told what to keep in detail.
         pushBlock([userLine(input)]);
