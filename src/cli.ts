@@ -19,7 +19,7 @@ import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger, createProviderCallLogger } from './session/runLog.js';
-import { SYSTEM_PROMPT } from './agent/systemPrompt.js';
+import { buildSystemPrompt, PROMPT_PROFILE_CONFIG_KEY, promptProfileFor } from './agent/systemPrompt.js';
 import { registerSecret } from './session/redact.js';
 import { defaultProvider } from './session/providerDefault.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
@@ -475,7 +475,6 @@ program
     // Named explicitly: told only "their current directory", the model invented a plausible-looking
     // path when asked where it was (seen live 2026-10-24) and could do the same in a tool call.
     const cwdLine = `Working directory: ${cwd}`;
-    const systemPrompt = [SYSTEM_PROMPT, cwdLine, platformPromptLine(), projectContext].filter(Boolean).join('\n\n');
 
     // An explicit CLI flag always wins; otherwise fall back to the resolved config.json (global
     // -> local -> personal, see configStore.ts), and only then to the option's own hardcoded
@@ -728,6 +727,15 @@ program
       return;
     }
 
+    // Built here, after the probe, so the profile follows the model the server really serves (B1).
+    // The tool set is the one the session starts with: the built-ins, plus code_graph when the graph
+    // will expose it - fixed for the session, like everything else in the system prompt.
+    const systemPrompt = buildSystemPrompt({
+      profile: promptProfileFor(opts.model, resolvedConfig[PROMPT_PROFILE_CONFIG_KEY]),
+      tools: [...defaultTools.map((t) => t.name), ...(trusted && resolvedConfig.codeGraph !== false ? ['code_graph'] : [])],
+      environment: [cwdLine, platformPromptLine()],
+      projectContext,
+    });
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
     // This process's session id, decided now rather than at the first save - every session switch
     // (/clear, /resume, the per-turn reload) is a fresh process, so one process is one session.

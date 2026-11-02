@@ -79,6 +79,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/view-prompt',
+    select: 'run',
+    description: "Show the system prompt this session sends, section by section with token estimates, and which profile chose it (config promptProfile: default, qwen or small) - no LLM call.",
+  },
+  {
     name: '/view-db',
     select: 'run',
     description: "Look into this project's databases (.o4c/db): pick one, then a table, then a row to see it in full - read-only, no LLM call.",

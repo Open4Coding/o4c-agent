@@ -125,7 +125,8 @@ import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } f
 import { buildSplashText } from './splash.js';
 import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
-import { withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
+import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
+import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -1531,6 +1532,22 @@ export function App({
           } catch (err) {
             pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
           }
+        }
+      } else if (commandName(input) === '/view-prompt') {
+        // Display-only: the prompt was fixed when the session started (systemPrompt.ts).
+        pushBlock([userLine(input)]);
+        const prompt = builtSystemPrompt();
+        if (!prompt) pushBlock([infoLine('No system prompt was built in this process.')]);
+        else {
+          const total = prompt.sections.reduce((n, s) => n + estimateTextTokens(s.text), 0);
+          pushBlock([
+            infoLine(
+              [
+                `System prompt - profile ${prompt.profile}, about ${total} tokens (set config promptProfile to default, qwen or small to change it):`,
+                ...prompt.sections.flatMap((s) => ['', `── ${s.name} (${estimateTextTokens(s.text)} tokens)`, s.text]),
+              ].join('\n'),
+            ),
+          ]);
         }
       } else if (commandName(input) === '/view-db') {
         // Read-only and local: database -> table -> one row in full. See dbBrowser.ts.
