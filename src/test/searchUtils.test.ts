@@ -79,7 +79,8 @@ test('o4c\'s own .o4c state is never walked, and grep_files skips binary files (
     assert.ok(!entries.some((e) => e.path.startsWith('.o4c')), 'nothing under .o4c');
 
     const out = await grepTool.execute({ pattern: 'farewellUser', path: dir });
-    assert.match(out, /greet\.ts:1:/);
+    // Grouped under the definition the match is in (plan 0006 B13).
+    assert.match(out, /^greet\.ts\n {2}farewellUser \(function, 1-1\):\n {4}1: export function farewellUser/);
     assert.doesNotMatch(out, /history\.db|blob\.bin/);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -91,7 +92,7 @@ test('grep_files on a single file searches that file instead of answering "No ma
   try {
     await writeFile(join(dir, 'ast.ts'), "export type C =\n  | { kind: 'NotNull' }\n");
     const out = await grepTool.execute({ pattern: 'NotNull', path: join(dir, 'ast.ts') });
-    assert.equal(out, "ast.ts:2: | { kind: 'NotNull' }");
+    assert.equal(out, "ast.ts\n  C (type, 1-2):\n    2: | { kind: 'NotNull' }");
     assert.match(await grepTool.execute({ pattern: 'absent', path: join(dir, 'ast.ts') }), /^No matches/);
   } finally {
     await rm(dir, { recursive: true, force: true });

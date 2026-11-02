@@ -2,8 +2,46 @@ import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { Tool } from './types.js';
 import { walkFiles, globToRegExp } from './searchUtils.js';
+import { groupGrepByDefinition, type Span } from './grepGroup.js';
+import { languageForPath } from '../graph/languages.js';
+import { extractFile } from '../graph/tags.js';
+import { kindFromCapture } from '../graph/entityId.js';
+
+/**
+ * The definitions in each file that matched, parsed now with the bundled grammars - so the
+ * grouping is right for the file as it is, index or no index. Only reached for a narrow search
+ * (at most BROAD_FILES files), and a file with no grammar simply keeps its plain lines.
+ */
+async function spansOf(contents: Map<string, string>): Promise<Map<string, Span[]>> {
+  const out = new Map<string, Span[]>();
+  for (const [file, content] of contents) {
+    const language = languageForPath(file);
+    if (!language) continue;
+    try {
+      const { tags } = await extractFile(content, language.id);
+      out.set(
+        file,
+        tags.filter((t) => t.kind === 'def' && t.endLine).map((t) => ({ name: t.name, kind: kindFromCapture(t.capture), line: t.line, endLine: t.endLine! })),
+      );
+    } catch {
+      // no usable grammar: plain lines for this file
+    }
+  }
+  return out;
+}
 
 const MAX_RESULTS = 200;
+/**
+ * A search this broad answers "where" before "what" (plan 0006 B13): per-file counts first, then
+ * only the first lines. Two hundred raw lines from forty files cost thousands of tokens and still
+ * stop partway; the counts tell the model where to narrow.
+ */
+const BROAD_FILES = 15;
+const BROAD_MATCHES = 80;
+const BROAD_LINES_SHOWN = 40;
+const BROAD_FILES_SHOWN = 30;
+/** Matches counted (not kept) before even the counting stops. */
+const MAX_COUNTED = 5000;
 
 export const grepTool: Tool = {
   name: 'grep_files',
@@ -48,6 +86,9 @@ export const grepTool: Tool = {
       const files = singleFile ? [basename(baseDir)] : entries.filter((e) => !e.isDirectory).map((e) => e.path);
 
       const results: string[] = [];
+      const perFile = new Map<string, number>();
+      const matchedContent = new Map<string, string>();
+      let counted = 0;
       outer: for (const file of files) {
         let content: string;
         try {
@@ -61,8 +102,10 @@ export const grepTool: Tool = {
         const lines = content.split('\n');
         for (let i = 0; i < lines.length; i++) {
           if (regex.test(lines[i])) {
-            results.push(`${file}:${i + 1}: ${lines[i].trim()}`);
-            if (results.length >= MAX_RESULTS) break outer;
+            if (results.length < MAX_RESULTS) results.push(`${file}:${i + 1}: ${lines[i].trim()}`);
+            perFile.set(file, (perFile.get(file) ?? 0) + 1);
+            if (perFile.size <= BROAD_FILES) matchedContent.set(file, content);
+            if (++counted >= MAX_COUNTED) break outer;
           }
         }
       }
@@ -78,7 +121,23 @@ export const grepTool: Tool = {
             : '';
         return `No matches for "${pattern}" under "${baseDir}".${unsearched}`;
       }
-      return results.join('\n') + (results.length >= MAX_RESULTS ? '\n... (results truncated)' : '');
+      if (perFile.size > BROAD_FILES || counted > BROAD_MATCHES) {
+        const capped = counted >= MAX_COUNTED ? ' (counting stopped there)' : '';
+        const byCount = [...perFile.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+        const fileLines = byCount.slice(0, BROAD_FILES_SHOWN).map(([f, n]) => `  ${f} (${n})`);
+        const moreFiles = byCount.length > BROAD_FILES_SHOWN ? [`  ... ${byCount.length - BROAD_FILES_SHOWN} more files`] : [];
+        return [
+          `${counted} matches in ${perFile.size} files${capped} - narrow with "path" or "glob" to see them all. Matches per file:`,
+          ...fileLines,
+          ...moreFiles,
+          `First ${Math.min(BROAD_LINES_SHOWN, results.length)} matches:`,
+          ...results.slice(0, BROAD_LINES_SHOWN),
+        ].join('\n');
+      }
+      // Grouped under the definition each match is in (B13): the path once per file, and which
+      // function a line belongs to - what the model would otherwise read the file to find out.
+      const spans = await spansOf(matchedContent);
+      return groupGrepByDefinition(results.join('\n'), (file) => spans.get(file));
     } catch (err) {
       return `Error searching "${pattern}" under "${baseDir}": ${(err as Error).message}`;
     }
