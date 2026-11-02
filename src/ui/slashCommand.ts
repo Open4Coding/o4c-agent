@@ -299,6 +299,21 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose the shell run_shell uses: auto, cmd, pwsh (PowerShell 7), powershell (5.1), bash or sh - saved to config.',
   },
   {
+    name: '/undo',
+    select: 'run',
+    description: "Put the project's files back as they were before the last turn changed them (a shadow git copy in .o4c/checkpoints - your .git is untouched). The undone state is kept as a restore point.",
+  },
+  {
+    name: '/rewind',
+    select: 'run',
+    description: 'Pick a turn from a list and go back to before it: the files, the conversation, or both.',
+  },
+  {
+    name: '/diff',
+    select: 'run',
+    description: "Show what changed in the project's files since this session's first checkpoint - no LLM call.",
+  },
+  {
     name: '/ps',
     select: 'run',
     description: 'List background jobs started with run_shell background:true - id, state, command - no LLM call.',

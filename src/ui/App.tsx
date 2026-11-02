@@ -129,6 +129,7 @@ import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } fro
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
+import type { CheckpointHooks } from '../session/checkpoints.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -173,6 +174,8 @@ export interface AppProps {
    * Absent without a trusted project, or in tests that are not about plans.
    */
   plans?: PlanHooks;
+  /** /undo, /rewind, /diff (plan 0006 C1); undefined when checkpoints are off or git is missing. */
+  checkpoints?: CheckpointHooks;
   /**
    * The live context window type (NextUp item 23), shared with the components that act on it -
    * the history recorder and the request builders. Absent in tests that are not about it, where
@@ -639,6 +642,7 @@ export function App({
   contextWindowType,
   markWorked,
   plans,
+  checkpoints,
   restart,
   initialMode,
   os = detectCurrentOs(),
@@ -2132,6 +2136,66 @@ export function App({
           pushBlock([infoLine(detailLines.join('\n'))]);
           void runLogger.log({ type: 'system', sub_type: 'info', command: `/help-${rest}` });
         }
+      } else if (commandName(input) === '/undo' || commandName(input) === '/diff' || commandName(input) === '/rewind') {
+        // Checkpoints (C1): the shadow git repository under .o4c/checkpoints, never the user's .git.
+        pushBlock([userLine(input)]);
+        const cmd = commandName(input);
+        if (!checkpoints) {
+          pushBlock([infoLine('Checkpoints are off here: they need a trusted project, git installed, and config checkpoints not set to false.')]);
+        } else {
+          const turns = checkpoints.store.list(checkpoints.sessionId);
+          if (turns.length === 0) {
+            pushBlock([infoLine('No checkpoints yet in this session - one is taken before the first change of each turn.')]);
+          } else if (cmd === '/diff') {
+            const first = turns[turns.length - 1]!;
+            pushBlock([infoLine(`Changes since before "${first.label}":\n${checkpoints.shadow.diffSince(first.git_commit)}`)]);
+          } else {
+            let target = turns[0]!;
+            let what: 'files' | 'conversation' | 'both' = 'files';
+            if (cmd === '/rewind') {
+              const picked = await pickChoice(
+                'Rewind to before which turn? (↑/↓, Enter, Esc to cancel)',
+                turns.map((t) => ({ key: String(t.id), label: `${new Date(t.created_at).toLocaleTimeString()}  ${t.label}` })),
+              );
+              const found = turns.find((t) => String(t.id) === picked);
+              const how = found
+                ? await pickChoice<'files' | 'conversation' | 'both'>('Restore what?', [
+                    { key: 'files', label: 'Files only - the conversation stays' },
+                    { key: 'conversation', label: 'Conversation only - the files stay' },
+                    { key: 'both', label: 'Both' },
+                  ])
+                : undefined;
+              if (!found || !how) {
+                pushBlock([infoLine('Nothing rewound.')]);
+                return;
+              }
+              target = found;
+              what = how;
+            }
+            if (what !== 'conversation') {
+              try {
+                const r = checkpoints.shadow.restore(target.git_commit);
+                checkpoints.store.add({ session_id: checkpoints.sessionId, turn_entry_id: null, label: `restore point before going back to "${target.label}"`, git_commit: r.current, kind: 'restore' });
+                pushBlock([infoLine(`Files restored to before "${target.label}": ${r.restored} restored, ${r.removed} removed. The state you left is kept as a restore point (git ${r.current.slice(0, 8)} in .o4c/checkpoints).`)]);
+              } catch (err) {
+                pushBlock([{ kind: 'error', text: `Could not restore: ${formatError(err)}` }]);
+                return;
+              }
+            }
+            if (what !== 'files') {
+              const entries = loop.getEntries();
+              const at = target.turn_entry_id ? entries.findIndex((e) => e.id === target.turn_entry_id) : -1;
+              if (at < 0) {
+                pushBlock([infoLine('The conversation could not be rewound: that turn is not in this session any more.')]);
+              } else {
+                loop.loadEntries(entries.slice(0, at));
+                await saveSessionNow();
+                pushBlock([infoLine(`Conversation rewound to before "${target.label}". Reloading...`)]);
+                restart(currentSessionIdRef.current, modeRef.current);
+              }
+            }
+          }
+        }
       } else if (commandName(input) === '/set-shell') {
         // B24: which shell run_shell uses. Saved to config; the next message's process picks it up
         // (the system prompt names the shell, so changing it costs one full re-read of the context).
@@ -2668,7 +2732,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans, pickChoice],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans, pickChoice, checkpoints],
   );
 
   const handleModePickerSelect = useCallback(

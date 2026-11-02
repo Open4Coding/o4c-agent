@@ -28,6 +28,7 @@ import { setShellTimeoutDefault } from './tools/runShell.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY, shellPromptLine } from './tools/shell.js';
 import { describeJob, killOwnedJobs, setJobsDir, unreportedFinished } from './tools/jobs.js';
 import { fileStateComponent, fileStatePath } from './session/fileState.js';
+import { checkpointComponent, ShadowGit, type CheckpointHooks } from './session/checkpoints.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -224,6 +225,7 @@ async function runRepl(
   contextWindowType?: ContextWindowTypeControl,
   markWorked?: (arg: string) => string,
   plans?: PlanHooks,
+  checkpoints?: CheckpointHooks,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -300,6 +302,7 @@ async function runRepl(
       contextWindowType,
       markWorked,
       plans,
+      checkpoints,
       restart,
       initialMode,
       sessionView,
@@ -820,6 +823,12 @@ program
     recordLifecycle(lifecycleDir, 'history', { opened: history !== undefined });
     // What the model has read, so edits are made against the file as it is (plan 0006 B9). After the
     // history recorder and before the graph: the graph stays the innermost aroundTool wrapper.
+    // Checkpoints (C1): the files as they were before each turn changed them, in a shadow git repo.
+    const checkpointHooks: CheckpointHooks | undefined =
+      history && trusted && projectRoot && resolvedConfig.checkpoints !== false && ShadowGit.available()
+        ? { shadow: new ShadowGit(projectRoot), store: history.store.checkpoints(), sessionId }
+        : undefined;
+    if (checkpointHooks) loop.registerCore(checkpointComponent(checkpointHooks));
     if (resolvedConfig.fileStateGuard !== false) {
       loop.registerCore(fileStateComponent({ file: fileStatePath(trusted ? projectRoot : undefined, sessionId) }));
     }
@@ -1038,6 +1047,7 @@ program
               graphMap: graph ? (focus, maxTokens) => graph.component.rankedMap(focus, maxTokens) : undefined,
             }),
         },
+        checkpointHooks,
       );
       return;
     }
