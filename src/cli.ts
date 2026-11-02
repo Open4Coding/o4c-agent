@@ -30,7 +30,8 @@ import { describeJob, killOwnedJobs, setJobsDir, unreportedFinished } from './to
 import { fileStateComponent, fileStatePath } from './session/fileState.js';
 import { checkpointComponent, ShadowGit, type CheckpointHooks } from './session/checkpoints.js';
 import { evaluateRules, loadRules } from './session/permissionRules.js';
-import { splitShellSegments } from './tools/interactive.js';
+import { destructiveReason, splitShellSegments } from './tools/interactive.js';
+import { loadO4cIgnore, o4cIgnoreComponent } from './tools/o4cIgnore.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -832,6 +833,8 @@ program
         ? { shadow: new ShadowGit(projectRoot), store: history.store.checkpoints(), sessionId }
         : undefined;
     if (checkpointHooks) loop.registerCore(checkpointComponent(checkpointHooks));
+    // .o4cignore (C5): only when the project has one.
+    if (loadO4cIgnore(trusted ? projectRoot : undefined)) loop.registerCore(o4cIgnoreComponent());
     if (resolvedConfig.fileStateGuard !== false) {
       loop.registerCore(fileStateComponent({ file: fileStatePath(trusted ? projectRoot : undefined, sessionId) }));
     }
@@ -1056,7 +1059,7 @@ program
     }
 
     const loadedRules = await loadRules((s) => configStore.readScope(s as 'global' | 'local' | 'personal'));
-    const headlessRules = loadedRules.deny.length + loadedRules.ask.length > 0 ? loadedRules : undefined;
+    const headlessRules = loadedRules.deny.length + loadedRules.ask.length > 0 || loadedRules.confirmDestructive ? loadedRules : undefined;
 
     // `--session`: a headless multi-turn session, one process per message - how a script drives a
     // long run (e.g. the C:\tmp.tmp4 test project) through every context window type, which only
@@ -1091,6 +1094,8 @@ program
               const ruled = evaluateRules(headlessRules, tool, input, splitShellSegments);
               if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
               if (ruled?.decision === 'ask') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} asks for approval, which a headless run cannot give` };
+              const destructive = headlessRules.confirmDestructive && tool.name === 'run_shell' && typeof input.command === 'string' ? destructiveReason(input.command) : undefined;
+              if (destructive) return { verdict: 'deny', reason: `confirmDestructive is on and ${destructive} needs approval, which a headless run cannot give` };
               return 'allow';
             }
           : undefined,

@@ -61,6 +61,36 @@ function segments(command: string): Array<{ words: string[]; piped: boolean }> {
 
 const base = (word: string) => word.replace(/^["']|["']$/g, '').split(/[\\/]/).pop()!.replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
 
+/**
+ * Commands that destroy work in one step (plan 0006 C5) - asked about even in Auto mode when the
+ * user turns on `confirmDestructive`. Matched per segment of a chained command.
+ */
+const DESTRUCTIVE: ReadonlyArray<[RegExp, string]> = [
+  [/^rm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-r|-R|--recursive)\b/i, 'recursive delete'],
+  [/^(rmdir|rd)\s+.*\/s\b/i, 'recursive delete'],
+  [/^del\s+.*(\/s|\*)/i, 'bulk delete'],
+  [/^remove-item\b.*-recurse/i, 'recursive delete'],
+  [/^git\s+reset\s+.*--hard/i, 'discards uncommitted work'],
+  [/^git\s+clean\s+.*-[a-z]*f/i, 'deletes untracked files'],
+  [/^git\s+push\s+.*(--force|-f\b)/i, 'rewrites remote history'],
+  [/^git\s+checkout\s+(--\s+)?\.$/i, 'discards uncommitted work'],
+  [/^git\s+(branch\s+-D|stash\s+(drop|clear))\b/i, 'deletes work'],
+  [/^(format|mkfs|diskpart|shutdown|reboot)\b/i, 'system-level'],
+  [/^dd\s+.*\bof=/i, 'raw disk write'],
+  [/\b(drop\s+(table|database|schema)|truncate\s+table)\b/i, 'destroys data'],
+  [/^(npm|pnpm|yarn)\s+unpublish\b/i, 'removes a published package'],
+  [/^reg\s+delete\b/i, 'registry delete'],
+];
+
+/** Why this command is destructive, or undefined. */
+export function destructiveReason(command: string): string | undefined {
+  for (const segment of splitShellSegments(command)) {
+    const hit = DESTRUCTIVE.find(([re]) => re.test(segment.trim()));
+    if (hit) return `${segment.trim().slice(0, 60)} (${hit[1]})`;
+  }
+  return undefined;
+}
+
 /** The commands in a chained or piped command line, as text - for the permission rules (C3). */
 export function splitShellSegments(command: string): string[] {
   return segments(command).map((s) => s.words.join(' '));

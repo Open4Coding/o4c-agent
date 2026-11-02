@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import { GITIGNORE_FILENAME, IgnoreRules, loadRulesDownTo } from './gitignore.js';
+import { isO4cIgnored } from './o4cIgnore.js';
 
 /**
  * Directories never walked, whatever `.gitignore` says.
@@ -114,14 +115,15 @@ export async function walkFiles(baseDir: string, options: WalkOptions = {}): Pro
       if (entry.isDirectory()) {
         if (ALWAYS_SKIP_DIRS.has(entry.name)) continue;
         if (!context && SKIP_WITHOUT_GIT.has(entry.name)) continue;
-        if (rules.ignores(fromRoot(relPath), true)) {
+        if (rules.ignores(fromRoot(relPath), true) || isO4cIgnored(join(dir, entry.name), true)) {
           ignored++;
           continue;
         }
         entries.push({ path: relPath, isDirectory: true });
         await walk(join(dir, entry.name), relPath, rules);
       } else if (entry.isFile()) {
-        if (rules.ignores(fromRoot(relPath), false)) {
+        // .o4cignore (C5) as well as .gitignore.
+        if (rules.ignores(fromRoot(relPath), false) || isO4cIgnored(join(dir, entry.name), false)) {
           ignored++;
           continue;
         }

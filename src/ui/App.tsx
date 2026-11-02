@@ -4,7 +4,7 @@ import { InputBox } from './InputBox.js';
 import { SessionPicker } from './SessionPicker.js';
 import { ConfirmDialog, type ConfirmChoice } from './ConfirmDialog.js';
 import { describeRules, evaluateRules, loadRules, matchesPattern, patternFor } from '../session/permissionRules.js';
-import { splitShellSegments } from '../tools/interactive.js';
+import { destructiveReason, splitShellSegments } from '../tools/interactive.js';
 
 /** The tool-confirmation answer (C2). */
 interface ConfirmAnswer {
@@ -1254,9 +1254,12 @@ export function App({
       if (access === 'deny') return 'deny';
       // Permission rules (C3), read fresh so an edit to config.json applies at once: deny > ask >
       // allow, and ahead of the mode's own allow, so a deny or ask rule holds in Auto mode too.
-      const ruled = evaluateRules(await loadRules((s) => configStore.readScope(s as ConfigScope)), tool, input, splitShellSegments);
+      const rulesNow = await loadRules((s) => configStore.readScope(s as ConfigScope));
+      const ruled = evaluateRules(rulesNow, tool, input, splitShellSegments);
       if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
-      if (ruled?.decision !== 'ask') {
+      // C5: with confirmDestructive on, a destructive command always asks - Auto mode included.
+      const destructive = rulesNow.confirmDestructive && tool.name === 'run_shell' && typeof input.command === 'string' ? destructiveReason(input.command) : undefined;
+      if (ruled?.decision !== 'ask' && !destructive) {
         if (access === 'allow' || ruled?.decision === 'allow') return 'allow';
         if (alwaysAllowRef.current.some((p) => matchesPattern(p, tool, input))) return 'allow';
       }

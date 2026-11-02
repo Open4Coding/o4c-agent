@@ -46,7 +46,7 @@ export function matchesPattern(pattern: string, tool: Tool, input: Record<string
 
 // ------------------------------------------------------------------ rules (plan 0006 C3)
 
-export type RuleScope = 'global' | 'local' | 'personal' | 'built-in';
+export type RuleScope = 'global' | 'local' | 'personal' | 'built-in' | 'protectedPaths';
 
 /**
  * Read-only shell commands allowed without asking - only when the user turns it on
@@ -65,6 +65,8 @@ export interface PermissionRules {
   allow: Rule[];
   ask: Rule[];
   deny: Rule[];
+  /** Config `confirmDestructive` (C5): destructive shell commands always ask. */
+  confirmDestructive?: boolean;
 }
 export interface RuleDecision {
   decision: 'allow' | 'ask' | 'deny';
@@ -88,6 +90,14 @@ export async function loadRules(readScope: (scope: RuleScope) => Promise<Record<
   }
   const merged = { ...(await readScope('global')), ...(await readScope('local')), ...(await readScope('personal')) };
   if (merged.autoAllowReadOnly === true) for (const pattern of READ_ONLY_SHELL) out.allow.push({ pattern, scope: 'built-in' });
+  // C5: protected paths are deny rules for the tools that change files.
+  if (Array.isArray(merged.protectedPaths)) {
+    for (const glob of merged.protectedPaths) {
+      if (typeof glob !== 'string' || !glob.trim()) continue;
+      for (const t of ['write_file', 'edit_file']) out.deny.push({ pattern: `${t}(${glob.trim()})`, scope: 'protectedPaths' });
+    }
+  }
+  if (merged.confirmDestructive === true) out.confirmDestructive = true;
   return out;
 }
 
