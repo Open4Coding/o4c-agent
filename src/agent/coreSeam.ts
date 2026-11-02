@@ -135,9 +135,11 @@ export interface CoreComponent {
    * previous request re-processes everything after it. A component whose information changes
    * now and then (the active plan) returns it here instead: the loop appends it to history as a
    * note, once, only when it differs from the last note this component left, folded into the user
-   * message of the turn. It never moves afterwards. Called once per user turn; undefined = nothing.
+   * message of the turn. It never moves afterwards. Called once per user turn with that turn's
+   * message (the `pointer` hint searches with it); undefined = nothing. `info` shows a line to the
+   * user, like `RequestBuild.info`.
    */
-  turnNote?(): string | undefined;
+  turnNote?(turn: { message: string; info?: (text: string) => void }): string | undefined;
 }
 
 /** Reports a degraded hook. Matches `AgentEvent`'s `warning` channel without importing it. */
@@ -173,11 +175,11 @@ export class CoreRegistry {
   }
 
   /** Each note-giving component's current note, by component name. A throwing one is skipped. */
-  turnNotes(warn: SeamWarning): Array<{ name: string; text: string }> {
+  turnNotes(turn: { message: string; info?: (text: string) => void }, warn: SeamWarning): Array<{ name: string; text: string }> {
     const out: Array<{ name: string; text: string }> = [];
     for (const component of this.noteHooks) {
       try {
-        const text = component.turnNote?.();
+        const text = component.turnNote?.(turn);
         if (text) out.push({ name: component.name, text });
       } catch (error) {
         warn(`Core component "${component.name}" failed to give its note: ${describe(error)}`);

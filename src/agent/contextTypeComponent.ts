@@ -79,7 +79,6 @@ function withNote(entry: ContextEntry, text: string): ContextEntry {
 export function contextTypeComponent(options: ContextTypeComponentOptions): CoreComponent {
   // Computed once per user message and reused for every request in that turn: a turn makes many
   // requests (one per tool round) and the hint must not change, or cost a search, between them.
-  let pointerCache: { entryId: string; hint: string | undefined } | undefined;
   let curatedCache: { entryId: string; key: string; history: string | undefined } | undefined;
   // The trim's cut, kept for the rest of the turn (plan 0006 A10) so the rounds of one turn send a
   // stable prefix; a new turn rebuilds the curated window anyway.
@@ -87,6 +86,15 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
 
   return {
     name: 'context-window-type',
+    // The pointer hint, given once per message as a turn note (A10b): stored in history with the
+    // message it was searched for, so a later turn never changes it. It used to be folded into the
+    // current message on every request, which re-processed the previous turn at every new one.
+    turnNote: ({ message, info }) => {
+      if (options.control.current().type !== 'pointer' || !options.retrieval?.pointerHint) return undefined;
+      const hint = options.retrieval.pointerHint(message);
+      if (hint) info?.(`history hint sent: ${hint.replace(/\s+/g, ' ').trim()}`);
+      return hint;
+    },
     buildRequest: async ({ entries, contextWindow, tokenRatio, beforeNewMessage, info }: RequestBuild) => {
       // Budgets below are in real tokens; everything here measures in estimated ones.
       const ratio = tokenRatio && tokenRatio > 0 ? tokenRatio : 1;
@@ -108,17 +116,9 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
 
       if (setting.type === 'none') return entries.slice(turn);
 
-      if (setting.type === 'pointer') {
-        if (!options.retrieval?.pointerHint) return entries;
-        if (pointerCache?.entryId !== current.id) {
-          pointerCache = { entryId: current.id, hint: options.retrieval.pointerHint(current.content) };
-          // Once per message, like the search: the model reads the hint on every request of the turn.
-          if (pointerCache.hint) info?.(`history hint sent: ${pointerCache.hint.replace(/\s+/g, ' ').trim()}`);
-        }
-        const hint = pointerCache.hint;
-        if (!hint) return entries;
-        return [...entries.slice(0, turn), withNote(current, hint), ...entries.slice(turn + 1)];
-      }
+      // pointer: the hint is a turn note now (turnNote below, plan 0006 A10b), so the request is
+      // the full history, as floating's.
+      if (setting.type === 'pointer') return entries;
 
       if (setting.type === 'curated') {
         if (!options.retrieval?.curatedHistory) return entries;

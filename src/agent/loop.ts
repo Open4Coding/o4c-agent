@@ -1287,8 +1287,10 @@ export class AgentLoop {
     if (options.modeInstruction && options.modeInstruction !== this.lastNote(MODE_NOTE_TAG)) {
       this.appendEntry(noteEntry(options.modeInstruction, [MODE_NOTE_TAG]), onEntry);
     }
-    // Components' turn notes (the active plan), the same way: once, when changed (A8).
-    for (const { name, text } of this.core.turnNotes((message) => onEvent({ type: 'warning', text: message }))) {
+    // Components' turn notes (the active plan, the pointer hint), the same way: once, when changed
+    // (A8, A10b).
+    const turnMessage = this.entries[lengthBeforeTurn]?.content ?? userMessage;
+    for (const { name, text } of this.core.turnNotes({ message: turnMessage, info: infoSeam }, (message) => onEvent({ type: 'warning', text: message }))) {
       const tag = `note:${name}`;
       if (text !== this.lastNote(tag)) this.appendEntry(noteEntry(text, [tag]), onEntry);
     }

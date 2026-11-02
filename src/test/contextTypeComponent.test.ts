@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { AgentLoop } from '../agent/loop.js';
+import type { CompletionRequest, CompletionResponse, LLMProvider } from '../providers/types.js';
 import assert from 'node:assert/strict';
 
 import { contextTypeComponent, currentTurnStart, recentTurnsStart } from '../agent/contextTypeComponent.js';
@@ -54,7 +56,7 @@ test('floating: everything, untouched (sizing is /window\'s job)', async () => {
   assert.equal(await build({ type: 'floating' }, entries), entries);
 });
 
-test('pointer: the hint is added to the current message only, once per turn', async () => {
+test('pointer: the hint is a turn note - searched once per message, stored, never moved (plan 0006 A10b)', async () => {
   let searches = 0;
   const retrieval = {
     pointerHint: (request: string) => {
@@ -65,17 +67,32 @@ test('pointer: the hint is added to the current message only, once per turn', as
   const control = contextWindowTypeControl({ type: 'pointer' });
   const component = contextTypeComponent({ control, retrieval });
   const entries = conversation();
+  assert.equal(await component.buildRequest!({ entries }), entries, 'requests carry the history as is');
+
   const shown: string[] = [];
-  const info = (text: string) => shown.push(text);
-  const first = await component.buildRequest!({ entries, info });
-  await component.buildRequest!({ entries, info });
-  assert.equal(searches, 1, 'many requests in one turn, one search');
-  assert.deepEqual(shown, ['history hint sent: [hint for: current request]'], 'shown once, like the search');
-  const current = first.find((e) => e.content.startsWith('current request'))!;
-  assert.equal(current.content, 'current request\n\n[hint for: current request]');
-  assert.equal(first.length, entries.length);
-  assert.equal(entries[7].content, 'current request', 'history itself is never changed');
+  const loop = new AgentLoop(new EchoProvider(), [], 'sys');
+  loop.registerCore(component);
+  const provider = loop['provider'] as EchoProvider;
+  await loop.run('first ask', { onEvent: (e) => { if (e.type === 'info' && e.text) shown.push(e.text); } });
+  await loop.run('second ask', { onEvent: (e) => { if (e.type === 'info' && e.text) shown.push(e.text); } });
+  assert.equal(searches, 2, 'one search per message');
+  assert.deepEqual(shown, ['history hint sent: [hint for: first ask]', 'history hint sent: [hint for: second ask]']);
+  const second = provider.requests[1]!.messages;
+  assert.equal(second[0]!.content, 'first ask\n\n[hint for: first ask]', 'the earlier message is unchanged in the later request');
+  assert.equal(second[2]!.content, 'second ask\n\n[hint for: second ask]');
+
+  control.set({ type: 'floating' });
+  assert.equal(component.turnNote!({ message: 'x' }), undefined, 'only for pointer');
 });
+
+class EchoProvider implements LLMProvider {
+  readonly name = 'echo';
+  requests: CompletionRequest[] = [];
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    this.requests.push(request);
+    return { content: 'ok', toolCalls: [], stopReason: 'end_turn' };
+  }
+}
 
 test('pointer with nothing qualifying sends exactly what floating would', async () => {
   const entries = conversation();
