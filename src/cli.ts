@@ -19,6 +19,7 @@ import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger, createProviderCallLogger } from './session/runLog.js';
+import { SYSTEM_PROMPT } from './agent/systemPrompt.js';
 import { registerSecret } from './session/redact.js';
 import { defaultProvider } from './session/providerDefault.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
@@ -166,9 +167,6 @@ function spawnRestart(
   return result.status ?? 0;
 }
 
-const SYSTEM_PROMPT = `You are o4c, the open4coding programming harness. You help the user with
-software engineering tasks in their current directory. You have tools to read files, write files,
-and run shell commands. Use them as needed to complete the user's request, then give a clear final answer.`;
 
 function printEvent(event: AgentEvent): void {
   // Raw streamed text, written as-is with no line wrapping - the natural way to show streaming
