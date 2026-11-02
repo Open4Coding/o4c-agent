@@ -31,6 +31,8 @@ import {
   splitThinkBlock,
   toWireMessages,
   userInputEntry,
+  noteEntry,
+  MODE_NOTE_TAG,
   type ContextEntry,
 } from './contextEntry.js';
 import {
@@ -489,6 +491,15 @@ export class AgentLoop {
     return this.usage;
   }
 
+  /** The mode instruction the model last saw: the newest visible mode note, if any. */
+  private lastModeNote(): string | undefined {
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i]!;
+      if (e.type === 'user' && e.sub_type === 'note' && e.agent_visible !== false && e.tags?.includes(MODE_NOTE_TAG)) return e.content;
+    }
+    return undefined;
+  }
+
   /** The most recent prompt-cache breaks this process saw, newest last (at most 20). */
   getCacheBreaks(): readonly CacheBreak[] {
     return this.cacheBreaks;
@@ -600,6 +611,8 @@ export class AgentLoop {
    * at construction would under-count every turn after they arrive.
    */
   private overheadTokenEstimate(modeInstruction?: string): number {
+    // The mode note is in history now (counted with it), but a turn's estimate is taken before the
+    // note is appended, so it is still added here - a few dozen tokens, counted once.
     const systemPromptForRequest = modeInstruction ? `${this.systemPrompt}\n\n${modeInstruction}` : this.systemPrompt;
     const toolDefsJson = JSON.stringify(
       this.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
@@ -1210,14 +1223,18 @@ export class AgentLoop {
     // block below.
     const lengthBeforeTurn = this.entries.length;
     this.appendEntry(userInputEntry(await this.boundUserInput(userMessage, options), options.images), onEntry);
+    // The mode instruction rides in history, once per change, not in the system prompt (plan 0006
+    // A5): a mode switch used to rewrite byte zero of every request and cost a full re-process.
+    if (options.modeInstruction && options.modeInstruction !== this.lastModeNote()) {
+      this.appendEntry(noteEntry(options.modeInstruction, [MODE_NOTE_TAG]), onEntry);
+    }
     const toolDefs = this.tools.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
     }));
-    const systemPromptForRequest = options.modeInstruction
-      ? `${this.systemPrompt}\n\n${options.modeInstruction}`
-      : this.systemPrompt;
+    // Identical on every request of the session - see `noteEntry` for why.
+    const systemPromptForRequest = this.systemPrompt;
 
     // Real bug found via hands-on testing, 2026-09-26: abort was previously detected only
     // *reactively*, when the provider call itself happened to reject because of the signal - so

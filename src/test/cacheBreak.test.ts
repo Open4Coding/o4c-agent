@@ -39,6 +39,10 @@ test('diagnoseCacheBreak: held cache, system prompt, tools, history, evicted', (
 class CacheAwareProvider implements LLMProvider {
   private lastSystem: string | undefined;
   private lastInput = 0;
+  /** Simulates another client taking the slot. */
+  forgetCache(): void {
+    this.lastInput = 0;
+  }
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     const input = 100 + request.messages.length * 10;
     const cachedTokens = this.lastSystem === undefined || this.lastSystem === request.systemPrompt ? this.lastInput : 0;
@@ -48,16 +52,19 @@ class CacheAwareProvider implements LLMProvider {
   }
 }
 
-test('a mode switch mid-session is reported as a system prompt break, with an event for the run log', async () => {
-  const loop = new AgentLoop(new CacheAwareProvider(), [], 'system');
+test('a mode switch no longer breaks the cache (A5); a miss on a pure append is reported as evicted, with an event', async () => {
+  const provider = new CacheAwareProvider();
+  const loop = new AgentLoop(provider, [], 'system');
   const events: AgentEvent[] = [];
   const onEvent = (e: AgentEvent) => events.push(e);
   await loop.run('one', { onEvent });
-  await loop.run('two', { onEvent });
-  assert.equal(loop.getCacheBreaks().length, 0, 'same system prompt: the cache held');
-  await loop.run('three', { onEvent, modeInstruction: 'Plan mode: read only.' });
+  await loop.run('two', { onEvent, modeInstruction: 'Current mode: Plan.' });
+  await loop.run('three', { onEvent, modeInstruction: 'Current mode: Auto.' });
+  assert.equal(loop.getCacheBreaks().length, 0, 'mode switches: the system prompt never changed');
+  provider.forgetCache();
+  await loop.run('four', { onEvent });
   const breaks = loop.getCacheBreaks();
   assert.equal(breaks.length, 1);
-  assert.equal(breaks[0]!.reason, 'system prompt');
-  assert.match(events.find((e) => e.type === 'cache_break')!.text!, /^cache break: system prompt/);
+  assert.equal(breaks[0]!.reason, 'evicted');
+  assert.match(events.find((e) => e.type === 'cache_break')!.text!, /^cache break: evicted/);
 });

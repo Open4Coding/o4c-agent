@@ -22,7 +22,8 @@ export type EntrySubType =
   | 'worktree'
   | 'plugin-lifecycle'
   | 'compaction'
-  | 'prune';
+  | 'prune'
+  | 'note';
 
 /**
  * The single shape used both as `AgentLoop`'s live in-session history and, once §7's
@@ -119,6 +120,21 @@ function newEntry(partial: Omit<ContextEntry, 'id' | 'session_id' | 'created_at'
 /** Tags the loop's own "Continue with the task." nudge - a `user`/`input` entry nobody typed, so
  * the history recorder must not open a new task for it. */
 export const CONTINUATION_TAG = 'continuation';
+
+/** Tag on a note that carries the session's mode instruction (`loop.ts`, plan 0006 A5). */
+export const MODE_NOTE_TAG = 'mode-note';
+
+/**
+ * A note for the model that lives in history instead of the system prompt (plan 0006 A5). The
+ * system prompt has to stay byte-identical for llama-server to reuse its prompt cache - a hybrid
+ * model like Qwen3.8 re-processes everything after the first changed byte, and a changed system
+ * prompt is a change at byte zero. A note is appended once, where the thing it says became true,
+ * and `toWireMessages` folds it into the user message it follows, so it never moves afterwards.
+ * Never repainted: it is for the model, not the screen.
+ */
+export function noteEntry(content: string, tags?: string[]): ContextEntry {
+  return newEntry({ type: 'user', sub_type: 'note', content, user_visible: false, ...(tags ? { tags } : {}) });
+}
 
 export function userInputEntry(content: string, images?: string[]): ContextEntry {
   return newEntry({ type: 'user', sub_type: 'input', content, images });
@@ -362,6 +378,19 @@ export function toWireMessages(
     if (entry.type === 'user' && entry.sub_type === 'input') {
       flush();
       messages.push({ role: 'user', content: entry.content, images: entry.images });
+      continue;
+    }
+
+    // A note right after a user message joins it; anywhere else (mid-turn, after tool results) it is
+    // a user message of its own, like a prune marker.
+    if (entry.type === 'user' && entry.sub_type === 'note') {
+      const last = messages[messages.length - 1];
+      if (!pending && last?.role === 'user' && !last.toolCallId) {
+        last.content = `${last.content}\n\n${entry.content}`;
+      } else {
+        flush();
+        messages.push({ role: 'user', content: entry.content });
+      }
       continue;
     }
 

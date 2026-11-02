@@ -300,16 +300,24 @@ test('toolPolicy allowing a call runs the tool normally', async () => {
   assert.equal(tool.calls.length, 1);
 });
 
-test('modeInstruction is appended to the system prompt sent to the provider, per request', async () => {
-  const provider = new FakeProvider([{ content: 'ok', toolCalls: [], stopReason: 'end_turn' }]);
+test('modeInstruction rides in history once per change, never in the system prompt (plan 0006 A5)', async () => {
+  const provider = new FakeProvider([
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+    { content: 'ok', toolCalls: [], stopReason: 'end_turn' },
+  ]);
   const loop = new AgentLoop(provider, [], 'base system prompt');
+  const plan = 'Current mode: Plan. Do not write or run shell.';
 
-  await loop.run('hello', { modeInstruction: 'Current mode: Plan. Do not write or run shell.' });
+  await loop.run('hello', { modeInstruction: plan });
+  await loop.run('again', { modeInstruction: plan });
+  await loop.run('now auto', { modeInstruction: 'Current mode: Auto.' });
 
-  assert.equal(
-    provider.receivedRequests[0].systemPrompt,
-    'base system prompt\n\nCurrent mode: Plan. Do not write or run shell.',
-  );
+  for (const r of provider.receivedRequests) assert.equal(r.systemPrompt, 'base system prompt', 'byte-identical every request');
+  const last = provider.receivedRequests[2].messages;
+  assert.equal(last[0].content, `hello\n\n${plan}`, 'folded into the turn it arrived with, and still there later');
+  assert.equal(last[2].content, 'again', 'same mode: no second note');
+  assert.equal(last[4].content, 'now auto\n\nCurrent mode: Auto.');
 });
 
 test('omitting modeInstruction sends the system prompt unchanged, as before', async () => {

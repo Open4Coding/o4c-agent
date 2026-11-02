@@ -159,7 +159,11 @@ class TwoWriteFileProvider implements LLMProvider {
 class RecordingProvider implements LLMProvider {
   readonly name = 'recording';
   lastSystemPrompt = '';
+  /** Everything the model was told: system prompt plus every message's text (the mode note lives
+   * in history since plan 0006 A5). */
+  lastRequestText = '';
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    this.lastRequestText = [request.systemPrompt ?? '', ...request.messages.map((m) => m.content)].join('\n');
     // `systemPrompt` is optional on the request, and '' is the right stand-in for absent here:
     // every assertion on this field is a `match`, which no pattern in this file satisfies on an
     // empty string, so a missing prompt still fails rather than passing vacuously.
@@ -1115,6 +1119,7 @@ test('a <think> block is logged as its own event, kept out of the final answer, 
       loop.getEntries().map((e) => ({ type: e.type, sub_type: e.sub_type })),
       [
         { type: 'user', sub_type: 'input' },
+        { type: 'user', sub_type: 'note' }, // the mode note (plan 0006 A5)
         { type: 'ai', sub_type: 'think' },
         { type: 'ai', sub_type: 'response' },
         { type: 'ai', sub_type: 'toolcall' },
@@ -1122,8 +1127,8 @@ test('a <think> block is logged as its own event, kept out of the final answer, 
         { type: 'ai', sub_type: 'response' },
       ],
     );
-    assert.equal(loop.getEntries()[1].content, 'let me check the file first');
-    assert.equal(loop.getEntries()[5].content, 'The answer is 4.');
+    assert.equal(loop.getEntries()[2].content, 'let me check the file first');
+    assert.equal(loop.getEntries()[6].content, 'The answer is 4.');
 
     await waitFor(() => Boolean(runLogger.getFilePath())); // the log file is created lazily by a fire-and-forget write
     const logPath = runLogger.getFilePath();
@@ -3527,10 +3532,10 @@ test('the current mode is actually told to the model, not just enforced at the t
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan'));
 
     await submit(stdin, 'hello');
-    await waitFor(() => provider.lastSystemPrompt.includes('Current mode: Plan.'));
+    await waitFor(() => provider.lastRequestText.includes('Current mode: Plan.'));
 
-    assert.match(provider.lastSystemPrompt, /Current mode: Plan\./);
-    assert.match(provider.lastSystemPrompt, /write_file and run_shell are both hard-disabled/);
+    assert.match(provider.lastRequestText, /Current mode: Plan\./);
+    assert.match(provider.lastRequestText, /write_file and run_shell are both hard-disabled/);
 
     // Switching mode again changes the very next request's instruction too - proves this is
     // computed fresh per-turn from live state, not captured once at mount.
@@ -3539,10 +3544,10 @@ test('the current mode is actually told to the model, not just enforced at the t
     assert.ok(anyFrameIncludes(frames, 'Mode set to Plan-Write'));
 
     await submit(stdin, 'hello again');
-    await waitFor(() => provider.lastSystemPrompt.includes('Current mode: Plan-Write.'));
+    await waitFor(() => provider.lastRequestText.includes('Current mode: Plan-Write.'));
 
-    assert.match(provider.lastSystemPrompt, /Current mode: Plan-Write\./);
-    assert.ok(provider.lastSystemPrompt.includes(join(dir, '.o4c', 'plans')));
+    assert.match(provider.lastRequestText, /Current mode: Plan-Write\./);
+    assert.ok(provider.lastRequestText.includes(join(dir, '.o4c', 'plans')));
   });
 });
 
@@ -3960,7 +3965,7 @@ test('/plan <goal> plans read-only in any mode and saves the answer as the activ
       await waitFor(() => anyFrameSays(frames, 'Saved as plan 0001 "Export Plans" (1 item), now the active plan.'));
       assert.match(provider.lastUser, /^\/plan add an export command\n/);
       assert.match(provider.lastUser, /## Checklist/);
-      assert.match(provider.systemPrompt, /read only|Investigate and read only/i, 'Plan mode instruction, though the user is in Auto');
+      assert.match(provider.lastUser, /read only|Investigate and read only/i, 'Plan mode instruction (a note on the turn), though the user is in Auto');
       const plan = plans.store.activePlan('s1')!;
       assert.equal(plan.goal, 'add an export command');
       assert.deepEqual(plans.store.items(plan.id).map((i) => [i.text, i.checks]), [['Write exportPlan', 'its test passes']]);
