@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { closestLines, findEdit, type MatchRung } from './editMatch.js';
 import { findPlaceholder } from './placeholders.js';
+import { newSyntaxProblems, syntaxCheckMode } from './syntaxCheck.js';
 import type { Tool } from './types.js';
 
 const RUNG_TEXT: Record<MatchRung, string> = {
@@ -157,12 +158,15 @@ export const editFileTool: Tool = {
       if (match.rung !== 'exact') notes.push(`${list.length > 1 ? `edit ${i + 1} ` : ''}matched ${RUNG_TEXT[match.rung]}`);
     }
 
+    // Checked before writing so strict mode can refuse; reported only if this edit broke it (B8).
+    const broken = await newSyntaxProblems(path, original, content);
+    if (broken && syntaxCheckMode() === 'strict') return fail(`${broken}. Nothing was changed (syntax check is strict).`);
     try {
       await writeFile(path, content, 'utf-8');
     } catch (err) {
       return fail((err as Error).message);
     }
     const what = list.length > 1 ? `${list.length} edits, ${replaced} replacement${replaced === 1 ? '' : 's'}` : `replaced ${replaced} occurrence${replaced === 1 ? '' : 's'}`;
-    return `Edited ${path}: ${what}${notes.length ? ` (${notes.join('; ')})` : ''}.\n${changedRegion(original, content)}`;
+    return `Edited ${path}: ${what}${notes.length ? ` (${notes.join('; ')})` : ''}.\n${changedRegion(original, content)}${broken ? `\nWarning: ${broken}. Fix it before going on.` : ''}`;
   },
 };

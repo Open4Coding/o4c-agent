@@ -23,6 +23,7 @@ import { buildSystemPrompt, PROMPT_PROFILE_CONFIG_KEY, promptProfileFor } from '
 import { registerSecret } from './session/redact.js';
 import { defaultProvider } from './session/providerDefault.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
+import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -738,6 +739,7 @@ program
     });
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
     loop.textToolCallRecovery = resolvedConfig.textToolCallRecovery !== false;
+    setSyntaxCheckMode(resolvedConfig.syntaxCheck);
     // This process's session id, decided now rather than at the first save - every session switch
     // (/clear, /resume, the per-turn reload) is a fresh process, so one process is one session.
     // The history store files entries under it from the first one; App saves under it too, so the
