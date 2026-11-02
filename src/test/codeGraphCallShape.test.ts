@@ -42,7 +42,7 @@ async function addTs(store: GraphStore, path: string, source: string): Promise<v
 }
 
 function definition(path: string, kind: string, line = 1): DefinitionRow {
-  return { entityUid: `${path}:${kind}`, path, name: 'f', kind, capture: '', line, contentHash: '' };
+  return { entityUid: `${path}:${kind}`, path, name: 'f', kind, capture: '', line, contentHash: '', endLine: line, signature: '', doc: '' };
 }
 
 // ------------------------------------------------------------------ extraction

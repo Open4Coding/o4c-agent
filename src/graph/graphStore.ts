@@ -76,11 +76,11 @@ export function migrateLegacyIndex(dbDir: string): void {
 /**
  * Schema version, bumped when a migration would be needed. A mismatch triggers a rebuild.
  *
- * 2 adds the `imports` table; 3 adds `files.index_seq`. No migration is written because none is
- * worth writing: the graph is derived from files on disk and rebuilding it costs seconds, which is
+ * 2 adds the `imports` table; 3 adds `files.index_seq`; 4 adds `defs.end_line`, `signature` and
+ * `doc` (plan 0006 B11). No migration is written because none is worth writing: the graph is derived from files on disk and rebuilding it costs seconds, which is
  * also why a bump discards rather than migrates.
  */
-export const GRAPH_SCHEMA_VERSION = 3;
+export const GRAPH_SCHEMA_VERSION = 4;
 
 /**
  * Per-file index state.
@@ -121,6 +121,12 @@ export interface DefinitionRow {
   readonly capture: string;
   readonly line: number;
   readonly contentHash: string;
+  /** Last line of the declaration; equals `line` when the query gave no outer node. */
+  readonly endLine: number;
+  /** The declaration up to its body, whitespace collapsed; '' when unknown. */
+  readonly signature: string;
+  /** Comment directly above, or a Python docstring; '' when none. */
+  readonly doc: string;
 }
 
 /** A reference as read back. */
@@ -162,7 +168,10 @@ CREATE TABLE IF NOT EXISTS defs (
   capture TEXT NOT NULL,
   line INTEGER NOT NULL,
   content_hash TEXT NOT NULL,
-  search_text TEXT NOT NULL
+  search_text TEXT NOT NULL,
+  end_line INTEGER NOT NULL DEFAULT 0,
+  signature TEXT NOT NULL DEFAULT '',
+  doc TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 -- Ranking walks name -> defining files and name -> referencing files constantly, so both
@@ -264,6 +273,9 @@ export class GraphStore {
     // stale rather than as absent.
     this.db.exec('PRAGMA busy_timeout = 400;');
     this.db.exec(SCHEMA);
+    // A database from before a column existed keeps its old table under CREATE TABLE IF NOT EXISTS;
+    // add what is missing, so the version-mismatch rebuild below can write the new rows (B11).
+    this.addMissingColumns('defs', { end_line: 'INTEGER NOT NULL DEFAULT 0', signature: "TEXT NOT NULL DEFAULT ''", doc: "TEXT NOT NULL DEFAULT ''" });
 
     this.ftsAvailable = this.tryCreateFts();
 
@@ -285,6 +297,11 @@ export class GraphStore {
    * Checked here, once, at open. The alternative - discovering it at the first search - would
    * mean a feature that works all session until the moment someone searches.
    */
+  private addMissingColumns(table: string, columns: Record<string, string>): void {
+    const have = new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+    for (const [name, type] of Object.entries(columns)) if (!have.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+  }
+
   private tryCreateFts(): boolean {
     try {
       this.db.exec(FTS_SCHEMA);
@@ -363,8 +380,8 @@ export class GraphStore {
       );
 
       const insertDef = this.db.prepare(
-        `INSERT INTO defs(entity_uid, file_id, name, kind, capture, line, content_hash, search_text)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO defs(entity_uid, file_id, name, kind, capture, line, content_hash, search_text, end_line, signature, doc)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const tag of defs) {
         const kind = kindFromCapture(tag.capture);
@@ -375,10 +392,12 @@ export class GraphStore {
           kind,
           tag.capture,
           tag.line,
-          // The entity's own text is not delimited by the tag (a tag is the *name* node), so the
-          // declaring line stands in as the fingerprint source until step 3 carries node ranges.
-          contentHash(lines[tag.line - 1] ?? tag.name),
+          // The entity's whole text when the tag carries its span (B11); the declaring line when not.
+          contentHash(tag.endLine ? lines.slice(tag.line - 1, tag.endLine).join('\n') : (lines[tag.line - 1] ?? tag.name)),
           searchTextFor(tag.name),
+          tag.endLine ?? tag.line,
+          tag.signature ?? '',
+          tag.doc ?? '',
         );
       }
 
@@ -463,7 +482,7 @@ export class GraphStore {
   definitionsOf(name: string): DefinitionRow[] {
     const rows = this.db
       .prepare(
-        `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash
+        `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash, d.end_line, d.signature, d.doc
          FROM defs d JOIN files f ON f.id = d.file_id
          WHERE d.name = ? ORDER BY f.path, d.line`,
       )
@@ -497,7 +516,7 @@ export class GraphStore {
   definitionsIn(path: string): DefinitionRow[] {
     const rows = this.db
       .prepare(
-        `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash
+        `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash, d.end_line, d.signature, d.doc
          FROM defs d JOIN files f ON f.id = d.file_id
          WHERE f.path = ? ORDER BY d.line`,
       )
@@ -572,7 +591,7 @@ export class GraphStore {
       const phrase = `"${trimmed.replace(/"/g, '""')}"*`;
       const rows = this.db
         .prepare(
-          `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash
+          `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash, d.end_line, d.signature, d.doc
            FROM defs_fts JOIN defs d ON d.id = defs_fts.rowid JOIN files f ON f.id = d.file_id
            WHERE defs_fts MATCH ? ORDER BY bm25(defs_fts) LIMIT ?`,
         )
@@ -582,7 +601,7 @@ export class GraphStore {
 
     const rows = this.db
       .prepare(
-        `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash
+        `SELECT d.entity_uid, f.path, d.name, d.kind, d.capture, d.line, d.content_hash, d.end_line, d.signature, d.doc
          FROM defs d JOIN files f ON f.id = d.file_id
          WHERE d.search_text LIKE ? ORDER BY d.name LIMIT ?`,
       )
@@ -667,6 +686,9 @@ function toDefinition(r: Record<string, unknown>): DefinitionRow {
     capture: String(r.capture),
     line: Number(r.line),
     contentHash: String(r.content_hash),
+    endLine: Number(r.end_line) || Number(r.line),
+    signature: String(r.signature ?? ''),
+    doc: String(r.doc ?? ''),
   };
 }
 

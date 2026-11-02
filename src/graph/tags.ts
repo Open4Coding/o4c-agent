@@ -18,6 +18,7 @@
  * language at the call shapes the queries claim, and it says nothing about the other fourteen.
  */
 
+import type { Node as TsNode } from 'web-tree-sitter';
 import { languageForPath } from './languages.js';
 import { loadQuery, loadImportQuery, parserFor, GrammarUnavailableError } from './loadLanguage.js';
 import { collectImports, type ImportBinding } from './imports.js';
@@ -38,6 +39,61 @@ export interface Tag {
   readonly capture: string;
   /** 1-based line, for citation and display only - never for identity. Line numbers drift. */
   readonly line: number;
+  /**
+   * Definitions only (plan 0006 B11), from the whole declaration node the query matched along with
+   * the name: its last line, its signature (the text before the body, whitespace collapsed) and
+   * its doc comment (comments directly above it, or a Python docstring). Absent when the query has
+   * no outer `@definition.*` capture for the match.
+   */
+  readonly endLine?: number;
+  readonly signature?: string;
+  readonly doc?: string;
+}
+
+const MAX_SIGNATURE = 200;
+const MAX_DOC = 400;
+
+/** The node a doc comment sits above: an `export` or a decorator wrapper starting the line, if any. */
+function docAnchor(node: TsNode): TsNode {
+  let anchor = node;
+  while (anchor.parent && (anchor.parent.type === 'export_statement' || anchor.parent.type === 'decorated_definition')) anchor = anchor.parent;
+  return anchor;
+}
+
+function cleanComment(text: string): string {
+  return text
+    .split('\n')
+    .map((l) => l.trim().replace(/^(\/\*\*?|\*\/|\*|\/\/\/?|#+|--)\s?/, '').replace(/\*\/$/, '').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+function docFor(node: TsNode): string | undefined {
+  // Python: a string as the body's first statement.
+  const body = node.childForFieldName('body');
+  const first = body?.namedChildren[0];
+  if (first?.type === 'expression_statement' && first.namedChildren[0]?.type === 'string') {
+    const text = first.namedChildren[0].text.replace(/^[rRbBuU]*("{3}|'{3}|"|')/, '').replace(/("{3}|'{3}|"|')$/, '');
+    return text.replace(/\s+/g, ' ').trim().slice(0, MAX_DOC) || undefined;
+  }
+  // Everything else: comment nodes directly above, with no blank line between.
+  const parts: string[] = [];
+  let next = docAnchor(node);
+  let sibling = next.previousNamedSibling;
+  while (sibling && sibling.type.includes('comment') && sibling.endPosition.row >= next.startPosition.row - 1) {
+    parts.unshift(cleanComment(sibling.text));
+    next = sibling;
+    sibling = sibling.previousNamedSibling;
+  }
+  const doc = parts.join(' ').trim();
+  return doc ? doc.slice(0, MAX_DOC) : undefined;
+}
+
+function signatureFor(node: TsNode, source: string): string {
+  const body = node.childForFieldName('body');
+  const end = body && body.startIndex > node.startIndex ? body.startIndex : source.indexOf('\n', node.startIndex);
+  const text = source.slice(node.startIndex, end < 0 ? node.endIndex : Math.min(end, node.endIndex));
+  return text.replace(/\s+/g, ' ').replace(/[\s{:=]+$/, '').trim().slice(0, MAX_SIGNATURE);
 }
 
 /**
@@ -79,21 +135,42 @@ export async function extractFile(source: string, languageId: string): Promise<F
   if (!tree) throw new GrammarUnavailableError(languageId, new Error('parser returned no tree'));
 
   try {
-    const tags: Tag[] = [];
-    for (const capture of query.captures(tree.rootNode)) {
-      const kind: TagKind | undefined = capture.name.startsWith(DEFINITION_PREFIX)
-        ? 'def'
-        : capture.name.startsWith(REFERENCE_PREFIX)
-          ? 'ref'
-          : undefined;
-      if (!kind) continue; // Outer `@definition.*`/`@reference.*` captures wrap the whole node.
+    // Matches rather than captures (B11): a match pairs a definition's name with the whole
+    // declaration node, which is where its span, signature and doc comment come from. Sorted back
+    // into document order afterwards, which is the order `captures()` gave and callers rely on.
+    const found: Array<{ at: number; seq: number; tag: Tag }> = [];
+    for (const match of query.matches(tree.rootNode)) {
+      for (const capture of match.captures) {
+        const kind: TagKind | undefined = capture.name.startsWith(DEFINITION_PREFIX)
+          ? 'def'
+          : capture.name.startsWith(REFERENCE_PREFIX)
+            ? 'ref'
+            : undefined;
+        if (!kind) continue; // Outer `@definition.*`/`@reference.*` captures wrap the whole node.
 
-      tags.push({
-        name: capture.node.text,
-        kind,
-        capture: capture.name,
-        line: capture.node.startPosition.row + 1,
-      });
+        let extra: Pick<Tag, 'endLine' | 'signature' | 'doc'> = {};
+        if (kind === 'def') {
+          const outer = match.captures.find((c) => c.name === capture.name.slice('name.'.length))?.node;
+          if (outer) {
+            const doc = docFor(outer);
+            extra = { endLine: outer.endPosition.row + 1, signature: signatureFor(outer, source), ...(doc ? { doc } : {}) };
+          }
+        }
+        found.push({
+          at: capture.node.startIndex,
+          seq: found.length,
+          tag: { name: capture.node.text, kind, capture: capture.name, line: capture.node.startPosition.row + 1, ...extra },
+        });
+      }
+    }
+    found.sort((a, b) => a.at - b.at || a.seq - b.seq);
+    // One tag per captured node: two patterns can capture the same name node.
+    const tags: Tag[] = [];
+    let last: { at: number; capture: string } | undefined;
+    for (const f of found) {
+      if (last && last.at === f.at && last.capture === f.tag.capture) continue;
+      tags.push(f.tag);
+      last = { at: f.at, capture: f.tag.capture };
     }
     return {
       tags,
