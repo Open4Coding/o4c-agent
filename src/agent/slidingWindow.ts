@@ -1,5 +1,5 @@
 import { findCutPoint } from './compaction.js';
-import type { ContextEntry } from './contextEntry.js';
+import { estimateTokens, type ContextEntry } from './contextEntry.js';
 import type { CoreComponent, RequestBuild } from './coreSeam.js';
 
 /**
@@ -31,6 +31,15 @@ import type { CoreComponent, RequestBuild } from './coreSeam.js';
 /** The fraction of the context window the window defaults to when no explicit budget is given. */
 export const DEFAULT_WINDOW_FRACTION = 0.5;
 
+/**
+ * Where a new cut lands, as a fraction of the budget (plan 0006 A10). The window used to re-cut on
+ * every request, so once over budget the cut crept forward a little each round and the server
+ * re-processed nearly the whole window every round (Qwen3.8 reuses only an exact prefix). Now a cut
+ * is kept until the window outgrows the budget again, then moved down to this share of it - one
+ * re-process per 25% of growth instead of one per round.
+ */
+export const WINDOW_HYSTERESIS = 0.75;
+
 export interface SlidingWindowOptions {
   /**
    * An explicit budget in tokens. Omitted, the budget is `DEFAULT_WINDOW_FRACTION` of the run's
@@ -40,6 +49,8 @@ export interface SlidingWindowOptions {
   readonly budgetTokens?: number;
   /** Overrides the fraction used when `budgetTokens` is not set. */
   readonly fraction?: number;
+  /** Overrides `WINDOW_HYSTERESIS` (config `windowHysteresis`); 1 = re-cut every request. */
+  readonly hysteresis?: number;
 }
 
 /** The first `user`/`input` entry - the original task statement. */
@@ -106,13 +117,49 @@ export interface SlidingWindowControl {
   set(next: SlidingWindowOptions | undefined): void;
 }
 
+/** Sum of the visible entries' estimates - the same measure `findCutPoint` uses. */
+function visibleTokens(entries: readonly ContextEntry[]): number {
+  let total = 0;
+  for (const e of entries) if (e.agent_visible !== false) total += estimateTokens(e);
+  return total;
+}
+
+/**
+ * `windowEntries` with a memory (A10): the first kept entry is remembered and reused while the kept
+ * part still fits `budget`; only when it outgrows it is a new cut taken, at `budget * hysteresis`.
+ * Returns the projection and the id of the cut entry to remember (undefined = no cut).
+ */
+export function stickyWindowEntries(
+  entries: readonly ContextEntry[],
+  budget: number,
+  previousCutId: string | undefined,
+  hysteresis = WINDOW_HYSTERESIS,
+): { kept: readonly ContextEntry[]; cutId: string | undefined } {
+  if (budget <= 0) return { kept: entries, cutId: undefined };
+  const pinned = firstUserInput(entries);
+  const withPinned = (kept: readonly ContextEntry[]) => (pinned && !kept.includes(pinned) ? [pinned, ...kept] : kept);
+  if (previousCutId !== undefined) {
+    const at = entries.findIndex((e) => e.id === previousCutId);
+    if (at > 0) {
+      const kept = withPinned(entries.slice(at));
+      if (visibleTokens(kept) <= budget) return { kept, cutId: previousCutId };
+    }
+  }
+  if (previousCutId === undefined && visibleTokens(entries) <= budget) return { kept: entries, cutId: undefined };
+  const cut = findCutPoint(entries, Math.floor(budget * Math.min(1, Math.max(0.1, hysteresis))));
+  if (cut <= 0) return { kept: entries, cutId: undefined };
+  return { kept: withPinned(entries.slice(cut)), cutId: entries[cut]!.id };
+}
+
 export function slidingWindowControl(initial?: SlidingWindowOptions): SlidingWindowControl {
   let active = initial;
+  let cutId: string | undefined;
 
   return {
     current: () => active,
     set: (next) => {
       active = next;
+      cutId = undefined;
     },
     component: {
       name: 'sliding-window',
@@ -128,7 +175,9 @@ export function slidingWindowControl(initial?: SlidingWindowOptions): SlidingWin
         // No budget means no basis for a decision. Returning `entries` unchanged is the right
         // no-op: this component existing must never make a session worse than not having it.
         if (budget === undefined) return entries;
-        return windowEntries(entries, budget);
+        const result = stickyWindowEntries(entries, budget, cutId, active.hysteresis);
+        cutId = result.cutId;
+        return result.kept;
       },
     },
   };

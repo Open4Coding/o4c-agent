@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_WINDOW_FRACTION,
   slidingWindowComponent,
+  stickyWindowEntries,
   windowEntries,
 } from '../agent/slidingWindow.js';
 import {
@@ -185,4 +186,39 @@ test('registered on a real loop, it bounds what the provider is sent', async () 
   assert.ok(!text.includes('answer 4.0'), 'a mid-history entry outside the window must not be sent');
   // And history itself still has everything.
   assert.ok(loop.getEntries().length > sent.length, 'history keeps what the window did not send');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Hysteresis (plan 0006 A10): a cut is kept until the window outgrows the budget again
+// ---------------------------------------------------------------------------------------------
+
+test('sticky window: the same cut is reused while it fits; a new cut lands at the low-water mark', () => {
+  let entries = conversation(60);
+  const budget = Math.floor(totalTokens(entries) / 2);
+  const first = stickyWindowEntries(entries, budget, undefined);
+  assert.ok(first.cutId, 'over budget: cut');
+  assert.ok(totalTokens(first.kept) <= budget * 0.75 + 200, 'cut down to about 75% of the budget');
+  assert.equal(first.kept[0]!.content, 'request 0', 'first message pinned');
+
+  // Grow a little: same cut, so the sent prefix is identical.
+  let cutId = first.cutId;
+  let slides = 0;
+  for (let t = 60; t < 90; t++) {
+    entries = [...entries, ...conversation(1).map((e) => ({ ...e, content: e.content.replace('0', String(t)) }))];
+    const next = stickyWindowEntries(entries, budget, cutId);
+    if (next.cutId !== cutId) slides += 1;
+    assert.ok(totalTokens(next.kept) <= budget + 150, 'never over budget');
+    cutId = next.cutId;
+  }
+  // 30 more turns of growth; the old window re-cut on every one of them.
+  assert.ok(slides > 0 && slides <= 5, `slides: ${slides}`);
+});
+
+test('sticky window: under budget there is no cut; a vanished cut entry starts over', () => {
+  const entries = conversation(3);
+  assert.equal(stickyWindowEntries(entries, totalTokens(entries) + 10, undefined).cutId, undefined);
+  const big = conversation(12);
+  const budget = Math.floor(totalTokens(big) / 2);
+  const fresh = stickyWindowEntries(big, budget, 'no-such-id');
+  assert.ok(fresh.cutId && fresh.cutId !== 'no-such-id');
 });

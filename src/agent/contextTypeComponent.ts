@@ -1,7 +1,7 @@
 import { CONTINUATION_TAG, type ContextEntry } from './contextEntry.js';
 import type { ContextWindowType, ContextWindowTypeControl } from './contextWindowType.js';
 import type { CoreComponent, RequestBuild } from './coreSeam.js';
-import { windowEntries } from './slidingWindow.js';
+import { windowEntries, stickyWindowEntries } from './slidingWindow.js';
 
 /**
  * Shapes each request by the context window type - NextUp item 23, checklist B2/B5/B6.
@@ -81,6 +81,9 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
   // requests (one per tool round) and the hint must not change, or cost a search, between them.
   let pointerCache: { entryId: string; hint: string | undefined } | undefined;
   let curatedCache: { entryId: string; key: string; history: string | undefined } | undefined;
+  // The trim's cut, kept for the rest of the turn (plan 0006 A10) so the rounds of one turn send a
+  // stable prefix; a new turn rebuilds the curated window anyway.
+  let curatedCut: { turnId: string; cutId: string | undefined } | undefined;
 
   return {
     name: 'context-window-type',
@@ -135,7 +138,13 @@ export function contextTypeComponent(options: ContextTypeComponentOptions): Core
         if (options.recentFraction !== undefined && contextWindow !== undefined) {
           const turnStartInKept = kept.length - (entries.length - turn);
           if (turnStartInKept > 0) {
-            const trimmed = windowEntries(kept, Math.floor((contextWindow * options.recentFraction) / ratio));
+            const sticky = stickyWindowEntries(
+              kept,
+              Math.floor((contextWindow * options.recentFraction) / ratio),
+              curatedCut?.turnId === current.id ? curatedCut.cutId : undefined,
+            );
+            curatedCut = { turnId: current.id, cutId: sticky.cutId };
+            const trimmed = sticky.kept;
             // A bound smaller than the current turn would cut into it; then only the earlier
             // exchanges go, down to their first message.
             const keepsCurrentTurn = trimmed.length - (trimmed[0] === kept[0] ? 1 : 0) >= kept.length - turnStartInKept;
