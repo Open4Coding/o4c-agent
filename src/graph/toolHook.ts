@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import type { CoreComponent, ToolCallContext } from '../agent/coreSeam.js';
 import { estimateTextTokens } from '../agent/contextEntry.js';
 import { isCallable, resolveName } from './resolve.js';
+import { currentHead, mineCochange } from './cochange.js';
 import { fitToBudget, rankDefinitions } from './ranker.js';
 import type { DefinitionRow, GraphStore } from './graphStore.js';
 import { indexSource, repoRelative, type IndexRunResult } from './indexer.js';
@@ -356,7 +357,45 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
       const shown = sites.slice(0, 8).map((r) => `${r.path}:${r.line}`).join(', ');
       notes.push(`${now.name} changed from \`${was.signature}\` to \`${now.signature}\` - ${sites.length} call site(s) may need updating: ${shown}${sites.length > 8 ? ` (+${sites.length - 8} more)` : ''}`);
     }
+    notes.push(...this.relatedNotes(rel, after));
     return notes.length ? `\n${PROJECTION_PREFIX} ${notes.join('\n')}` : '';
+  }
+
+  /** Files already given a co-change / test note this process (D10) - once each, not every edit. */
+  private relatedShown = new Set<string>();
+
+  /**
+   * After a change (D10): files that git history says usually change with this one, and test
+   * files that reference what it defines - the two things a model forgets before saying "done".
+   */
+  private relatedNotes(rel: string, defs: readonly DefinitionRow[]): string[] {
+    if (this.relatedShown.has(rel)) return [];
+    this.relatedShown.add(rel);
+    const notes: string[] = [];
+    try {
+      this.ensureCochange();
+      const together = this.store.cochangeFor(rel).filter((c) => c.of > 0 && c.commits / c.of >= 0.5).slice(0, 3);
+      if (together.length) notes.push(`Usually changed together with ${rel}: ${together.map((c) => `${c.path} (${c.commits} of ${c.of} commits)`).join(', ')}`);
+    } catch {
+      // no git, or no history: nothing to say
+    }
+    const tests = new Set<string>();
+    for (const name of new Set(defs.map((d) => d.name))) {
+      for (const ref of this.store.referencesTo(name)) {
+        if (ref.path !== rel && /(^|[\/._-])(test|tests|spec|__tests__)([\/._-]|$)/i.test(ref.path)) tests.add(ref.path);
+      }
+      if (tests.size >= 5) break;
+    }
+    if (tests.size) notes.push(`Tests that use what ${rel} defines: ${[...tests].slice(0, 5).join(', ')} - run them before calling this done`);
+    return notes;
+  }
+
+  /** Mines git history into the co-change tables when HEAD has moved since the last time. */
+  private ensureCochange(): void {
+    const head = currentHead(this.root);
+    if (!head || head === this.store.cochangeHead()) return;
+    const mined = mineCochange(this.root);
+    if (mined) this.store.replaceCochange(mined.head, mined.files, mined.pairs);
   }
 
   /**

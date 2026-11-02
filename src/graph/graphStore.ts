@@ -209,6 +209,20 @@ CREATE TABLE IF NOT EXISTS imports (
 -- The resolver's question is always "in this file, where did this name come from", so the index
 -- is on the pair rather than on either column.
 CREATE INDEX IF NOT EXISTS idx_imports_file_name ON imports(file_id, local_name);
+
+-- Co-change (plan 0006 D10): from git history, refreshed when HEAD moves. New tables only, so no
+-- schema bump - an older database simply gains them.
+CREATE TABLE IF NOT EXISTS cochange_files (
+  path TEXT PRIMARY KEY,
+  commits INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS cochange_pairs (
+  a TEXT NOT NULL,
+  b TEXT NOT NULL,
+  commits INTEGER NOT NULL,
+  PRIMARY KEY (a, b)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_cochange_b ON cochange_pairs(b);
 `;
 
 /**
@@ -510,6 +524,43 @@ export class GraphStore {
    * (`idx_defs_uid` exists for exactly this join). */
   hasEntity(entityUid: string): boolean {
     return this.db.prepare('SELECT 1 FROM defs WHERE entity_uid = ? LIMIT 1').get(entityUid) !== undefined;
+  }
+
+  /** Replaces the co-change tables (D10) with freshly mined data. */
+  replaceCochange(head: string, files: ReadonlyMap<string, number>, pairs: ReadonlyMap<string, number>): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM cochange_files; DELETE FROM cochange_pairs;');
+      const f = this.db.prepare('INSERT INTO cochange_files(path, commits) VALUES(?, ?)');
+      for (const [path, n] of files) f.run(path, n);
+      const p = this.db.prepare('INSERT INTO cochange_pairs(a, b, commits) VALUES(?, ?, ?)');
+      for (const [key, n] of pairs) {
+        if (n < 2) continue;
+        const [a, b] = key.split('\0');
+        p.run(a!, b!, n);
+      }
+      this.setMeta('cochange_head', head);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  cochangeHead(): string | undefined {
+    return this.meta('cochange_head');
+  }
+
+  /** Files changed together with `path` in at least `minCommits` commits, most often first. */
+  cochangeFor(path: string, minCommits = 3): Array<{ path: string; commits: number; of: number }> {
+    const of = Number((this.db.prepare('SELECT commits FROM cochange_files WHERE path = ?').get(path) as { commits?: number } | undefined)?.commits ?? 0);
+    const rows = this.db
+      .prepare(
+        `SELECT CASE WHEN a = ? THEN b ELSE a END AS other, commits FROM cochange_pairs
+         WHERE (a = ? OR b = ?) AND commits >= ? ORDER BY commits DESC LIMIT 10`,
+      )
+      .all(path, path, path, minCommits) as Array<{ other: string; commits: number }>;
+    return rows.map((r) => ({ path: String(r.other), commits: Number(r.commits), of }));
   }
 
   /** Every definition in one file. */
