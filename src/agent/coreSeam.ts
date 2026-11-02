@@ -126,6 +126,18 @@ export interface CoreComponent {
    * no hook sees it.
    */
   aroundTool?(call: ToolCallContext, next: () => Promise<string>): Promise<string>;
+
+  /**
+   * Hook 4 - a note for the model at the start of a user turn (plan 0006 A8).
+   *
+   * `buildRequest` changes what is sent but not history, so text it adds to a message has to be
+   * re-added on every request - and on a hybrid model like Qwen3.8 any difference from the
+   * previous request re-processes everything after it. A component whose information changes
+   * now and then (the active plan) returns it here instead: the loop appends it to history as a
+   * note, once, only when it differs from the last note this component left, folded into the user
+   * message of the turn. It never moves afterwards. Called once per user turn; undefined = nothing.
+   */
+  turnNote?(): string | undefined;
 }
 
 /** Reports a degraded hook. Matches `AgentEvent`'s `warning` channel without importing it. */
@@ -150,12 +162,28 @@ export class CoreRegistry {
   private readonly entryObservers: CoreComponent[] = [];
   private readonly requestHooks: CoreComponent[] = [];
   private readonly toolHooks: CoreComponent[] = [];
+  private readonly noteHooks: CoreComponent[] = [];
 
   register(component: CoreComponent): void {
     this.components.push(component);
     if (component.onEntry) this.entryObservers.push(component);
     if (component.buildRequest) this.requestHooks.push(component);
     if (component.aroundTool) this.toolHooks.push(component);
+    if (component.turnNote) this.noteHooks.push(component);
+  }
+
+  /** Each note-giving component's current note, by component name. A throwing one is skipped. */
+  turnNotes(warn: SeamWarning): Array<{ name: string; text: string }> {
+    const out: Array<{ name: string; text: string }> = [];
+    for (const component of this.noteHooks) {
+      try {
+        const text = component.turnNote?.();
+        if (text) out.push({ name: component.name, text });
+      } catch (error) {
+        warn(`Core component "${component.name}" failed to give its note: ${describe(error)}`);
+      }
+    }
+    return out;
   }
 
   /** Registered components, in registration order - for `/context`-style introspection. */

@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { InfiniteContextStore, INFINITE_CONTEXT_DB_FILENAME } from '../session/infiniteContextStore.js';
 import { PLAN_BLOCK_CHARS, planBlock, planContextComponent } from '../session/planContext.js';
 import type { PlanStore } from '../session/planStore.js';
-import { aiResponseEntry, userInputEntry, type ContextEntry } from '../agent/contextEntry.js';
+import { AgentLoop } from '../agent/loop.js';
+import type { CompletionRequest, CompletionResponse, LLMProvider } from '../providers/types.js';
 
 /** Brief 0005, Q7 / checklist P8: the active plan's current item rides along with every request. */
 
@@ -46,24 +47,43 @@ test('planBlock: name, progress, the current item with its checks, the one-item 
   });
 });
 
-test('the component folds the block into the current message only, and stays out for none and before a new message', async () => {
+test('the block is a turn note: stored once, re-sent unchanged, re-noted only when the plan moved (plan 0006 A8)', async () => {
   await withPlans(async (plans) => {
-    const plan = plans.createPlan({ name: 'P', items: [{ text: 'step one' }] });
+    const plan = plans.createPlan({ name: 'P', items: [{ text: 'step one' }, { text: 'step two' }] });
     plans.activate(plan.id, 's1');
     let enabled = true;
     const component = planContextComponent({ plans, sessionId: 's1', enabled: () => enabled });
-    const entries: ContextEntry[] = [userInputEntry('earlier'), aiResponseEntry('ok'), userInputEntry('now'), aiResponseEntry('working')];
+    assert.match(component.turnNote!()!, /^\[o4c plan\] Active plan 0001 "P"/);
+    assert.equal(component.buildRequest, undefined, 'no per-request projection any more');
 
-    const built = await component.buildRequest!({ entries });
-    assert.equal(built[0].content, 'earlier');
-    assert.match(built[2].content, /^now\n\n\[o4c plan\] Active plan 0001 "P"/);
-    assert.equal(entries[2].content, 'now', 'history itself is never changed');
+    const provider = new EchoProvider();
+    const loop = new AgentLoop(provider, [], 'sys');
+    loop.registerCore(component);
+    await loop.run('one');
+    await loop.run('two');
+    const notes = () => loop.getEntries().filter((e) => e.sub_type === 'note');
+    assert.equal(notes().length, 1, 'unchanged plan: one note for both turns');
+    assert.match(provider.requests[1]!.messages[0]!.content, /^one\n\n\[o4c plan\]/, 'it stays where it was first given');
+    assert.equal(provider.requests[1]!.messages[2]!.content, 'two');
 
-    assert.equal(await component.buildRequest!({ entries, beforeNewMessage: true }), entries);
+    plans.setItemStatus(plan.id, 1, 'done', { verification: 'ok' });
+    await loop.run('three');
+    assert.equal(notes().length, 2);
+    assert.match(notes()[1]!.content, /Current item 2/);
+
     enabled = false;
-    assert.equal(await component.buildRequest!({ entries }), entries);
+    assert.equal(component.turnNote!(), undefined, 'none window type: nothing');
     enabled = true;
     plans.park(plan.id);
-    assert.equal(await component.buildRequest!({ entries }), entries);
+    assert.equal(component.turnNote!(), undefined, 'no active plan: nothing');
   });
 });
+
+class EchoProvider implements LLMProvider {
+  readonly name = 'echo';
+  requests: CompletionRequest[] = [];
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    this.requests.push(request);
+    return { content: 'ok', toolCalls: [], stopReason: 'end_turn' };
+  }
+}

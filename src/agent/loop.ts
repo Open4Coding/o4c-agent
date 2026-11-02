@@ -535,11 +535,11 @@ export class AgentLoop {
     return this.wireDefs!;
   }
 
-  /** The mode instruction the model last saw: the newest visible mode note, if any. */
-  private lastModeNote(): string | undefined {
+  /** The newest visible note carrying `tag` - what the model last saw of it - if any. */
+  private lastNote(tag: string): string | undefined {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
-      if (e.type === 'user' && e.sub_type === 'note' && e.agent_visible !== false && e.tags?.includes(MODE_NOTE_TAG)) return e.content;
+      if (e.type === 'user' && e.sub_type === 'note' && e.agent_visible !== false && e.tags?.includes(tag)) return e.content;
     }
     return undefined;
   }
@@ -1284,8 +1284,13 @@ export class AgentLoop {
     this.appendEntry(userInputEntry(await this.boundUserInput(userMessage, options), options.images), onEntry);
     // The mode instruction rides in history, once per change, not in the system prompt (plan 0006
     // A5): a mode switch used to rewrite byte zero of every request and cost a full re-process.
-    if (options.modeInstruction && options.modeInstruction !== this.lastModeNote()) {
+    if (options.modeInstruction && options.modeInstruction !== this.lastNote(MODE_NOTE_TAG)) {
       this.appendEntry(noteEntry(options.modeInstruction, [MODE_NOTE_TAG]), onEntry);
+    }
+    // Components' turn notes (the active plan), the same way: once, when changed (A8).
+    for (const { name, text } of this.core.turnNotes((message) => onEvent({ type: 'warning', text: message }))) {
+      const tag = `note:${name}`;
+      if (text !== this.lastNote(tag)) this.appendEntry(noteEntry(text, [tag]), onEntry);
     }
     const toolDefs = this.syncWireTools(onEvent, onEntry);
     // Identical on every request of the session - see `noteEntry` for why.
