@@ -138,6 +138,7 @@ import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
 import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
+import { contextBreakdown, formatBreakdown } from '../agent/contextBreakdown.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
 import { setAskUserHandler } from '../tools/askUser.js';
@@ -1504,6 +1505,8 @@ export function App({
           `  Output tokens: ${usage.output}`,
           `  Total tokens:  ${totalTokens}`,
           ...cacheReportLines(usage, thisProcess.last),
+          // D5: where the tokens of a request go, bucket by bucket.
+          ...formatBreakdown(contextBreakdown(loop.previewRequest(), builtSystemPrompt()?.sections)),
           ...loop.getCacheBreaks().slice(-3).map((b) => `  Last ${describeCacheBreak(b)}`),
           `  Messages in history: ${loop.getMessages().length}`,
           // Only when it is on. A window makes the model stop seeing part of the conversation,

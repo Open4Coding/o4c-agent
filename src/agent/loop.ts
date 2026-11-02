@@ -1289,6 +1289,22 @@ export class AgentLoop {
     return splitThinkBlock(response.content).response.trim();
   }
 
+  /**
+   * The request as it stands, for /context's breakdown (D5): the last one sent, or - in a fresh
+   * process that has not sent one yet - one built from history and the current tools.
+   */
+  previewRequest(): { systemPrompt: string; messages: Message[]; tools: ToolDefinition[] } {
+    if (this.lastMainRequest) {
+      return { systemPrompt: this.lastMainRequest.systemPrompt ?? this.systemPrompt, messages: this.lastMainRequest.messages, tools: this.lastMainRequest.tools };
+    }
+    const entries = this.requestProjection?.entries ?? this.entries;
+    return {
+      systemPrompt: this.systemPrompt,
+      messages: toWireMessages(entries),
+      tools: this.wireDefs ?? this.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+    };
+  }
+
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
     const configuredMaxIterations = options.maxIterations ?? 25;
     const maxIterations = configuredMaxIterations > 0 ? configuredMaxIterations : Infinity;
