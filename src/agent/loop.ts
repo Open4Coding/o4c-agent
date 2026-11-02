@@ -95,6 +95,22 @@ export type StepLimitChoice = 'continue' | 'summarize' | 'stop';
 /** Tag on a user message injected mid-turn (C6). */
 export const STEER_TAG = 'steer';
 
+/** The two stand-ins for deferred MCP tools (D8). Fixed text, so the tool list never changes. */
+export const LOAD_TOOLS = 'load_tools';
+export const CALL_TOOL = 'call_tool';
+export const DEFERRED_PROXY_DEFS: ToolDefinition[] = [
+  {
+    name: LOAD_TOOLS,
+    description: 'Tools from connected MCP servers are not listed one by one here. Call with no arguments (or "search") to list them; with "names" to get their full schemas. Then use one with call_tool.',
+    inputSchema: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' } }, search: { type: 'string' } } },
+  },
+  {
+    name: CALL_TOOL,
+    description: 'Run a tool listed by load_tools: "name" is the tool, "arguments" its arguments as its schema describes.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object' } }, required: ['name'] },
+  },
+];
+
 /** A tool-policy answer; a decline may carry the user's reason, which the model is told (plan 0006 C2). */
 export type PolicyAnswer = 'allow' | 'deny' | 'declined' | { verdict: 'declined' | 'deny'; reason: string };
 
@@ -321,6 +337,38 @@ export class AgentLoop {
   textToolCallRecovery = true;
   /** Notice and stop circles within a turn (B16); config `loopGuard`, default on. */
   loopGuardEnabled = true;
+  /**
+   * Above this many MCP tools their schemas are not sent (plan 0006 D8): two fixed proxy tools
+   * stand in - load_tools to see them, call_tool to use one. A tool list that never changes keeps
+   * the cached prefix; 0 or negative = never defer. Config `deferToolsAbove`.
+   */
+  deferToolsAbove = 20;
+
+  /** The MCP tools currently deferred (D8); empty when under the threshold. */
+  private deferredTools(): Tool[] {
+    const mcp = this.tools.filter((t) => t.name.startsWith('mcp__'));
+    return this.deferToolsAbove > 0 && mcp.length > this.deferToolsAbove ? mcp : [];
+  }
+
+  /** load_tools (D8): the deferred tools as a list, or the full schemas of the ones named. */
+  private loadToolsAnswer(input: Record<string, unknown>): string {
+    const deferred = this.deferredTools();
+    const names = Array.isArray(input.names) ? input.names.map(String) : [];
+    const search = typeof input.search === 'string' ? input.search.toLowerCase() : '';
+    if (names.length === 0) {
+      const listed = deferred.filter((t) => !search || `${t.name} ${t.description}`.toLowerCase().includes(search));
+      return listed.length
+        ? `${listed.length} tool(s) - load the ones you need with load_tools {"names": [...]}, then use them with call_tool:\n${listed.map((t) => `- ${t.name}: ${t.description.split(/(?<=[.!?])\s/)[0]!.slice(0, 120)}`).join('\n')}`
+        : 'No deferred tools match.';
+    }
+    const found = names.map((n) => deferred.find((t) => t.name === n) ?? resolveTool(n, deferred));
+    return names
+      .map((n, i) => {
+        const t = found[i];
+        return t ? JSON.stringify({ name: t.name, description: t.description, input_schema: t.inputSchema }) : `Error: no deferred tool named "${n}".`;
+      })
+      .join('\n');
+  }
   /** Whether history holds a snapshot of `wireDefs` (loaded or written) - see `syncWireTools`. */
   private wireDefsRecorded = false;
   /** The real, API-reported prompt-token count from the most recent request, and what
@@ -552,7 +600,11 @@ export class AgentLoop {
    * listed and is refused if called: removing it would re-read the context for nothing.
    */
   private syncWireTools(onEvent: (event: AgentEvent) => void, onEntry: (entry: ContextEntry) => void): ToolDefinition[] {
-    const active = this.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+    const deferred = new Set(this.deferredTools().map((t) => t.name));
+    const active = [
+      ...this.tools.filter((t) => !deferred.has(t.name)).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+      ...(deferred.size > 0 ? DEFERRED_PROXY_DEFS : []),
+    ];
     const activeNames = new Set(active.map((d) => d.name));
     const kept = (this.wireDefs ?? []).filter((d) => !activeNames.has(d.name));
     const desired = AgentLoop.sortDefs([...active, ...kept]);
@@ -1992,12 +2044,26 @@ export class AgentLoop {
       }
       continuationEntries = isMaxTokensCutoff && response.toolCalls.length === 0 && !truncated ? [...roundEntries] : [];
 
-      for (const call of response.toolCalls) {
+      for (const original of response.toolCalls) {
         checkAborted();
+        // D8: call_tool is the deferred tool it names - checked, approved and run as that tool.
+        const deferredNow = this.deferredTools();
+        const call =
+          original.name === CALL_TOOL && deferredNow.length > 0 && typeof original.input.name === 'string'
+            ? { ...original, name: original.input.name, input: (original.input.arguments && typeof original.input.arguments === 'object' ? original.input.arguments : {}) as Record<string, unknown> }
+            : original;
         onEvent({ type: 'tool_call', toolName: call.name, toolInput: call.input });
+        if (call.name === LOAD_TOOLS && deferredNow.length > 0) {
+          this.appendEntry(aiToolCallEntry(call, false), onEntry);
+          const answer = this.loadToolsAnswer(call.input);
+          onEvent({ type: 'tool_result', toolName: call.name, toolOutput: answer });
+          this.appendEntry(aiToolCallResponseEntry(call.id, answer, false), onEntry);
+          continue;
+        }
         // A near-miss name ("Read_File") resolves when only one tool can be meant (B4).
         const tool = resolveTool(call.name, this.tools);
-        this.appendEntry(aiToolCallEntry(call, tool?.mutating), onEntry);
+        // As the model wrote it (call_tool included), so history replays byte-identical (A7).
+        this.appendEntry(aiToolCallEntry(original, tool?.mutating), onEntry);
         let output: string;
         let verdict: 'allow' | 'deny' | 'declined' = 'allow';
         let policyAnswer: PolicyAnswer = 'allow';

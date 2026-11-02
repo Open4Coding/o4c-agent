@@ -758,6 +758,7 @@ program
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
     loop.textToolCallRecovery = resolvedConfig.textToolCallRecovery !== false;
     loop.loopGuardEnabled = resolvedConfig.loopGuard !== false;
+    if (typeof resolvedConfig.deferToolsAbove === 'number') loop.deferToolsAbove = resolvedConfig.deferToolsAbove;
     if (provider instanceof LocalProvider) provider.repetitionGuard = resolvedConfig.repetitionAbort !== false;
     setSyntaxCheckMode(resolvedConfig.syntaxCheck);
     setShellTimeoutDefault(resolvedConfig.shellTimeoutMs);
