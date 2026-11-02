@@ -1046,6 +1046,8 @@ program
         },
         onProviderCall: oneShotProviderLog,
         maxIterations,
+        // Nobody to ask in one-shot mode (B18): summarize, so a script gets an answer, not a throw.
+        onStepLimit: async () => 'summarize',
         // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which
         // left one-shot runs with no compaction, no pre-send size check and no curated bound: the
         // tmp4 long run grew a turn to 229,610 tokens against a 229,376 window and the server

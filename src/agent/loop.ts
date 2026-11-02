@@ -88,7 +88,16 @@ export interface AgentEvent {
   prefill?: { total: number; cached: number; processed: number; timeMs: number };
 }
 
+/** What to do when a turn reaches its step limit (plan 0006 B18). */
+export type StepLimitChoice = 'continue' | 'summarize' | 'stop';
+
 export interface RunOptions {
+  /**
+   * Asked when the turn reaches `maxIterations` (B18): `continue` grants another block of steps,
+   * `summarize` makes one last request with tools off for a summary of what is done and what is
+   * left, `stop` ends with `MaxIterationsError` as before. Unset = `stop`.
+   */
+  onStepLimit?: (steps: number) => Promise<StepLimitChoice>;
   /** Caps how many provider round-trips a single `run()` call can make before giving up with
    * `MaxIterationsError`. Undefined (unset) falls back to 25. 0 or negative means "no cap at all"
    * - the same "0/negative disables it" convention `LocalProvider`'s connect/idle timeouts already
@@ -1492,7 +1501,30 @@ export class AgentLoop {
       cutoffChain.length = 0;
     };
 
-    for (let i = 0; i < maxIterations; i++) {
+    // Raised by `continue` at the step limit (B18); `summarizing` = the one tools-off request.
+    let stepLimit = maxIterations;
+    let summarizing = false;
+    for (let i = 0; ; i++) {
+      if (i >= stepLimit && !summarizing) {
+        const choice = options.onStepLimit ? await options.onStepLimit(i) : 'stop';
+        if (choice === 'continue') {
+          stepLimit += maxIterations;
+        } else if (choice === 'summarize') {
+          summarizing = true;
+          onEvent({ type: 'warning', text: `Step limit reached (${i} steps) - asking the model to summarize where it got to.` });
+          this.appendEntry(
+            {
+              ...userInputEntry(
+                `[o4c] The step limit for this turn (${i} steps) is reached. Do not call any tools. Summarize briefly: what you did, what is done, what is left, and the next step to take.`,
+              ),
+              tags: [CONTINUATION_TAG],
+            },
+            callerOnEntry,
+          );
+        } else {
+          break;
+        }
+      }
       checkAborted();
       let response;
       // Fresh per provider call - `<think>` open/close state can't carry over between calls (each
@@ -1563,6 +1595,8 @@ export class AgentLoop {
           continuationEntries.map((e) => e.id),
         ),
         tools: toolDefs,
+        // The same tools on the summary request, so the cached prefix holds; only the choice changes.
+        ...(summarizing ? { toolChoice: 'none' as const } : {}),
         signal: options.signal,
         maxTokens: dynamicMaxTokens,
         // Sent on every iteration of the turn, not just the first: a long tool-calling turn makes
@@ -1718,14 +1752,24 @@ export class AgentLoop {
         trimmedReply.length < 300 &&
         (/[,;:]$/.test(trimmedReply) ||
           /\b(now|and|or|the|a|an|to|then|next|so|but|let|let's|with|of|for|in|on|is|are|i'll|i'm|we'll)$/i.test(trimmedReply));
-      const isIncompleteEndTurn = !isToolUse && !isMaxTokensCutoff && (isEmptyReply || isMidSentence);
+      // "Next I will run the tests." and no call (B18): the reply announced work and then stopped.
+      // The last sentence, not the last line: "Fixed the parser. Next I will run the tests." is one line.
+      const lastLine = trimmedReply.split(/\n|(?<=[.!?])\s+/).filter((l) => l.trim()).pop()?.trim() ?? '';
+      const announcedNextStep =
+        hadToolWork &&
+        trimmedReply.length < 600 &&
+        /^(next,? |now,? |then,? )?(i('ll| will| am going to)|let me|let's|next i|now i)\b/i.test(lastLine) &&
+        !/\b(done|complete|finished|all set)\b|let me know|if you (want|need|like|have)|happy to/i.test(lastLine);
+      const isIncompleteEndTurn = !summarizing && !isToolUse && !isMaxTokensCutoff && (isEmptyReply || isMidSentence || announcedNextStep);
       if (isIncompleteEndTurn && emptyTurnRetries < 1) {
         emptyTurnRetries += 1;
         onEvent({
           type: 'warning',
           text: isEmptyReply
             ? 'The model returned an empty reply - asking it to continue once.'
-            : 'The model stopped mid-reply - asking it to continue once.',
+            : announcedNextStep
+              ? 'The model said what it would do next and then stopped - asking it to go ahead once.'
+              : 'The model stopped mid-reply - asking it to continue once.',
         });
         this.appendEntry({ ...userInputEntry('Continue with the task.'), tags: [CONTINUATION_TAG] }, onEntry);
         continue;
@@ -1734,7 +1778,7 @@ export class AgentLoop {
         emptyTurnRetries = 0;
         hadToolWork = true;
       }
-      if (!isToolUse && !isMaxTokensCutoff) {
+      if (summarizing || (!isToolUse && !isMaxTokensCutoff)) {
         return responseText;
       }
 

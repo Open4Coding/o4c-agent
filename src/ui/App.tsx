@@ -2257,6 +2257,13 @@ export function App({
           const finalAnswer = await loop.run(sent, {
             images: initialImage ? [initialImage] : undefined,
             toolPolicy,
+            // At the step limit, ask (B18) - Esc counts as stop, the old behaviour.
+            onStepLimit: async (steps: number) =>
+              (await pickChoice(`The model has taken ${steps} steps this turn (the step limit). What now?`, [
+                { key: 'continue', label: `Continue - allow another ${maxIterations && maxIterations > 0 ? maxIterations : 25} steps.` },
+                { key: 'summarize', label: 'Summarize - one last answer, no tools: what is done, what is left, what to do next.' },
+                { key: 'stop', label: 'Stop - end the turn now' },
+              ])) ?? 'stop',
             modeInstruction: modeSystemPrompt(planCommand ? 'plan' : mode, plansDir),
             signal: controller.signal,
             contextWindow,
