@@ -107,7 +107,7 @@ export function jobStatus(job: JobRecord): JobStatus {
   return alive(job.pid) ? { state: 'running' } : { state: 'gone' };
 }
 
-export function startJob(command: string, cwd = process.cwd()): JobRecord {
+export function startJob(command: string, cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): JobRecord {
   const d = dir();
   const next = listJobs().reduce((m, j) => Math.max(m, Number(j.id.slice(1))), 0) + 1;
   const id = `j${next}`;
@@ -116,6 +116,7 @@ export function startJob(command: string, cwd = process.cwd()): JobRecord {
   writeFileSync(log, '');
   const child = spawn(process.execPath, ['-e', WRAPPER, command, log, exitFile], {
     cwd,
+    env,
     detached: true,
     stdio: 'ignore',
     windowsHide: true,

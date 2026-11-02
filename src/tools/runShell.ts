@@ -1,6 +1,7 @@
 import type { Tool } from './types.js';
 import { runShellCommand } from './shellRunner.js';
 import { startJob } from './jobs.js';
+import { interactiveReason, NON_INTERACTIVE_ENV } from './interactive.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 let defaultTimeoutMs = DEFAULT_TIMEOUT_MS;
@@ -51,10 +52,14 @@ export const runShellTool: Tool = {
   },
   async execute(input, context) {
     const command = String(input.command ?? '');
+    // Editors, pagers, REPLs: refused with what to do instead, rather than a timeout (B23).
+    const interactive = interactiveReason(command);
+    if (interactive) return `Command not run: ${interactive}`;
+    const env = { ...process.env, ...NON_INTERACTIVE_ENV };
     if (input.background === true) {
       // B22: detached, outlives the per-turn reload; see jobs.ts.
       try {
-        const job = startJob(command);
+        const job = startJob(command, process.cwd(), env);
         return `Started background job ${job.id}: ${command}\nIt keeps running after this call. Read its output with job_output (id "${job.id}"); you will be told when it finishes.`;
       } catch (err) {
         return `Command failed: could not start it in the background: ${(err as Error).message}`;
@@ -62,7 +67,7 @@ export const runShellTool: Tool = {
     }
     const timeoutMs = typeof input.timeout_ms === 'number' && Number.isFinite(input.timeout_ms) ? input.timeout_ms : defaultTimeoutMs;
     // spawn + whole-tree kill on Esc or timeout (B20) - see shellRunner.ts.
-    const r = await runShellCommand(command, { timeoutMs, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal });
+    const r = await runShellCommand(command, { timeoutMs, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal, env });
     if (!r.killed && r.code === 0) return [r.stdout, r.stderr].filter(Boolean).join('\n').trim() || '(no output)';
 
     let why: string;
