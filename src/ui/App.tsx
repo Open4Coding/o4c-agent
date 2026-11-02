@@ -143,6 +143,7 @@ import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
 import { setAskUserHandler } from '../tools/askUser.js';
 import { draftO4cMd, scanProject } from '../session/projectScan.js';
 import { activeMemoryStores } from '../session/memories.js';
+import { parseLessons, recentTasks, reflectPrompt, REFLECT_SCHEMA } from '../session/reflect.js';
 import type { CheckpointHooks } from '../session/checkpoints.js';
 import {
   COMMANDS,
@@ -2273,6 +2274,33 @@ export function App({
             pushBlock([infoLine(`Deleted: ${row.text}`)]);
           } else {
             setPrefill({ token: nextPrefillToken++, text: `/memory-edit ${row.scope}:${row.id} ${row.text}` });
+          }
+        }
+      } else if (commandName(input) === '/reflect') {
+        // D4: lessons from recent finished tasks, proposed by one model call, saved only if picked.
+        pushBlock([userLine(input)]);
+        const tasks = recentTasks();
+        const stores = activeMemoryStores();
+        if (tasks.length === 0 || !(stores.project ?? stores.global)) {
+          pushBlock([infoLine('Nothing to reflect on yet - /reflect looks at finished tasks in this project, and needs a trusted project.')]);
+        } else {
+          pushBlock([infoLine(`Looking at the last ${tasks.length} finished task(s) for lessons worth keeping (one model call)...`)]);
+          try {
+            const lessons = parseLessons(await loop.sideRequest(reflectPrompt(tasks), { responseSchema: REFLECT_SCHEMA as unknown as Record<string, unknown> }));
+            if (lessons.length === 0) {
+              pushBlock([infoLine('No lessons worth keeping came out of those tasks.')]);
+            } else {
+              const picked = await pickChoice('Save which as a lesson? (Esc saves none)', [
+                { key: 'all', label: `All ${lessons.length}` },
+                ...lessons.map((l, i) => ({ key: String(i), label: l })),
+              ]);
+              const chosen = picked === 'all' ? lessons : picked === undefined ? [] : [lessons[Number(picked)]!];
+              const store = stores.project ?? stores.global!;
+              for (const l of chosen) store.add(l, 'lesson');
+              pushBlock([infoLine(chosen.length ? `Saved ${chosen.length} lesson(s) - see /memory.` : 'Nothing saved.')]);
+            }
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: `Reflect failed: ${formatError(err)}` }]);
           }
         }
       } else if (commandName(input) === '/memory-edit') {

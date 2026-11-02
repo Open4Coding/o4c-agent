@@ -86,6 +86,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/config-global-highlightcolor',
     '/set-shell',
     '/memory',
+    '/reflect',
     '/memory-edit',
     '/init',
     '/btw',

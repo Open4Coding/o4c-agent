@@ -1270,6 +1270,25 @@ export class AgentLoop {
     return splitThinkBlock(response.content).response.trim();
   }
 
+  /**
+   * One standalone request outside the conversation - for features like /reflect (D4) that ask the
+   * model something with their own prompt. Tools off, the side slot, no thinking; usage counted.
+   */
+  async sideRequest(prompt: string, options: { responseSchema?: Record<string, unknown>; maxTokens?: number; signal?: AbortSignal } = {}): Promise<string> {
+    const response = await this.provider.complete({
+      systemPrompt: 'You are a careful assistant. Answer exactly in the format asked for.',
+      messages: [{ role: 'user', content: prompt }],
+      tools: [],
+      thinkLevel: 'nothink',
+      purpose: 'side',
+      maxTokens: options.maxTokens ?? 1024,
+      ...(options.responseSchema ? { responseSchema: options.responseSchema } : {}),
+      signal: options.signal,
+    });
+    addUsage(this.usage, response.usage);
+    return splitThinkBlock(response.content).response.trim();
+  }
+
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
     const configuredMaxIterations = options.maxIterations ?? 25;
     const maxIterations = configuredMaxIterations > 0 ? configuredMaxIterations : Infinity;

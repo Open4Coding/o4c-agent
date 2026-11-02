@@ -618,6 +618,13 @@ export class InfiniteContextStore {
       .get(sessionId) as TaskRow | undefined;
   }
 
+  /** The newest finished tasks that produced an answer, any session - for /reflect (D4). */
+  recentFinishedTasks(limit = 8): TaskRow[] {
+    return this.db
+      .prepare(`SELECT * FROM tasks WHERE outcome = 'done' AND answer != '' ORDER BY id DESC LIMIT ?`)
+      .all(limit) as unknown as TaskRow[];
+  }
+
   /** A top-level task's follow-ups, in order. */
   followUps(rootId: number): TaskRow[] {
     return this.db

@@ -304,6 +304,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'What o4c remembers across sessions (rules, facts, lessons; project or global): pick one to edit or delete - no LLM call.',
   },
   {
+    name: '/reflect',
+    select: 'run',
+    description: 'Ask the model (one call) which lessons from the recent finished tasks are worth remembering; you pick which to save.',
+  },
+  {
     name: '/memory-edit',
     hidden: true,
     description: 'Changes a memory - put in the input box by /memory. Usage: /memory-edit <project|global>:<id> <text>',

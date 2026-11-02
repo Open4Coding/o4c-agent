@@ -34,6 +34,7 @@ import { destructiveReason, splitShellSegments } from './tools/interactive.js';
 import { loadO4cIgnore, o4cIgnoreComponent } from './tools/o4cIgnore.js';
 import { subdirInstructionsComponent } from './session/instructionFiles.js';
 import { createRememberTool, memoriesComponent, openGlobalMemories, setActiveMemoryStores, type MemoryStores } from './session/memories.js';
+import { setRecentTasksSource } from './session/reflect.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -845,6 +846,7 @@ program
     } catch {
       // no global store: project memories still work
     }
+    if (history) setRecentTasksSource(() => history.store.recentFinishedTasks(8));
     if (memoryStores.project || memoryStores.global) {
       setActiveMemoryStores(memoryStores);
       loop.registerCore(memoriesComponent(memoryStores));
