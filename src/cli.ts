@@ -737,6 +737,7 @@ program
       projectContext,
     });
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
+    loop.textToolCallRecovery = resolvedConfig.textToolCallRecovery !== false;
     // This process's session id, decided now rather than at the first save - every session switch
     // (/clear, /resume, the per-turn reload) is a fresh process, so one process is one session.
     // The history store files entries under it from the first one; App saves under it too, so the

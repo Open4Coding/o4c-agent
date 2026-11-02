@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-eval/
 *.log
 .env
 .o4c/

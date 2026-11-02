@@ -1,4 +1,5 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message, ToolDefinition, Usage } from '../providers/types.js';
+import { recoverTextToolCalls } from './textToolCalls.js';
 import { describeCacheBreak, diagnoseCacheBreak, type CacheBreak } from './cacheBreak.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
@@ -286,6 +287,8 @@ export class AgentLoop {
    * first turn of a new session, restored from the history's last snapshot on a reload.
    */
   private wireDefs: ToolDefinition[] | undefined;
+  /** Run tool calls the model wrote as text (B2); config `textToolCallRecovery`, default on. */
+  textToolCallRecovery = true;
   /** Whether history holds a snapshot of `wireDefs` (loaded or written) - see `syncWireTools`. */
   private wireDefsRecorded = false;
   /** The real, API-reported prompt-token count from the most recent request, and what
@@ -1596,7 +1599,19 @@ export class AgentLoop {
       // answer, or the caller's onEvent - see `splitThinkBlock()` (contextEntry.ts) for the
       // parsing rule (a closed block captured in full; an unclosed one cut at the next newline
       // rather than swallowing the rest of the message).
-      const { think, response: responseText } = splitThinkBlock(response.content);
+      const split = splitThinkBlock(response.content);
+      const think = split.think;
+      let responseText = split.response;
+      // Tool calls the model wrote as text (plan 0006 B2): run them rather than end the turn with a
+      // call printed on screen. Never on a cut-off reply - its last call may be incomplete.
+      if (this.textToolCallRecovery && response.toolCalls.length === 0 && response.stopReason !== 'max_tokens' && responseText) {
+        const recovered = recoverTextToolCalls(responseText, this.tools);
+        if (recovered.calls.length > 0) {
+          responseText = recovered.text;
+          response = { ...response, toolCalls: recovered.calls, stopReason: 'tool_use' };
+          onEvent({ type: 'info', text: `Ran ${recovered.calls.length} tool call(s) the model wrote as text (${recovered.calls.map((c) => c.name).join(', ')}).` });
+        }
+      }
       // A redacted thinking block (Anthropic-only) has no readable text at all - `think` stays
       // empty in that case (there's nothing for splitThinkBlock() to find), but the opaque
       // redacted_thinking data still needs an entry to carry it forward for replay, or it's lost.
