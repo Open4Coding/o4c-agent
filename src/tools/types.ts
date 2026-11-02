@@ -56,5 +56,10 @@ export interface Tool {
   /** Set only on a tool proxied from an MCP server; absent on every built-in. Its presence is
    * also the honest answer to "is this ours?" wherever that matters. */
   readonly mcp?: McpToolProvenance;
-  execute(input: Record<string, unknown>): Promise<string>;
+  /** `context.signal` is the turn's abort signal (Esc / Ctrl+C), for tools that can stop early (B20). */
+  execute(input: Record<string, unknown>, context?: ToolContext): Promise<string>;
+}
+
+export interface ToolContext {
+  signal?: AbortSignal;
 }

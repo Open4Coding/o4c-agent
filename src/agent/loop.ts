@@ -1911,7 +1911,7 @@ export class AgentLoop {
           // can never become a route around the approval gate. This is where the Code Graph
           // answers a `grep` from its index instead of reading files; `runTool` with nothing
           // registered is a direct call to `execute`, no wrapper allocated.
-          output = await this.core.runTool({ tool, input }, () => tool.execute(input));
+          output = await this.core.runTool({ tool, input }, () => tool.execute(input, { signal: options.signal }));
         }
         output = await this.boundToolOutput(output, call.name, options);
         // After bounding, so a truncation can never cut the note off.

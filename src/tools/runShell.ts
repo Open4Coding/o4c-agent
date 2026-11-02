@@ -1,8 +1,7 @@
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { Tool } from './types.js';
+import { runShellCommand } from './shellRunner.js';
 
-const execAsync = promisify(exec);
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 /**
  * How much output this tool will buffer at all. Was 10 MB, and that number is exactly what killed
@@ -41,23 +40,24 @@ export const runShellTool: Tool = {
     },
     required: ['command'],
   },
-  async execute(input) {
+  async execute(input, context) {
     const command = String(input.command ?? '');
-    try {
-      const { stdout, stderr } = await execAsync(command, {
-        timeout: 60_000,
-        maxBuffer: MAX_BUFFER_BYTES,
-      });
-      return [stdout, stderr].filter(Boolean).join('\n').trim() || '(no output)';
-    } catch (err) {
-      const e = err as { stdout?: string; stderr?: string; message: string };
+    // spawn + whole-tree kill on Esc or timeout (B20) - see shellRunner.ts.
+    const r = await runShellCommand(command, { timeoutMs: DEFAULT_TIMEOUT_MS, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal });
+    if (!r.killed && r.code === 0) return [r.stdout, r.stderr].filter(Boolean).join('\n').trim() || '(no output)';
+
+    let why: string;
+    if (r.killed === 'overflow') {
       // The "too much output" case needs to say so in a way the model can act on. Before this, the
       // explanation was the first line of an 11 MB payload, which is the same as not saying it.
-      const overflowed = /maxBuffer length exceeded/i.test(e.message);
-      const advice = overflowed
-        ? '\nThis command produced more output than can be read. Narrow it (filter, count, or limit it), or redirect it to a file and read ranges with read_file.'
-        : '';
-      return `Command failed: ${e.message}${advice}\n${tail(e.stdout, 'stdout')}\n${tail(e.stderr, 'stderr')}`.trim();
+      why = `stdout maxBuffer length exceeded (${MAX_BUFFER_BYTES.toLocaleString()} bytes); the command and everything it started were stopped.\nThis command produced more output than can be read. Narrow it (filter, count, or limit it), or redirect it to a file and read ranges with read_file.`;
+    } else if (r.killed === 'timeout') {
+      why = `timed out after ${DEFAULT_TIMEOUT_MS / 1000} s; the command and everything it started were stopped.`;
+    } else if (r.killed === 'aborted') {
+      why = 'cancelled by the user; the command and everything it started were stopped.';
+    } else {
+      why = `exit code ${r.code}: ${command}`;
     }
+    return `Command failed: ${why}\n${tail(r.stdout, 'stdout')}\n${tail(r.stderr, 'stderr')}`.trim();
   },
 };
