@@ -43,3 +43,29 @@ export function redactSecrets(text: string): string {
 export function redactOptional<T extends string | null | undefined>(text: T): T {
   return (typeof text === 'string' ? redactSecrets(text) : text) as T;
 }
+
+/** o4c's own credentials by name - never passed to a command o4c runs (plan 0006 C4, Q2). */
+export const OWN_KEY_VARS: readonly string[] = ['O4C_LOCAL_API_KEY', 'ANTHROPIC_API_KEY'];
+
+let passKeysToChildren = false;
+
+/** Config `passKeysToShell` (default false): opt out of the scrubbing below. */
+export function setPassKeysToShell(value: unknown): void {
+  passKeysToChildren = value === true;
+}
+
+/**
+ * The environment for a command o4c runs on the model's behalf (C4): without o4c's own key
+ * variables, and without any variable whose value is a registered secret, so a model running `env`
+ * or a script that phones home cannot read o4c's credentials. Opt out with `passKeysToShell`.
+ */
+export function childEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (passKeysToChildren) return { ...base };
+  const out: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(base)) {
+    if (OWN_KEY_VARS.includes(name.toUpperCase())) continue;
+    if (value !== undefined && secrets.has(value)) continue;
+    out[name] = value;
+  }
+  return out;
+}

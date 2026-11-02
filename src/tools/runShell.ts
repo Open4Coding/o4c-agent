@@ -2,6 +2,7 @@ import type { Tool } from './types.js';
 import { runShellCommand } from './shellRunner.js';
 import { startJob } from './jobs.js';
 import { interactiveReason, NON_INTERACTIVE_ENV } from './interactive.js';
+import { childEnv } from '../session/redact.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 let defaultTimeoutMs = DEFAULT_TIMEOUT_MS;
@@ -55,7 +56,8 @@ export const runShellTool: Tool = {
     // Editors, pagers, REPLs: refused with what to do instead, rather than a timeout (B23).
     const interactive = interactiveReason(command);
     if (interactive) return `Command not run: ${interactive}`;
-    const env = { ...process.env, ...NON_INTERACTIVE_ENV };
+    // Without o4c's own keys (C4), and never prompting (B23).
+    const env = { ...childEnv(), ...NON_INTERACTIVE_ENV };
     if (input.background === true) {
       // B22: detached, outlives the per-turn reload; see jobs.ts.
       try {
