@@ -65,6 +65,8 @@ const WRITE_ERROR_PREFIX = 'Error writing file "';
 const GREP_TOOL = 'grep_files';
 const READ_TOOL = 'read_file';
 const WRITE_TOOL = 'write_file';
+const EDIT_TOOL = 'edit_file';
+const EDIT_ERROR_PREFIX = 'Error editing file "';
 const SHELL_TOOL = 'run_shell';
 
 /**
@@ -225,6 +227,9 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
         case WRITE_TOOL:
           await this.absorbWrite(call.input, output);
           return output;
+        case EDIT_TOOL:
+          await this.absorbEdit(call.input, output);
+          return output;
         case SHELL_TOOL:
           // A shell command can change anything, including files this process never saw, so the
           // only honest response is to treat the whole index as behind and rebuild it. Fire and
@@ -324,6 +329,18 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
     const rel = repoRelative(this.root, String(input.path ?? ''));
     if (!rel) return;
     await indexSource(this.store, rel, String(input.content ?? ''));
+  }
+
+  /**
+   * `edit_file` changes part of a file, so unlike a write the new bytes are not in the call - read
+   * the file back and index that. Without this an edited file kept its old line numbers in the
+   * graph until something read it again (found 2026-11-02, research report 08's side finding).
+   */
+  private async absorbEdit(input: Record<string, unknown>, output: string): Promise<void> {
+    if (output.startsWith(EDIT_ERROR_PREFIX)) return;
+    const rel = repoRelative(this.root, String(input.path ?? ''));
+    if (!rel) return;
+    await indexSource(this.store, rel, await readFile(join(this.root, rel), 'utf-8'));
   }
 
   // ---------------------------------------------------------------- the one verb

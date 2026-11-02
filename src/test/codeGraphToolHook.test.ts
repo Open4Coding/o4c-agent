@@ -582,3 +582,25 @@ test('code_graph prefers a definition in the file the question came from', async
     );
   });
 });
+
+test('an edit_file is absorbed: the edited file is re-read and its new lines are in the graph', async () => {
+  await withHook(async ({ root, store, component }) => {
+    const shifted = '\n\n\n\n\n' + AREA + 'export function added() {}\n';
+    await writeFile(join(root, 'src/area.ts'), shifted, 'utf-8');
+    await component.aroundTool(
+      { tool: builtIn('edit_file'), input: { path: 'src/area.ts', old_string: 'x', new_string: 'y' } },
+      async () => 'Edited src/area.ts: replaced 1 occurrence.',
+    );
+    assert.equal(store.definitionsOf('computeArea')[0]!.line, 6, 'moved down five lines without a re-read');
+    assert.equal(store.definitionsOf('added').length, 1);
+    assert.equal(store.freshness('src/area.ts', shifted), 'fresh');
+
+    // A failed edit changed nothing, so it must not be read back as if it had.
+    await writeFile(join(root, 'src/area.ts'), 'export function neverEdited() {}\n', 'utf-8');
+    await component.aroundTool(
+      { tool: builtIn('edit_file'), input: { path: 'src/area.ts', old_string: 'x', new_string: 'y' } },
+      async () => 'Error editing file "src/area.ts": old_string was not found.',
+    );
+    assert.equal(store.definitionsOf('neverEdited').length, 0);
+  });
+});
