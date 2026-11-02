@@ -1,5 +1,6 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message, ToolDefinition, Usage } from '../providers/types.js';
 import { recoverTextToolCalls } from './textToolCalls.js';
+import { checkArgs, resolveTool, unknownToolMessage } from './toolArgs.js';
 import { describeCacheBreak, diagnoseCacheBreak, type CacheBreak } from './cacheBreak.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
@@ -1752,17 +1753,23 @@ export class AgentLoop {
       for (const call of response.toolCalls) {
         checkAborted();
         onEvent({ type: 'tool_call', toolName: call.name, toolInput: call.input });
-        const tool = this.tools.find((t) => t.name === call.name);
+        // A near-miss name ("Read_File") resolves when only one tool can be meant (B4).
+        const tool = resolveTool(call.name, this.tools);
         this.appendEntry(aiToolCallEntry(call, tool?.mutating), onEntry);
         let output: string;
         let verdict: 'allow' | 'deny' | 'declined' = 'allow';
+        // Checked against the schema before approval, so what is approved is what runs (B4).
+        const checked = tool && !call.argumentError ? checkArgs(call.input, tool) : { input: call.input, errors: [] };
+        const input = checked.input;
         if (call.argumentError) {
           output = `Error: the arguments of this ${call.name} call were not valid JSON (${call.argumentError}), so it was not run. Send the call again with valid JSON arguments.`;
         } else if (!tool && this.wireDefs?.some((d) => d.name === call.name)) {
           output = `${call.name} is not available right now - its server is not connected, or it was switched off. Use another tool.`;
         } else if (!tool) {
-          output = `Error: no tool registered with name "${call.name}"`;
-        } else if (options.toolPolicy && (verdict = await options.toolPolicy(tool, call.input)) !== 'allow') {
+          output = unknownToolMessage(call.name, this.tools.map((t) => t.name));
+        } else if (checked.errors.length > 0) {
+          output = `Error: this ${tool.name} call was not run: ${checked.errors.join('; ')}.`;
+        } else if (options.toolPolicy && (verdict = await options.toolPolicy(tool, input)) !== 'allow') {
           // Worded to match what actually happened - see `toolPolicy`'s own comment on why the
           // difference matters to the model rather than only to the reader.
           output =
@@ -1775,7 +1782,7 @@ export class AgentLoop {
           // can never become a route around the approval gate. This is where the Code Graph
           // answers a `grep` from its index instead of reading files; `runTool` with nothing
           // registered is a direct call to `execute`, no wrapper allocated.
-          output = await this.core.runTool({ tool, input: call.input }, () => tool.execute(call.input));
+          output = await this.core.runTool({ tool, input }, () => tool.execute(input));
         }
         output = await this.boundToolOutput(output, call.name, options);
         onEvent({ type: 'tool_result', toolName: call.name, toolOutput: output });
