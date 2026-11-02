@@ -8,6 +8,7 @@ import {
   type LocalThinkParams,
   type ThinkCaps,
 } from '../agent/thinkLevel.js';
+import { samplingFor } from '../agent/sampling.js';
 import type {
   CompletionRequest,
   CompletionResponse,
@@ -335,6 +336,8 @@ export class LocalProvider implements LLMProvider {
    * working `/think` levels rather than none. */
   private thinkCaps: ThinkCaps;
   private reasoningReplay: LocalReasoningReplay;
+  private modelId: string | undefined;
+  private samplingConfig: unknown;
 
   constructor(
     options: {
@@ -346,8 +349,14 @@ export class LocalProvider implements LLMProvider {
       reasoningBudgetTokens?: number;
       thinkCaps?: ThinkCaps;
       reasoningReplay?: LocalReasoningReplay;
+      /** Served model id (from /v1/models), to pick its sampling profile. */
+      modelId?: string;
+      /** config.json `localSampling`, overriding the known profiles. */
+      sampling?: unknown;
     } = {},
   ) {
+    this.modelId = options.modelId;
+    this.samplingConfig = options.sampling;
     this.reasoningReplay = options.reasoningReplay ?? 'all';
     this.reasoningBudgetTokens = options.reasoningBudgetTokens;
     this.thinkCaps = options.thinkCaps ?? DEFAULT_THINK_CAPS;
@@ -537,6 +546,8 @@ export class LocalProvider implements LLMProvider {
           // Per-request override preferred when given - see CompletionRequest.maxTokens's own
           // doc comment for the exact mid-generation truncation bug this closes.
           max_tokens: request.maxTokens ?? this.maxTokens,
+          // Plan 0006 A18: the model's recommended sampling for this level, when one is known.
+          ...(samplingFor(this.modelId, request.thinkLevel, this.samplingConfig) ?? {}),
           ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
           ...(request.responseSchema ? { response_format: { type: 'json_schema', json_schema: { schema: request.responseSchema } } } : {}),
           ...(request.grammar ? { grammar: request.grammar } : {}),

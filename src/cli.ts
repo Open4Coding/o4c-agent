@@ -692,6 +692,8 @@ program
         thinkCaps,
         connectTimeoutMs,
         idleTimeoutMs,
+        modelId: opts.model,
+        sampling: resolvedConfig.localSampling,
         // Plan 0006 A7; config.json "localReasoningReplay" to override.
         reasoningReplay: ['all', 'current-turn', 'none', 'all-as-text'].includes(String(resolvedConfig.localReasoningReplay))
           ? (resolvedConfig.localReasoningReplay as LocalReasoningReplay)
