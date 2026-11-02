@@ -299,6 +299,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose the shell run_shell uses: auto, cmd, pwsh (PowerShell 7), powershell (5.1), bash or sh - saved to config.',
   },
   {
+    name: '/init',
+    select: 'run',
+    description: "Draft an O4C.md from the project's own files (languages, build and test commands, layout), show it, and write it if you say yes - no LLM call.",
+  },
+  {
     name: '/btw',
     description: 'Ask a side question about the conversation; the question and answer stay out of it. Usage: /btw <question>',
   },

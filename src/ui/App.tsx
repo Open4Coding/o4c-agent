@@ -48,7 +48,9 @@ import { listPlans, plansReport } from '../session/plansStore.js';
 import { clipDiff, diffLines, diffStats, formatDiffStats } from './lineDiff.js';
 import { styleCodePreview, styleDiff, type StyledDiffLine } from './diffStyle.js';
 import { grammarForPath, highlightCode } from './syntaxHighlight.js';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
   DEFAULT_THINK_CAPS,
@@ -138,6 +140,7 @@ import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
 import { setAskUserHandler } from '../tools/askUser.js';
+import { draftO4cMd, scanProject } from '../session/projectScan.js';
 import type { CheckpointHooks } from '../session/checkpoints.js';
 import {
   COMMANDS,
@@ -2238,6 +2241,27 @@ export function App({
                 restart(currentSessionIdRef.current, modeRef.current);
               }
             }
+          }
+        }
+      } else if (commandName(input) === '/init') {
+        // D2: a first O4C.md from what the project's own files say - shown, then written on Yes.
+        pushBlock([userLine(input)]);
+        if (!projectRoot) {
+          pushBlock([infoLine('/init needs a trusted project (o4c asks to trust a directory the first time it runs there).')]);
+        } else if (existsSync(join(projectRoot, 'O4C.md')) || existsSync(join(projectRoot, 'o4c.md'))) {
+          pushBlock([infoLine('This project already has an O4C.md - /init only writes a new one. Edit the existing file instead.')]);
+        } else {
+          const draft = draftO4cMd(await scanProject(projectRoot));
+          pushBlock([infoLine(`Draft O4C.md (from the project's own files):\n\n${draft}`)]);
+          const write = await pickChoice<'yes' | 'no'>('Write this as O4C.md in the project root?', [
+            { key: 'yes', label: 'Yes - write O4C.md (edit it afterwards to add your conventions)' },
+            { key: 'no', label: 'No - nothing is written' },
+          ]);
+          if (write === 'yes') {
+            await writeFile(join(projectRoot, 'O4C.md'), draft, 'utf-8');
+            pushBlock([infoLine('Wrote O4C.md. o4c reads it from the next message on; edit it to say what only you know.')]);
+          } else {
+            pushBlock([infoLine('Nothing written.')]);
           }
         }
       } else if (commandName(input) === '/btw') {
