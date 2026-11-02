@@ -22,8 +22,10 @@ import { estimateTextTokens } from '../agent/contextEntry.js';
  * re-reading its result.
  * Tools re-pinned 2026-11-02 for B21/B22, 961 -> 1122: run_shell timeout_ms and background, and the
  * job_output tool - without them a dev server or a build longer than a minute cannot be run at all.
+ * Tools re-pinned 2026-11-02 for C7, 1122 -> 1242: ask_user, so a model that needs a decision asks
+ * once instead of guessing or stopping the turn.
  */
-const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 1122 };
+const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 1242 };
 const TOLERANCE = 0.05;
 const ALL_TOOLS = [...defaultTools.map((t) => t.name), 'code_graph'];
 

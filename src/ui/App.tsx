@@ -137,6 +137,7 @@ import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } fro
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
+import { setAskUserHandler } from '../tools/askUser.js';
 import type { CheckpointHooks } from '../session/checkpoints.js';
 import {
   COMMANDS,
@@ -809,6 +810,8 @@ export function App({
   // Messages typed while a turn runs, for the model's next step (C6). Plain Enter steers; Ctrl+Q
   // queues for after the turn; anything the turn did not pick up joins the queue at its end.
   const steeringRef = useRef<string[]>([]);
+  // ask_user (C7): while the model waits for a typed answer, the next Enter answers it.
+  const askUserPendingRef = useRef<((answer: string | undefined) => void) | undefined>(undefined);
 
   // undefined = no session persisted yet (fresh start, or just after /clear). Set once the first
   // turn autosaves successfully, or immediately on mount by a /resume restart handoff; reused on
@@ -3146,6 +3149,14 @@ export function App({
         return;
       }
 
+      if (askUserPendingRef.current && !input.startsWith('/')) {
+        const answer = askUserPendingRef.current;
+        askUserPendingRef.current = undefined;
+        pushBlock([userLine(input)]);
+        answer(input);
+        return;
+      }
+
       if (isProcessing) {
         // A command waits for the turn to end; a message steers the turn now (C6).
         if (input.startsWith('/')) {
@@ -3163,6 +3174,35 @@ export function App({
     },
     [isProcessing, processTurn, exit, restart, openResumePicker, pushBlock],
   );
+
+  // ask_user (C7): the question in the transcript, the options as a dropdown, and free text always.
+  useEffect(() => {
+    setAskUserHandler(async (question, options, signal) => {
+      pushBlock([infoLine(`The model asks: ${question}`)]);
+      const TYPED = '__o4c_typed__';
+      if (options.length > 0) {
+        const picked = await pickChoice('Answer (↑/↓, Enter; Esc = no answer):', [
+          ...options.map((o, i) => ({ key: String(i), label: o })),
+          { key: TYPED, label: 'Something else - type my own answer' },
+        ]);
+        if (picked === undefined) return undefined;
+        if (picked !== TYPED) {
+          const answer = options[Number(picked)];
+          pushBlock([userLine(answer ?? '')]);
+          return answer;
+        }
+      }
+      pushBlock([infoLine('Type your answer and press Enter.')]);
+      return new Promise<string | undefined>((resolve) => {
+        askUserPendingRef.current = resolve;
+        signal?.addEventListener('abort', () => {
+          if (askUserPendingRef.current === resolve) askUserPendingRef.current = undefined;
+          resolve(undefined);
+        }, { once: true });
+      });
+    });
+    return () => setAskUserHandler(undefined);
+  }, [pushBlock, pickChoice]);
 
   // Ctrl+Q (C6): queue a message to run as its own turn after the current one, instead of steering.
   const handleQueue = useCallback(

@@ -6,7 +6,8 @@ import { runShellTool } from './runShell.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { jobOutputTool } from './jobs.js';
+import { askUserTool } from './askUser.js';
 
-export const defaultTools: Tool[] = [readFileTool, writeFileTool, editFileTool, runShellTool, globTool, grepTool, jobOutputTool];
+export const defaultTools: Tool[] = [readFileTool, writeFileTool, editFileTool, runShellTool, globTool, grepTool, jobOutputTool, askUserTool];
 
 export type { Tool } from './types.js';
