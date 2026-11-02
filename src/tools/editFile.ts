@@ -1,5 +1,14 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import { closestLines, findEdit, type MatchRung } from './editMatch.js';
 import type { Tool } from './types.js';
+
+const RUNG_TEXT: Record<MatchRung, string> = {
+  exact: 'exactly',
+  'line endings': 'ignoring line endings',
+  'trailing whitespace': 'ignoring trailing whitespace',
+  indentation: 'ignoring indentation - the new text was re-indented to fit',
+  unescaped: 'after unescaping \\n and quotes in your text',
+};
 
 /**
  * `edit_file` - change part of an existing file by exact search and replace.
@@ -9,10 +18,11 @@ import type { Tool } from './types.js';
  * it with `node -e` one-liners that Windows quoting kept breaking - the model spent whole turns
  * on scratch patch scripts instead of the fix. This is the edit every mainstream coding agent has.
  *
- * Exact match on purpose, not a regex or a line number: line numbers drift as soon as an earlier
+ * Text match on purpose, not a regex or a line number: line numbers drift as soon as an earlier
  * edit lands, and the model already holds the text it wants to change from reading the file.
- * More than one match is refused unless `replace_all` is set, so an edit can never land somewhere
- * other than where the model meant.
+ * Matching is exact first, then progressively more tolerant (editMatch.ts, plan 0006 B5), but on
+ * every rung more than one match is refused unless `replace_all` is set, so an edit can never land
+ * somewhere other than where the model meant.
  */
 export const editFileTool: Tool = {
   name: 'edit_file',
@@ -45,20 +55,34 @@ export const editFileTool: Tool = {
     } catch (err) {
       return `Error editing file "${path}": ${(err as Error).message}`;
     }
-    const count = content.split(oldString).length - 1;
-    if (count === 0) {
-      return `Error editing file "${path}": old_string was not found. It must match the file exactly, including whitespace and indentation - read the file again to copy it.`;
+    // The ladder in editMatch.ts: exact first, then line endings, trailing whitespace, indentation
+    // and over-escaping (B5) - each rung still refusing more than one match.
+    const match = findEdit(content, oldString, newString);
+    if (!match) {
+      const near = closestLines(content, oldString);
+      return (
+        `Error editing file "${path}": old_string was not found, even ignoring line endings, trailing whitespace and indentation. ` +
+        (near ? `The closest lines in the file are:\n${near}\nCopy the exact text from there, or read the file again.` : 'Read the file again to copy the text exactly.')
+      );
     }
+    const count = match.ranges.length;
+    const how = match.rung === 'exact' ? '' : ` (matched ${RUNG_TEXT[match.rung]})`;
     if (count > 1 && !replaceAll) {
-      return `Error editing file "${path}": old_string occurs ${count} times. Include more surrounding text so it matches once, or set replace_all.`;
+      return `Error editing file "${path}": old_string occurs ${count} times${how}. Include more surrounding text so it matches once, or set replace_all.`;
     }
-    // split/join rather than String.replace, so `$` sequences in new_string are taken literally.
-    const updated = replaceAll ? content.split(oldString).join(newString) : content.replace(oldString, () => newString);
+    // Spliced by offset rather than String.replace, so `$` sequences in new_string are taken literally.
+    let updated = '';
+    let at = 0;
+    for (const [start, end] of match.ranges) {
+      updated += content.slice(at, start) + match.replacement;
+      at = end;
+    }
+    updated += content.slice(at);
     try {
       await writeFile(path, updated, 'utf-8');
     } catch (err) {
       return `Error editing file "${path}": ${(err as Error).message}`;
     }
-    return `Edited ${path}: replaced ${count} occurrence${count === 1 ? '' : 's'}.`;
+    return `Edited ${path}: replaced ${count} occurrence${count === 1 ? '' : 's'}${how}.`;
   },
 };
