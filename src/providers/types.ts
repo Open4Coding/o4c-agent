@@ -187,6 +187,9 @@ export interface LLMProvider {
   /** The exact prompt size of `request` as this provider would send it, when it can say (plan 0006
    * A14). Optional: absent or undefined means "use your estimate". */
   countTokens?(request: CompletionRequest): Promise<number | undefined>;
+  /** Ends the in-flight request's thinking now, so it goes straight to its answer or tool call
+   * (plan 0006 A17, the "answer now" key). True when the server accepted it. */
+  endReasoning?(): Promise<boolean>;
 }
 
 /**

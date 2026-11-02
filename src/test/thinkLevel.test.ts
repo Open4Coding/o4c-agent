@@ -1,22 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  BROKEN_ZERO_BUDGET,
-  DEFAULT_THINK_CAPS,
-  DEFAULT_THINK_LEVEL,
-  NO_THINK_CAPS,
-  THINK_BUDGET_TOKENS,
-  THINK_LEVELS,
-  THINK_LEVEL_INFO,
-  anthropicThinkEffort,
-  effectiveThinkLevel,
-  isThinkLevel,
-  localThinkParams,
-  parseSupportedEfforts,
-  parseThinkLevel,
-  type ThinkCaps,
-  type ThinkLevel,
-} from '../agent/thinkLevel.js';
+import { BROKEN_ZERO_BUDGET, DEFAULT_THINK_CAPS, DEFAULT_THINK_LEVEL, NO_THINK_CAPS, THINK_BUDGET_TOKENS, THINK_LEVELS, THINK_LEVEL_INFO, anthropicThinkEffort, effectiveThinkLevel, isThinkLevel, localThinkParams, parseSupportedEfforts, parseThinkLevel, type ThinkCaps, type ThinkLevel, REASONING_BUDGET_MESSAGE } from '../agent/thinkLevel.js';
 
 test('the five levels are ordered weakest to strongest', () => {
   assert.deepEqual([...THINK_LEVELS], ['nothink', 'low', 'med', 'high', 'xhigh']);
@@ -67,9 +51,11 @@ test('no level can ever emit the broken zero budget', () => {
 });
 
 test('each thinking level sends the budget and the effort string together', () => {
-  assert.deepEqual(localThinkParams('low'), { reasoning_effort: 'low', reasoning_budget_tokens: 512 });
-  assert.deepEqual(localThinkParams('med'), { reasoning_effort: 'medium', reasoning_budget_tokens: 2_048 });
-  assert.deepEqual(localThinkParams('high'), { reasoning_effort: 'xhigh', reasoning_budget_tokens: 8_192 });
+  // A bounded budget also carries the soft-landing message (plan 0006 A17); unbounded does not.
+  const message = { reasoning_budget_message: REASONING_BUDGET_MESSAGE };
+  assert.deepEqual(localThinkParams('low'), { reasoning_effort: 'low', reasoning_budget_tokens: 512, ...message });
+  assert.deepEqual(localThinkParams('med'), { reasoning_effort: 'medium', reasoning_budget_tokens: 2_048, ...message });
+  assert.deepEqual(localThinkParams('high'), { reasoning_effort: 'xhigh', reasoning_budget_tokens: 8_192, ...message });
   assert.deepEqual(localThinkParams('xhigh'), { reasoning_effort: 'xhigh', reasoning_budget_tokens: -1 });
 });
 

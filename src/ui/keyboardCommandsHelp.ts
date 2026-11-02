@@ -44,6 +44,7 @@ const ROWS: KeyboardCommandRow[] = [
     availability: 'Kitty terminals only (else: plain Enter)',
   },
   { keys: 'Escape', action: 'Cancel current turn', availability: 'While "Thinking..." is showing' },
+  { keys: 'Ctrl+T', action: 'Stop thinking, answer now (the turn goes on)', availability: 'While the model is thinking (local server)' },
   { keys: 'Ctrl+C', action: 'Disabled - no effect', availability: 'Use /exit instead' },
   { keys: '← / →', action: 'Move cursor', availability: 'All terminals' },
   { keys: '↑ / ↓', action: 'Move in line; browse history at edge', availability: 'All terminals' },

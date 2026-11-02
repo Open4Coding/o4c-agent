@@ -548,6 +548,12 @@ export class AgentLoop {
     return undefined;
   }
 
+  /** Ends the current request's thinking now (A17's "answer now" key). False when there is nothing
+   * to end or the provider cannot. */
+  endReasoning(): Promise<boolean> {
+    return this.provider.endReasoning?.() ?? Promise.resolve(false);
+  }
+
   /** The most recent prompt-cache breaks this process saw, newest last (at most 20). */
   getCacheBreaks(): readonly CacheBreak[] {
     return this.cacheBreaks;

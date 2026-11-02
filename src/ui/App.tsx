@@ -1358,6 +1358,13 @@ export function App({
       if (key.ctrl && input === 'c') {
         handleForceRecover();
       }
+      // Ctrl+T: stop thinking and answer now (plan 0006 A17). The turn goes on - only the
+      // reasoning is cut short - unlike Escape, which cancels the turn.
+      if (key.ctrl && input === 't' && isProcessing) {
+        void loop.endReasoning().then((ended) => {
+          if (ended) pushBlock([{ kind: 'system', text: 'Thinking ended by you (Ctrl+T) - answering now.' }]);
+        });
+      }
     },
     { isActive: true },
   );

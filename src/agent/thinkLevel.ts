@@ -205,7 +205,13 @@ export interface LocalThinkParams {
   chat_template_kwargs?: { enable_thinking: boolean };
   reasoning_effort?: string;
   reasoning_budget_tokens?: number;
+  /** Injected by llama-server when the budget runs out (plan 0006 A17), so the model lands on an
+   * answer instead of being cut off mid-thought. */
+  reasoning_budget_message?: string;
 }
+
+/** What the model is told when its thinking budget is spent (A17). */
+export const REASONING_BUDGET_MESSAGE = 'Thinking budget reached - stop thinking now and act on what you have.';
 
 /**
  * Builds the request fields for one level, given what the model can honour and how many output
@@ -242,6 +248,7 @@ export function localThinkParams(
       budget > 0 && maxOutputTokens !== undefined && maxOutputTokens > 0
         ? Math.min(budget, maxOutputTokens)
         : budget;
+    if (params.reasoning_budget_tokens > 0) params.reasoning_budget_message = REASONING_BUDGET_MESSAGE;
   }
 
   return params;

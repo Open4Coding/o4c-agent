@@ -415,6 +415,25 @@ export class LocalProvider implements LLMProvider {
     }
   }
 
+  /** The id of the completion now streaming, for endReasoning(); set from its first chunk. */
+  private liveCompletionId: string | undefined;
+
+  async endReasoning(): Promise<boolean> {
+    const id = this.liveCompletionId;
+    if (!id) return false;
+    try {
+      const response = await fetch(`${this.baseUrl}/v1/chat/completions/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}) },
+        body: JSON.stringify({ id, action: 'reasoning_end' }),
+        signal: AbortSignal.timeout(5000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
   /** Whether any of the server's slots is processing a request right now (`GET /slots`). False
    * whenever the answer is unknown - the caller only uses it to word a status line. */
   private async slotBusy(): Promise<boolean> {
@@ -522,6 +541,9 @@ export class LocalProvider implements LLMProvider {
           ...(request.responseSchema ? { response_format: { type: 'json_schema', json_schema: { schema: request.responseSchema } } } : {}),
           ...(request.grammar ? { grammar: request.grammar } : {}),
           ...(request.onPrefillProgress ? { return_progress: true } : {}),
+          // Lets endReasoning() stop thinking mid-stream (A17); a sampler setting, not part of the
+          // rendered prompt, so the cache is unaffected.
+          ...(request.onToken ? { reasoning_control: true } : {}),
           stream: true,
           // Without this, a streaming response omits usage entirely (the standard OpenAI-API
           // convention llama-server also implements - confirmed directly against its source,
@@ -598,9 +620,13 @@ export class LocalProvider implements LLMProvider {
         streamOnToken ? (d, k) => ((firstChunk = true), streamOnToken(d, k)) : undefined,
         request.onToolProgress,
         onProgress,
+        (id) => {
+          this.liveCompletionId = id;
+        },
       );
     } finally {
       if (busyTimer) clearTimeout(busyTimer);
+      this.liveCompletionId = undefined;
     }
     const { content, toolCalls, truncatedToolCall, finishReason, usage } = parsed;
     return {
@@ -685,6 +711,7 @@ interface StreamedOpenAIChunk {
    * OpenAI API - an llama.cpp extension). `predicted_per_second` is decode throughput with prefill
    * excluded, which is what the status bar shows; `prompt_per_second` is prefill and is deliberately
    * ignored, being a one-off that says nothing about how fast the answer is arriving. */
+  id?: string;
   /** llama-server `return_progress`: sent during prefill. */
   prompt_progress?: { total: number; cache?: number; processed?: number; time_ms?: number };
   timings?: {
@@ -732,7 +759,9 @@ export async function parseSseStream(
   onToken?: (delta: string, kind: 'think' | 'text') => void,
   onToolProgress?: (toolName: string, argumentChars: number) => void,
   onPrefillProgress?: (progress: PrefillProgress) => void,
+  onCompletionId?: (id: string) => void,
 ): Promise<ParsedStream> {
+  let idSeen = false;
   let content = '';
   let reasoning = '';
   let finishReason = 'stop';
@@ -763,6 +792,10 @@ export async function parseSseStream(
           continue; // a malformed chunk shouldn't take down an otherwise-good stream
         }
 
+        if (!idSeen && typeof chunk.id === 'string') {
+          idSeen = true;
+          onCompletionId?.(chunk.id);
+        }
         const progress = chunk.prompt_progress;
         if (progress && typeof progress.total === 'number') {
           onPrefillProgress?.({ total: progress.total, cached: progress.cache ?? 0, processed: progress.processed ?? 0, timeMs: progress.time_ms ?? 0 });
