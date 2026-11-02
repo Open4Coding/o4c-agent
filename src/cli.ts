@@ -24,6 +24,7 @@ import { registerSecret } from './session/redact.js';
 import { defaultProvider } from './session/providerDefault.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
+import { fileStateComponent, fileStatePath } from './session/fileState.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -794,6 +795,11 @@ program
       process.on('exit', () => history.close());
     }
     recordLifecycle(lifecycleDir, 'history', { opened: history !== undefined });
+    // What the model has read, so edits are made against the file as it is (plan 0006 B9). After the
+    // history recorder and before the graph: the graph stays the innermost aroundTool wrapper.
+    if (resolvedConfig.fileStateGuard !== false) {
+      loop.registerCore(fileStateComponent({ file: fileStatePath(trusted ? projectRoot : undefined, sessionId) }));
+    }
     // Shapes every request by the type: `none` sends only the current turn, `pointer` and `curated`
     // add what the history offers. Registered whether or not the store opened - `none` needs no
     // store, and without one `pointer`/`curated` simply send what `floating` would.
