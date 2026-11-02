@@ -26,7 +26,9 @@ export class MockProvider implements LLMProvider {
     const hasToolResult = request.messages.some((m) => m.role === 'tool');
 
     if (!hasToolResult && request.tools.length > 0) {
-      const tool = request.tools[0];
+      // read_file when offered: a read never waits on a confirmation dialog, and the tool list is
+      // sorted by name (plan 0006 A6), so "the first tool" is no longer a stable choice.
+      const tool = request.tools.find((t) => t.name === 'read_file') ?? request.tools[0];
       const call: ToolCall = {
         id: 'mock-call-1',
         name: tool.name,

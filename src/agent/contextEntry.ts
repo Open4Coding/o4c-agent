@@ -23,7 +23,8 @@ export type EntrySubType =
   | 'plugin-lifecycle'
   | 'compaction'
   | 'prune'
-  | 'note';
+  | 'note'
+  | 'tools';
 
 /**
  * The single shape used both as `AgentLoop`'s live in-session history and, once §7's
@@ -134,6 +135,15 @@ export const MODE_NOTE_TAG = 'mode-note';
  */
 export function noteEntry(content: string, tags?: string[]): ContextEntry {
   return newEntry({ type: 'user', sub_type: 'note', content, user_visible: false, ...(tags ? { tags } : {}) });
+}
+
+/**
+ * The tool list the model is being sent, recorded whenever it changes (plan 0006 A6). Neither
+ * shown nor sent: it exists so a per-turn reload, which reconnects MCP servers from scratch, sends
+ * the exact same list again instead of whatever happened to connect this time.
+ */
+export function toolsSnapshotEntry(defs: readonly { name: string; description: string; inputSchema: Record<string, unknown> }[]): ContextEntry {
+  return newEntry({ type: 'system', sub_type: 'tools', content: JSON.stringify(defs), user_visible: false, agent_visible: false });
 }
 
 export function userInputEntry(content: string, images?: string[]): ContextEntry {

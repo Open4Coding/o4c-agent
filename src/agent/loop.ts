@@ -1,4 +1,4 @@
-import type { CompletionRequest, CompletionResponse, LLMProvider, Message, Usage } from '../providers/types.js';
+import type { CompletionRequest, CompletionResponse, LLMProvider, Message, ToolDefinition, Usage } from '../providers/types.js';
 import { describeCacheBreak, diagnoseCacheBreak, type CacheBreak } from './cacheBreak.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
@@ -32,6 +32,7 @@ import {
   toWireMessages,
   userInputEntry,
   noteEntry,
+  toolsSnapshotEntry,
   MODE_NOTE_TAG,
   type ContextEntry,
 } from './contextEntry.js';
@@ -276,6 +277,13 @@ export class AgentLoop {
   private lastMainRequest: CompletionRequest | undefined;
   private lastMainPromptTokens: number | undefined;
   private readonly cacheBreaks: CacheBreak[] = [];
+  /**
+   * The tool list sent to the model (plan 0006 A6), fixed between user turns. Undefined until the
+   * first turn of a new session, restored from the history's last snapshot on a reload.
+   */
+  private wireDefs: ToolDefinition[] | undefined;
+  /** Whether history holds a snapshot of `wireDefs` (loaded or written) - see `syncWireTools`. */
+  private wireDefsRecorded = false;
   /** The real, API-reported prompt-token count from the most recent request, and what
    * `visibleTokenEstimate` was at that exact moment - together let `hybridPromptTokenEstimate()`
    * report `realCount + estimatedDelta` instead of re-estimating the whole history from scratch
@@ -491,6 +499,42 @@ export class AgentLoop {
     return this.usage;
   }
 
+  /** Built-ins first, then MCP tools (`mcp__...`), each by name: connection order must never
+   * reorder the list, since the order is part of the cached prompt. */
+  private static sortDefs(defs: readonly ToolDefinition[]): ToolDefinition[] {
+    const key = (d: ToolDefinition) => `${d.name.startsWith('mcp__') ? 1 : 0}${d.name}`;
+    return [...defs].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+  }
+
+  /**
+   * The tool list for this turn. It only changes here, at the start of a user turn, and only when
+   * a tool was added or its schema changed - each change re-reads the whole context once, so it is
+   * announced. A tool that went away (an MCP server that did not connect, `/datagraph off`) stays
+   * listed and is refused if called: removing it would re-read the context for nothing.
+   */
+  private syncWireTools(onEvent: (event: AgentEvent) => void, onEntry: (entry: ContextEntry) => void): ToolDefinition[] {
+    const active = this.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+    const activeNames = new Set(active.map((d) => d.name));
+    const kept = (this.wireDefs ?? []).filter((d) => !activeNames.has(d.name));
+    const desired = AgentLoop.sortDefs([...active, ...kept]);
+    const changed = this.wireDefs !== undefined && JSON.stringify(desired) !== JSON.stringify(this.wireDefs);
+    if (changed) {
+      const before = new Map(this.wireDefs!.map((d) => [d.name, JSON.stringify(d)]));
+      const names = desired.filter((d) => before.get(d.name) !== JSON.stringify(d)).map((d) => d.name);
+      onEvent({ type: 'info', text: `Tools changed (${names.join(', ')}) - this request re-reads the whole context once.` });
+    }
+    if (changed || this.wireDefs === undefined) this.wireDefs = desired;
+    // Recorded only when a fresh process could not rebuild the same list on its own: MCP tools
+    // (servers connect, or fail, differently each time) or a listed tool that is gone. Built-ins
+    // alone rebuild identically, so they cost nothing in history.
+    const needsRecord = kept.length > 0 || desired.some((d) => d.name.startsWith('mcp__'));
+    if (needsRecord && (changed || !this.wireDefsRecorded)) {
+      this.appendEntry(toolsSnapshotEntry(desired), onEntry);
+      this.wireDefsRecorded = true;
+    }
+    return this.wireDefs!;
+  }
+
   /** The mode instruction the model last saw: the newest visible mode note, if any. */
   private lastModeNote(): string | undefined {
     for (let i = this.entries.length - 1; i >= 0; i--) {
@@ -544,6 +588,21 @@ export class AgentLoop {
     this.entryVersion++;
     for (const entry of this.entries) this.indexEntry(entry);
     this.usage = emptyUsage();
+    // The tool list this session was being sent (A6), so a reload sends the same one.
+    this.wireDefs = undefined;
+    this.wireDefsRecorded = false;
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i]!;
+      if (e.type === 'system' && e.sub_type === 'tools') {
+        try {
+          this.wireDefs = JSON.parse(e.content) as ToolDefinition[];
+          this.wireDefsRecorded = true;
+        } catch {
+          // A damaged snapshot only costs one re-read when the next turn records a fresh one.
+        }
+        break;
+      }
+    }
   }
 
   private appendEntry(entry: ContextEntry, onEntry: (entry: ContextEntry) => void): void {
@@ -1228,11 +1287,7 @@ export class AgentLoop {
     if (options.modeInstruction && options.modeInstruction !== this.lastModeNote()) {
       this.appendEntry(noteEntry(options.modeInstruction, [MODE_NOTE_TAG]), onEntry);
     }
-    const toolDefs = this.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    }));
+    const toolDefs = this.syncWireTools(onEvent, onEntry);
     // Identical on every request of the session - see `noteEntry` for why.
     const systemPromptForRequest = this.systemPrompt;
 
@@ -1618,7 +1673,9 @@ export class AgentLoop {
         this.appendEntry(aiToolCallEntry(call, tool?.mutating), onEntry);
         let output: string;
         let verdict: 'allow' | 'deny' | 'declined' = 'allow';
-        if (!tool) {
+        if (!tool && this.wireDefs?.some((d) => d.name === call.name)) {
+          output = `${call.name} is not available right now - its server is not connected, or it was switched off. Use another tool.`;
+        } else if (!tool) {
           output = `Error: no tool registered with name "${call.name}"`;
         } else if (options.toolPolicy && (verdict = await options.toolPolicy(tool, call.input)) !== 'allow') {
           // Worded to match what actually happened - see `toolPolicy`'s own comment on why the
