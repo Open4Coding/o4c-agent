@@ -98,6 +98,12 @@ export interface RunOptions {
    * left, `stop` ends with `MaxIterationsError` as before. Unset = `stop`.
    */
   onStepLimit?: (steps: number) => Promise<StepLimitChoice>;
+  /**
+   * When a turn ends after file changes with no command run since the last one, ask the model once
+   * to check its work (plan 0006 B19). For autonomous runs - Auto mode and one-shot - where nobody
+   * is watching each step.
+   */
+  verifyOnStop?: boolean;
   /** Caps how many provider round-trips a single `run()` call can make before giving up with
    * `MaxIterationsError`. Undefined (unset) falls back to 25. 0 or negative means "no cap at all"
    * - the same "0/negative disables it" convention `LocalProvider`'s connect/idle timeouts already
@@ -1446,6 +1452,9 @@ export class AgentLoop {
     let emptyTurnRetries = 0;
     // Streams stopped for repeating themselves this turn (B17): two get a nudge, then the turn ends.
     let repetitionStops = 0;
+    // Files changed since the last command ran, and whether this turn already asked to verify (B19).
+    let changedSinceRun = false;
+    let verifyNudged = false;
     // Circles within this turn: the same call and result over and over, A-B-A-B (plan 0006 B16).
     const loopGuard = new LoopGuard();
     let hadToolWork = false;
@@ -1778,6 +1787,20 @@ export class AgentLoop {
         emptyTurnRetries = 0;
         hadToolWork = true;
       }
+      if (!summarizing && !isToolUse && !isMaxTokensCutoff && options.verifyOnStop && changedSinceRun && !verifyNudged) {
+        verifyNudged = true;
+        onEvent({ type: 'warning', text: 'The model changed files but ran nothing to check them - asking it to verify once.' });
+        this.appendEntry(
+          {
+            ...userInputEntry(
+              '[o4c] You changed files but have not run anything since the last change to check it. If there is a way to test or run it, do that now; if not, say why it cannot be checked. Then give your final answer.',
+            ),
+            tags: [CONTINUATION_TAG],
+          },
+          onEntry,
+        );
+        continue;
+      }
       if (summarizing || (!isToolUse && !isMaxTokensCutoff)) {
         return responseText;
       }
@@ -1893,6 +1916,10 @@ export class AgentLoop {
         output = await this.boundToolOutput(output, call.name, options);
         // After bounding, so a truncation can never cut the note off.
         if (tool && this.loopGuardEnabled && !loopGuard.stopped) output += loopGuard.record(tool.name, input, output) ?? '';
+        if (tool && !output.startsWith('Error') && !output.startsWith('[o4c] Not run')) {
+          if (tool.name === 'run_shell') changedSinceRun = false;
+          else if (tool.mutating) changedSinceRun = true;
+        }
         onEvent({ type: 'tool_result', toolName: call.name, toolOutput: output });
         this.appendEntry(aiToolCallResponseEntry(call.id, output, tool?.mutating), onEntry);
       }

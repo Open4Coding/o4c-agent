@@ -2264,6 +2264,8 @@ export function App({
                 { key: 'summarize', label: 'Summarize - one last answer, no tools: what is done, what is left, what to do next.' },
                 { key: 'stop', label: 'Stop - end the turn now' },
               ])) ?? 'stop',
+            // Auto mode only: nobody approves each step, so ask once to verify unchecked edits (B19).
+            verifyOnStop: mode === 'auto' && (await configStore.get('verifyOnStop')) !== false,
             modeInstruction: modeSystemPrompt(planCommand ? 'plan' : mode, plansDir),
             signal: controller.signal,
             contextWindow,
