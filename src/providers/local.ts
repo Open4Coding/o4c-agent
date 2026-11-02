@@ -50,20 +50,24 @@ async function toImageDataUri(path: string): Promise<string> {
 }
 
 /**
- * What happens to an assistant message's reasoning on the way to llama-server (plan 0006 A7):
- * - `current-turn` (default): sent as `reasoning_content` on the messages after the last user
- *   message, so the chat template renders exactly what the model generated (Qwen's wraps it in
- *   `<think>` tags) and the server reuses its cache instead of re-processing the reply; earlier
- *   turns' reasoning is not sent at all (the template would drop it anyway).
+ * What happens to an assistant message's reasoning on the way to llama-server (plan 0006 A7, A14):
+ * - `all` (default): sent as `reasoning_content` on every assistant message. The chat template
+ *   renders it back inside `<think>` exactly as the model generated it, and - checked with
+ *   `/apply-template` on Qwen3.8, 2026-11-02 - it renders earlier turns' reasoning too, so the
+ *   rendering of a message never changes later and the server reuses its cache across both tool
+ *   rounds and user turns.
+ * - `current-turn`: only after the last user message. Fewer tokens, but each new user turn
+ *   re-renders the previous turn without its reasoning, re-processing it once.
  * - `none`: never sent.
- * - `all-as-text`: the old behaviour - prepended to `content` as plain text on every message.
+ * - `all-as-text`: the pre-A7 behaviour - prepended to `content` as plain text, which never
+ *   matches what the model generated and is re-processed every tool round.
  */
-export type LocalReasoningReplay = 'current-turn' | 'none' | 'all-as-text';
+export type LocalReasoningReplay = 'all' | 'current-turn' | 'none' | 'all-as-text';
 
 export async function toOpenAIMessages(
   systemPrompt: string | undefined,
   messages: Message[],
-  reasoningReplay: LocalReasoningReplay = 'current-turn',
+  reasoningReplay: LocalReasoningReplay = 'all',
 ): Promise<OpenAIMessage[]> {
   const result: OpenAIMessage[] = [];
   if (systemPrompt) result.push({ role: 'system', content: systemPrompt });
@@ -95,7 +99,7 @@ export async function toOpenAIMessages(
       result.push({
         role: 'assistant',
         content: content || null,
-        ...(reasoningReplay === 'current-turn' && reasoning && index > lastUser ? { reasoning_content: reasoning } : {}),
+        ...(reasoning && (reasoningReplay === 'all' || (reasoningReplay === 'current-turn' && index > lastUser)) ? { reasoning_content: reasoning } : {}),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
       });
     } else if (msg.role === 'tool') {
@@ -344,7 +348,7 @@ export class LocalProvider implements LLMProvider {
       reasoningReplay?: LocalReasoningReplay;
     } = {},
   ) {
-    this.reasoningReplay = options.reasoningReplay ?? 'current-turn';
+    this.reasoningReplay = options.reasoningReplay ?? 'all';
     this.reasoningBudgetTokens = options.reasoningBudgetTokens;
     this.thinkCaps = options.thinkCaps ?? DEFAULT_THINK_CAPS;
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
@@ -352,6 +356,63 @@ export class LocalProvider implements LLMProvider {
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.apiKey = options.apiKey ?? process.env.O4C_LOCAL_API_KEY;
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
+  }
+
+  /**
+   * The part of the request body that decides the rendered prompt: messages, tools and the
+   * thinking switches. Shared by `complete` and `countTokens`, because the server's count is exact
+   * only for the identical body (verified: 266 = 266 with thinking off, 302 = 302 with it on).
+   */
+  private async promptBody(request: CompletionRequest): Promise<Record<string, unknown>> {
+    return {
+      messages: await toOpenAIMessages(request.systemPrompt, request.messages, this.reasoningReplay),
+      tools: request.tools.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      })),
+      // `/think` wins when the turn carries a level (the live setting the user just chose);
+      // config.json's static `reasoningBudgetTokens` is the floor otherwise - see thinkParams().
+      ...this.thinkParams(request),
+    };
+  }
+
+  /**
+   * The exact prompt size of `request` as the server would render it (plan 0006 A14), from
+   * llama-server's `/v1/chat/completions/input_tokens` - no slot needed, answered in ~25 ms.
+   * Undefined when the server cannot say; callers fall back to their estimate.
+   */
+  async countTokens(request: CompletionRequest): Promise<number | undefined> {
+    try {
+      const response = await fetch(`${this.baseUrl}/v1/chat/completions/input_tokens`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}) },
+        body: JSON.stringify(await this.promptBody(request)),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) return undefined;
+      const data = (await response.json()) as { input_tokens?: number };
+      return typeof data.input_tokens === 'number' ? data.input_tokens : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The prompt exactly as the server's chat template renders `request` (`/apply-template`) - for
+   * `scripts/cache-diff.mjs`, which finds the first byte where two requests' renderings part. */
+  async renderPrompt(request: CompletionRequest): Promise<string | undefined> {
+    try {
+      const response = await fetch(`${this.baseUrl}/apply-template`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}) },
+        body: JSON.stringify(await this.promptBody(request)),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) return undefined;
+      const data = (await response.json()) as { prompt?: string };
+      return data.prompt;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Whether any of the server's slots is processing a request right now (`GET /slots`). False
@@ -453,18 +514,10 @@ export class LocalProvider implements LLMProvider {
           ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
         },
         body: JSON.stringify({
-          messages: await toOpenAIMessages(request.systemPrompt, request.messages, this.reasoningReplay),
-          tools: request.tools.map((t) => ({
-            type: 'function',
-            function: { name: t.name, description: t.description, parameters: t.inputSchema },
-          })),
+          ...(await this.promptBody(request)),
           // Per-request override preferred when given - see CompletionRequest.maxTokens's own
           // doc comment for the exact mid-generation truncation bug this closes.
           max_tokens: request.maxTokens ?? this.maxTokens,
-          // `/think` wins when the turn carries a level, because it is the live setting the user just
-          // chose; `config.json`'s static `reasoningBudgetTokens` remains the floor for a run that
-          // never touches the command. Both end up as the same server field - see thinkParams().
-          ...this.thinkParams(request),
           ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
           ...(request.responseSchema ? { response_format: { type: 'json_schema', json_schema: { schema: request.responseSchema } } } : {}),
           ...(request.grammar ? { grammar: request.grammar } : {}),

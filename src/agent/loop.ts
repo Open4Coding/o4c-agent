@@ -1027,10 +1027,23 @@ export class AgentLoop {
     onProviderCall: (call: { request: CompletionRequest; response: CompletionResponse }) => void,
     signal?: AbortSignal,
     modeInstruction?: string,
+    thinkLevel?: ThinkLevel,
   ): Promise<void> {
     // Hybrid real+delta estimate - see hybridPromptTokenEstimate's own doc comment and
     // maybeMicroCompact's identical swap above.
-    const effectiveVisible = this.hybridPromptTokenEstimate(modeInstruction);
+    let effectiveVisible = this.hybridPromptTokenEstimate(modeInstruction);
+    // Near the line, ask the server for the exact size of the request about to go out (plan 0006
+    // A14): an estimate a few percent off decides compaction early, or too late for the reply to
+    // fit. Only near the line - far from it the estimate decides the same way and costs nothing.
+    if (this.provider.countTokens && this.wireDefs && Math.abs(effectiveVisible - (contextWindow - settings.reserveTokens)) <= contextWindow * 0.1) {
+      const exact = await this.provider.countTokens({
+        systemPrompt: this.systemPrompt,
+        messages: toWireMessages(this.requestProjection?.entries ?? this.entries),
+        tools: this.wireDefs,
+        thinkLevel,
+      });
+      if (exact !== undefined) effectiveVisible = exact;
+    }
     if (!shouldCompact(effectiveVisible, contextWindow, settings.reserveTokens)) return;
     const cutPoint = findCutPoint(this.entries, settings.keepRecentTokens);
     if (cutPoint === 0) return; // no safe turn boundary to cut at yet - skip this round
@@ -1281,6 +1294,7 @@ export class AgentLoop {
           onProviderCall,
           options.signal,
           options.modeInstruction,
+          options.thinkLevel,
         );
         // The compaction above changed the entry set, so the cached projection is stale by
         // construction; without this the progress check below would compare the new estimate
@@ -1306,6 +1320,7 @@ export class AgentLoop {
         onProviderCall,
         options.signal,
         options.modeInstruction,
+        options.thinkLevel,
       );
       await pauseAndCompactIfOverEighty(true);
       const preTurnHardStop = hardStopMessage();
@@ -1774,6 +1789,7 @@ export class AgentLoop {
           onProviderCall,
           options.signal,
           options.modeInstruction,
+          options.thinkLevel,
         );
         await pauseAndCompactIfOverEighty();
         const hardStop = hardStopMessage();

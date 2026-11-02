@@ -22,14 +22,13 @@ export function promptTokens(
   drift: number,
 ): number {
   let chars = (req.systemPrompt ?? '').length + JSON.stringify(req.tools).length;
-  // Reasoning reaches the server only for the current turn (after the last user message) - the
-  // local provider's default `current-turn` replay, plan 0006 A7.
-  const lastUser = req.messages.reduce((at, m, i) => (m.role === 'user' ? i : at), -1);
-  req.messages.forEach((m, i) => {
+  // Every message's reasoning reaches the server - the local provider's default `all` replay
+  // (plan 0006 A7/A14).
+  for (const m of req.messages) {
     chars += m.content.length;
     if (m.toolCalls) chars += JSON.stringify(m.toolCalls).length;
-    if (m.reasoning && i > lastUser) chars += m.reasoning.length;
-  });
+    if (m.reasoning) chars += m.reasoning.length;
+  }
   return Math.ceil((chars / 4) * drift);
 }
 

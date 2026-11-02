@@ -695,7 +695,7 @@ program
         connectTimeoutMs,
         idleTimeoutMs,
         // Plan 0006 A7; config.json "localReasoningReplay" to override.
-        reasoningReplay: ['current-turn', 'none', 'all-as-text'].includes(String(resolvedConfig.localReasoningReplay))
+        reasoningReplay: ['all', 'current-turn', 'none', 'all-as-text'].includes(String(resolvedConfig.localReasoningReplay))
           ? (resolvedConfig.localReasoningReplay as LocalReasoningReplay)
           : undefined,
       });

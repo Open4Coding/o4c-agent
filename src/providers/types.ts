@@ -184,6 +184,9 @@ export interface CompletionResponse {
 export interface LLMProvider {
   readonly name: string;
   complete(request: CompletionRequest): Promise<CompletionResponse>;
+  /** The exact prompt size of `request` as this provider would send it, when it can say (plan 0006
+   * A14). Optional: absent or undefined means "use your estimate". */
+  countTokens?(request: CompletionRequest): Promise<number | undefined>;
 }
 
 /**
