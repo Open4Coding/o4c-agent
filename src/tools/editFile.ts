@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { closestLines, findEdit, type MatchRung } from './editMatch.js';
+import { findPlaceholder } from './placeholders.js';
 import type { Tool } from './types.js';
 
 const RUNG_TEXT: Record<MatchRung, string> = {
@@ -64,6 +65,11 @@ export const editFileTool: Tool = {
         `Error editing file "${path}": old_string was not found, even ignoring line endings, trailing whitespace and indentation. ` +
         (near ? `The closest lines in the file are:\n${near}\nCopy the exact text from there, or read the file again.` : 'Read the file again to copy the text exactly.')
       );
+    }
+    // "// ... rest unchanged" in new_string would replace real code with the comment (plan 0006 B6).
+    const placeholder = findPlaceholder(newString, content);
+    if (placeholder) {
+      return `Error editing file "${path}": new_string contains "${placeholder}", which looks like a placeholder for code left out. new_string replaces old_string exactly, so that code would be lost. Nothing was changed. Write out the real code, or make old_string smaller so new_string does not need to repeat it.`;
     }
     const count = match.ranges.length;
     const how = match.rung === 'exact' ? '' : ` (matched ${RUNG_TEXT[match.rung]})`;

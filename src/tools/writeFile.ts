@@ -1,5 +1,6 @@
-import { writeFile as fsWriteFile, mkdir, access } from 'node:fs/promises';
+import { writeFile as fsWriteFile, mkdir, access, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { findPlaceholder } from './placeholders.js';
 import type { Tool } from './types.js';
 
 async function fileExists(path: string): Promise<boolean> {
@@ -28,6 +29,11 @@ export const writeFileTool: Tool = {
     const content = String(input.content ?? '');
     try {
       const existedBefore = await fileExists(path);
+      // "// ... rest unchanged" would replace the real code it stands for (plan 0006 B6).
+      const placeholder = findPlaceholder(content, existedBefore ? await readFile(path, 'utf-8') : '');
+      if (placeholder) {
+        return `Error writing file "${path}": the content contains "${placeholder}", which looks like a placeholder for code left out. write_file replaces the whole file, so that code would be lost. Nothing was written. Write the complete content, or use edit_file to change only part of the file.`;
+      }
       await mkdir(dirname(path), { recursive: true });
       await fsWriteFile(path, content, 'utf-8');
       const verb = existedBefore ? 'Overwrote' : 'Wrote';
