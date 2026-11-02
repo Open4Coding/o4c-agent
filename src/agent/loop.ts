@@ -1,6 +1,7 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message, ToolDefinition, Usage } from '../providers/types.js';
 import { recoverTextToolCalls } from './textToolCalls.js';
 import { checkArgs, resolveTool, unknownToolMessage } from './toolArgs.js';
+import { supersededReadIds } from './supersededReads.js';
 import { describeCacheBreak, diagnoseCacheBreak, type CacheBreak } from './cacheBreak.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
@@ -884,10 +885,19 @@ export class AgentLoop {
     // oversized tool result lands. See `pruneOversizedToolResults()`.
     const oversized = this.pruneOversizedToolResults(contextWindow);
 
+    // Pass 2 (plan 0006 B10): file reads a later read or full write made redundant, whatever their
+    // age - duplicates go before anything unique does. When that alone brings the context back
+    // under the line, the age-based pass below does not run, so older unique content stays.
+    const duplicates = this.pruneSupersededReads();
+    if (duplicates.pairs > 0 && !shouldCompact(this.hybridPromptTokenEstimate(modeInstruction), contextWindow, microCompactReserve)) {
+      this.emitPruneMarker(oversized.pairs + duplicates.pairs, oversized.tokens + duplicates.tokens, oversized.pairs, onEvent, onEntry, duplicates.pairs);
+      return;
+    }
+
     const cutoff = microCompactCutoffIndex(this.entries, settings.keepRecentTokens);
     if (cutoff === 0) {
-      // Nothing old enough for the age-based pass, but pass 1 may still have freed something.
-      this.emitPruneMarker(oversized.pairs, oversized.tokens, oversized.pairs, onEvent, onEntry);
+      // Nothing old enough for the age-based pass, but passes 1-2 may still have freed something.
+      this.emitPruneMarker(oversized.pairs + duplicates.pairs, oversized.tokens + duplicates.tokens, oversized.pairs, onEvent, onEntry, duplicates.pairs);
       return;
     }
 
@@ -905,8 +915,8 @@ export class AgentLoop {
       }
     });
 
-    let prunedPairCount = oversized.pairs;
-    let tokensFreed = oversized.tokens;
+    let prunedPairCount = oversized.pairs + duplicates.pairs;
+    let tokensFreed = oversized.tokens + duplicates.tokens;
     for (let i = 0; i < cutoff; i++) {
       const call = this.entries[i];
       if (call.type !== 'ai' || call.sub_type !== 'toolcall' || call.agent_visible === false || !call.tool_call_id) {
@@ -927,7 +937,28 @@ export class AgentLoop {
       this.releaseEntryContent(response);
       prunedPairCount += 1;
     }
-    this.emitPruneMarker(prunedPairCount, tokensFreed, oversized.pairs, onEvent, onEntry);
+    this.emitPruneMarker(prunedPairCount, tokensFreed, oversized.pairs, onEvent, onEntry, duplicates.pairs);
+  }
+
+  /**
+   * Hides superseded file reads - see `supersededReadIds()` - call and response together, with the
+   * same append-and-flip discipline as the other passes.
+   */
+  private pruneSupersededReads(): { pairs: number; tokens: number } {
+    const ids = new Set(supersededReadIds(this.entries));
+    if (ids.size === 0) return { pairs: 0, tokens: 0 };
+    let tokens = 0;
+    for (const entry of this.entries) {
+      if (!entry.tool_call_id || !ids.has(entry.tool_call_id) || entry.agent_visible === false) continue;
+      if (entry.sub_type !== 'toolcall' && entry.sub_type !== 'toolcallresponse') continue;
+      tokens += estimateTokens(entry);
+      this.deindexEntry(entry);
+      entry.agent_visible = false;
+      this.indexEntry(entry);
+      // Not released, unlike the other passes: the entry stays whole in history (and the session
+      // file); only the request stops carrying a copy the model has a newer version of.
+    }
+    return { pairs: ids.size, tokens };
   }
 
   /**
@@ -1001,17 +1032,21 @@ export class AgentLoop {
     oversizedPairs: number,
     onEvent: (event: AgentEvent) => void,
     onEntry: (entry: ContextEntry) => void,
+    supersededPairs = 0,
   ): void {
     if (prunedPairCount === 0) return;
 
     const plural = prunedPairCount === 1 ? '' : 's';
     let what: string;
-    if (oversizedPairs === 0) {
+    if (supersededPairs === prunedPairCount) {
+      what = `superseded file read${plural} (a newer copy is still in context)`;
+    } else if (oversizedPairs === 0 && supersededPairs === 0) {
       what = `older tool call${plural}`;
     } else if (oversizedPairs === prunedPairCount) {
       what = `oversized tool result${plural}`;
     } else {
-      what = `tool calls, ${oversizedPairs} of them oversized`;
+      const parts = [oversizedPairs ? `${oversizedPairs} oversized` : '', supersededPairs ? `${supersededPairs} superseded file reads` : ''].filter(Boolean);
+      what = `tool calls, ${parts.join(' and ')} among them`;
     }
 
     const pruneEntry = aiPruneEntry(prunedPairCount, tokensFreed, what);
