@@ -65,6 +65,13 @@ export interface CompletionRequest {
    * reuses its cache) but the model must not call one - the cache-sharing compaction call, plan
    * 0006 A11. Providers that cannot express it ignore it. */
   toolChoice?: 'none';
+  /**
+   * Constrained output for side calls (plan 0006 A12): a JSON schema the reply must match, or a
+   * GBNF grammar. Sent by the local provider only (llama-server's `response_format` / `grammar`);
+   * others ignore them, and the callers keep their tolerant parsers for that case.
+   */
+  responseSchema?: Record<string, unknown>;
+  grammar?: string;
   /** Lets the caller cancel an in-flight request (e.g. the user pressed Escape while the
    * "Thinking..." spinner was showing). Providers that make a real network call should pass it
    * straight through to that call's own cancellation mechanism. */

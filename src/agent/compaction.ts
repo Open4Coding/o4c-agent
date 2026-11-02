@@ -260,6 +260,26 @@ export function buildCompactionPrompt(input: {
  * one-slot server. `keepFrom` is the start of the first message that stays in full; everything
  * before it is what the summary replaces.
  */
+/** `SUMMARY_INSTRUCTIONS`'s object as a JSON schema, so llama-server can only produce something
+ * `parseSummary` reads as JSON (plan 0006 A12). Every field optional, as the instructions say. */
+export const SUMMARY_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    user_intent: { type: 'string' },
+    technical_concepts: { type: 'string' },
+    files: {
+      type: 'array',
+      items: { type: 'object', properties: { path: { type: 'string' }, summary: { type: 'string' } }, required: ['path', 'summary'] },
+    },
+    errors_and_fixes: { type: 'string' },
+    problem_solving: { type: 'string' },
+    pending_tasks: { type: 'string' },
+    current_work: { type: 'string' },
+    next_step: { type: 'string' },
+  },
+  additionalProperties: false,
+};
+
 /** The first line of that instruction - how a provider (or a test harness) can tell the call apart. */
 export const SHARED_COMPACTION_MARK = '[o4c] Pause the task: this is a context-compaction step, not a user request.';
 

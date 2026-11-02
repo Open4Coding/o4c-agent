@@ -39,6 +39,7 @@ import {
 import {
   buildCompactionPrompt,
   buildSharedCompactionInstruction,
+  SUMMARY_SCHEMA,
   findCutPoint,
   microCompactCutoffIndex,
   parseSummary,
@@ -1071,6 +1072,7 @@ export class AgentLoop {
         ],
         tools: this.wireDefs,
         toolChoice: 'none',
+        responseSchema: SUMMARY_SCHEMA,
         maxTokens: Math.min(8192, sharedRoom),
         thinkLevel: 'nothink',
         signal,
@@ -1094,6 +1096,7 @@ export class AgentLoop {
           { role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary, maxContentChars }) },
         ],
         tools: [],
+        responseSchema: SUMMARY_SCHEMA,
         signal,
       };
       try {

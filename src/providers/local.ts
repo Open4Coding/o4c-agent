@@ -436,6 +436,8 @@ export class LocalProvider implements LLMProvider {
           // never touches the command. Both end up as the same server field - see thinkParams().
           ...this.thinkParams(request),
           ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
+          ...(request.responseSchema ? { response_format: { type: 'json_schema', json_schema: { schema: request.responseSchema } } } : {}),
+          ...(request.grammar ? { grammar: request.grammar } : {}),
           stream: true,
           // Without this, a streaming response omits usage entirely (the standard OpenAI-API
           // convention llama-server also implements - confirmed directly against its source,
