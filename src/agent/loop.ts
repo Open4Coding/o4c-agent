@@ -38,6 +38,7 @@ import {
 } from './contextEntry.js';
 import {
   buildCompactionPrompt,
+  buildSharedCompactionInstruction,
   findCutPoint,
   microCompactCutoffIndex,
   parseSummary,
@@ -1056,21 +1057,52 @@ export class AgentLoop {
     // bound of its own - see buildCompactionPrompt's own doc comment on the probed gap this
     // closes) consume the entire budget or more.
     const maxContentChars = Math.max(4000, Math.floor(settings.reserveTokens * 0.7) * 4);
-    const request: CompletionRequest = {
-      systemPrompt:
-        'You produce structured JSON summaries of coding-agent conversation history for context compaction. Output only the JSON object, nothing else.',
-      messages: [
-        { role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary, maxContentChars }) },
-      ],
-      tools: [],
-      signal,
-    };
-    try {
-      const response = await this.provider.complete(request);
-      onProviderCall({ request, response });
-      summary = parseSummary(response.content);
-    } catch {
-      return; // best-effort - see this method's own doc comment
+    // First choice (plan 0006 A11): the conversation exactly as last sent plus one instruction, so
+    // the server reuses its cache instead of processing a fresh copy of the history - and the main
+    // conversation is still in the slot afterwards. Only when there is room for the reply.
+    const sharedRoom = contextWindow - effectiveVisible - 512;
+    if (sharedRoom >= 2048 && this.wireDefs) {
+      const keepEntry = this.entries[cutPoint];
+      const sharedRequest: CompletionRequest = {
+        systemPrompt: this.systemPrompt,
+        messages: [
+          ...toWireMessages(this.requestProjection?.entries ?? this.entries),
+          { role: 'user', content: buildSharedCompactionInstruction({ keepFrom: keepEntry?.content, hasPreviousSummary: previousSummary !== undefined }) },
+        ],
+        tools: this.wireDefs,
+        toolChoice: 'none',
+        maxTokens: Math.min(8192, sharedRoom),
+        thinkLevel: 'nothink',
+        signal,
+      };
+      try {
+        const response = await this.provider.complete(sharedRequest);
+        onProviderCall({ request: sharedRequest, response });
+        const parsed = parseSummary(response.content);
+        // parseSummary wraps unparseable text as { current_work }; only real JSON is taken here,
+        // anything else falls through to the standalone request below.
+        if (parsed && typeof parsed === 'object' && !(Object.keys(parsed).length === 1 && 'current_work' in parsed)) summary = parsed;
+      } catch {
+        // Fall through to the standalone request.
+      }
+    }
+    if (summary === undefined) {
+      const request: CompletionRequest = {
+        systemPrompt:
+          'You produce structured JSON summaries of coding-agent conversation history for context compaction. Output only the JSON object, nothing else.',
+        messages: [
+          { role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary, maxContentChars }) },
+        ],
+        tools: [],
+        signal,
+      };
+      try {
+        const response = await this.provider.complete(request);
+        onProviderCall({ request, response });
+        summary = parseSummary(response.content);
+      } catch {
+        return; // best-effort - see this method's own doc comment
+      }
     }
 
     // Real flaw found via direct hands-on observation (not just probing): compacting a small

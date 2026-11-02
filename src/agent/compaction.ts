@@ -252,6 +252,32 @@ export function buildCompactionPrompt(input: {
   ].join('\n');
 }
 
+/**
+ * The last message of a cache-sharing compaction request (plan 0006 A11). The request repeats the
+ * conversation exactly as it was last sent - same system prompt, tools and messages, so the server
+ * reuses its cached prefix and processes only this message - instead of a fresh prompt holding a
+ * serialised copy of the history, which cost a full prefill and evicted the conversation from a
+ * one-slot server. `keepFrom` is the start of the first message that stays in full; everything
+ * before it is what the summary replaces.
+ */
+/** The first line of that instruction - how a provider (or a test harness) can tell the call apart. */
+export const SHARED_COMPACTION_MARK = '[o4c] Pause the task: this is a context-compaction step, not a user request.';
+
+export function buildSharedCompactionInstruction(input: { keepFrom?: string; hasPreviousSummary?: boolean }): string {
+  const scope = input.keepFrom
+    ? `Summarize the conversation above, up to but not including the message that begins: "${input.keepFrom.replace(/\s+/g, ' ').slice(0, 120)}".`
+    : 'Summarize the conversation above.';
+  return [
+    SHARED_COMPACTION_MARK,
+    scope,
+    input.hasPreviousSummary ? 'Fold the earlier summary that appears above into the new one rather than starting over.' : '',
+    SUMMARY_INSTRUCTIONS,
+    'Do not call any tools. Reply with the JSON object only.',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 /** Lenient JSON parse of the summarizer's response - goose's own principle: a malformed or
  * partial response degrades to a plain-text summary rather than losing the compaction entirely
  * (the raw text is still far better than nothing for a model reading it back later). */

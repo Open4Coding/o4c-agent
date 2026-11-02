@@ -17,6 +17,8 @@ import {
   type Violation,
 } from './invariants.js';
 
+import { SHARED_COMPACTION_MARK } from '../../agent/compaction.js';
+
 export const SUMMARY_PROMPT_PREFIX = 'You produce structured JSON summaries';
 export const TAG_RE = /\[\[E\d+\]\]/;
 
@@ -142,6 +144,9 @@ export class ScriptedProvider implements LLMProvider {
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     if (request.systemPrompt?.startsWith(SUMMARY_PROMPT_PREFIX)) return this.summarize(request);
+    // The cache-sharing compaction call (plan 0006 A11): the conversation as sent, plus the instruction.
+    const last = request.messages[request.messages.length - 1];
+    if (last?.role === 'user' && last.content.startsWith(SHARED_COMPACTION_MARK)) return this.summarize(request);
 
     this.stats.requests += 1;
     const round = this.script[this.cursor];

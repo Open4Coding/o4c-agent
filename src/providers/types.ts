@@ -61,6 +61,10 @@ export interface CompletionRequest {
    * problem (Anthropic's cloud context dwarfs anything a single agent turn could approach) can
    * simply ignore it. */
   maxTokens?: number;
+  /** `'none'`: tools stay listed (so the request's prefix matches the conversation's and the server
+   * reuses its cache) but the model must not call one - the cache-sharing compaction call, plan
+   * 0006 A11. Providers that cannot express it ignore it. */
+  toolChoice?: 'none';
   /** Lets the caller cancel an in-flight request (e.g. the user pressed Escape while the
    * "Thinking..." spinner was showing). Providers that make a real network call should pass it
    * straight through to that call's own cancellation mechanism. */
