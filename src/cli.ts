@@ -20,6 +20,7 @@ import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
 import { registerSecret } from './session/redact.js';
+import { defaultProvider } from './session/providerDefault.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -389,8 +390,8 @@ program
   .option('-m, --model <model>', 'model to use', 'claude-opus-5')
   .option(
     '-p, --provider <name>',
-    'LLM provider to use: "anthropic" (real, costs money), "local" (self-hosted llama-server), or "mock" (free, no API key, for development)',
-    'anthropic',
+    'LLM provider: "local" (self-hosted llama-server), "anthropic" (real, costs money) or "mock" (free, for development). Without this flag: the config.json "provider", else local - unless only ANTHROPIC_API_KEY is set',
+    'local',
   )
   .option(
     '--base-url <url>',
@@ -492,7 +493,8 @@ program
     opts = {
       ...opts,
       model: configOr('model', opts.model),
-      provider: configOr('provider', opts.provider),
+      // No -p and no `provider` key: local-first rule (session/providerDefault.ts).
+      provider: program.getOptionValueSource('provider') !== 'default' ? opts.provider : defaultProvider(resolvedConfig),
       baseUrl: configOr('baseUrl', opts.baseUrl),
     };
     // No CLI flag for this on purpose (same reasoning as O4C_LOCAL_API_KEY - keeps it out of
