@@ -32,6 +32,7 @@ import { checkpointComponent, ShadowGit, type CheckpointHooks } from './session/
 import { evaluateRules, loadRules } from './session/permissionRules.js';
 import { destructiveReason, splitShellSegments } from './tools/interactive.js';
 import { loadO4cIgnore, o4cIgnoreComponent } from './tools/o4cIgnore.js';
+import { subdirInstructionsComponent } from './session/instructionFiles.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -833,6 +834,10 @@ program
         ? { shadow: new ShadowGit(projectRoot), store: history.store.checkpoints(), sessionId }
         : undefined;
     if (checkpointHooks) loop.registerCore(checkpointComponent(checkpointHooks));
+    // Instruction files below the working directory, given on first touch (D1).
+    if (trusted && projectRoot) {
+      loop.registerCore(subdirInstructionsComponent({ projectRoot, seenFile: join(projectRoot, '.o4c', 'instructions-seen', `${sessionId}.json`) }));
+    }
     // .o4cignore (C5): only when the project has one.
     if (loadO4cIgnore(trusted ? projectRoot : undefined)) loop.registerCore(o4cIgnoreComponent());
     if (resolvedConfig.fileStateGuard !== false) {

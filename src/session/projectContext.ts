@@ -1,12 +1,13 @@
 import { readFile, mkdir, stat } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
-import { join, dirname, relative, resolve, sep } from 'node:path';
+import { basename, join, dirname, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { defaultSessionsDir } from './sessionStore.js';
 import { defaultLogsDir } from './runLog.js';
 import { seedLocalConfig } from './configStore.js';
 import { loadProfile, recordAppliedProfile } from './profiles.js';
+import { instructionFileIn, loadInstructionFile } from './instructionFiles.js';
 
 export function defaultGlobalDir(): string {
   return join(homedir(), '.o4c');
@@ -236,20 +237,22 @@ export async function resolveO4cMd(
   const sections: Array<{ path: string; content: string }> = [];
 
   const globalPath = join(globalDir, 'o4c.md');
-  const globalContent = await readIfExists(globalPath);
-  if (globalContent?.trim()) sections.push({ path: globalPath, content: globalContent });
+  if ((await readIfExists(globalPath))?.trim()) sections.push({ path: globalPath, content: loadInstructionFile(globalPath) });
 
+  // Per directory: O4C.md, else AGENTS.md, else CLAUDE.md (plan 0006 D1), with @path imports expanded.
   if (projectRoot) {
     for (const dir of dirsFromRootToCwd(projectRoot, cwd)) {
-      const path = join(dir, 'o4c.md');
-      const content = await readIfExists(path);
-      if (content?.trim()) sections.push({ path, content });
+      const path = instructionFileIn(dir);
+      if (!path) continue;
+      const content = loadInstructionFile(path);
+      if (content.trim()) sections.push({ path, content });
     }
   }
 
   if (sections.length === 0) return '';
 
-  const body = sections.map((s) => `--- o4c.md (${s.path}) ---\n${s.content.trim()}`).join('\n\n');
+  // The header names the file actually used, so /view-prompt shows where the instructions came from.
+  const body = sections.map((s) => `--- ${basename(s.path)} (${s.path}) ---\n${s.content.trim()}`).join('\n\n');
   return [
     'Project context (o4c.md), broadest first - later, more specific sections take precedence',
     'if they conflict with earlier ones:',
