@@ -2,6 +2,12 @@ import type { Tool } from './types.js';
 import { runShellCommand } from './shellRunner.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+let defaultTimeoutMs = DEFAULT_TIMEOUT_MS;
+
+/** Config `shellTimeoutMs` (B21): the timeout when a call gives none; 0 or negative = none. */
+export function setShellTimeoutDefault(ms: unknown): void {
+  defaultTimeoutMs = typeof ms === 'number' && Number.isFinite(ms) ? ms : DEFAULT_TIMEOUT_MS;
+}
 
 /**
  * How much output this tool will buffer at all. Was 10 MB, and that number is exactly what killed
@@ -37,13 +43,15 @@ export const runShellTool: Tool = {
     type: 'object',
     properties: {
       command: { type: 'string', description: 'The shell command to execute.' },
+      timeout_ms: { type: 'number', description: 'Kill it after this many ms (default 60000; 0 = no limit, for long builds).' },
     },
     required: ['command'],
   },
   async execute(input, context) {
     const command = String(input.command ?? '');
+    const timeoutMs = typeof input.timeout_ms === 'number' && Number.isFinite(input.timeout_ms) ? input.timeout_ms : defaultTimeoutMs;
     // spawn + whole-tree kill on Esc or timeout (B20) - see shellRunner.ts.
-    const r = await runShellCommand(command, { timeoutMs: DEFAULT_TIMEOUT_MS, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal });
+    const r = await runShellCommand(command, { timeoutMs, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal });
     if (!r.killed && r.code === 0) return [r.stdout, r.stderr].filter(Boolean).join('\n').trim() || '(no output)';
 
     let why: string;
@@ -52,7 +60,7 @@ export const runShellTool: Tool = {
       // explanation was the first line of an 11 MB payload, which is the same as not saying it.
       why = `stdout maxBuffer length exceeded (${MAX_BUFFER_BYTES.toLocaleString()} bytes); the command and everything it started were stopped.\nThis command produced more output than can be read. Narrow it (filter, count, or limit it), or redirect it to a file and read ranges with read_file.`;
     } else if (r.killed === 'timeout') {
-      why = `timed out after ${DEFAULT_TIMEOUT_MS / 1000} s; the command and everything it started were stopped.`;
+      why = `timed out after ${timeoutMs / 1000} s; the command and everything it started were stopped. If it needs longer, pass a larger timeout_ms (0 = no limit).`;
     } else if (r.killed === 'aborted') {
       why = 'cancelled by the user; the command and everything it started were stopped.';
     } else {

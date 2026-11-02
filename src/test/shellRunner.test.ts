@@ -69,3 +69,17 @@ test('a command that leaves something running in the background still returns', 
   assert.match(r.stdout, /started/);
   assert.ok(Date.now() - started < 8000, `took ${Date.now() - started} ms`);
 });
+
+test('timeout_ms per call, and a configured default; 0 means no limit (B21)', async () => {
+  const { setShellTimeoutDefault } = await import('../tools/runShell.js');
+  const slow = 'node -e "setTimeout(() => console.log(\'finished\'), 1500)"';
+  assert.match(await runShellTool.execute({ command: slow, timeout_ms: 300 }), /timed out after 0\.3 s.*pass a larger timeout_ms/);
+  assert.match(await runShellTool.execute({ command: slow, timeout_ms: 0 }), /finished/);
+  setShellTimeoutDefault(300);
+  try {
+    assert.match(await runShellTool.execute({ command: slow }), /timed out after 0\.3 s/);
+  } finally {
+    setShellTimeoutDefault(undefined);
+  }
+  assert.match(await runShellTool.execute({ command: slow }), /finished/);
+});
