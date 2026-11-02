@@ -299,6 +299,16 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose the shell run_shell uses: auto, cmd, pwsh (PowerShell 7), powershell (5.1), bash or sh - saved to config.',
   },
   {
+    name: '/memory',
+    select: 'run',
+    description: 'What o4c remembers across sessions (rules, facts, lessons; project or global): pick one to edit or delete - no LLM call.',
+  },
+  {
+    name: '/memory-edit',
+    hidden: true,
+    description: 'Changes a memory - put in the input box by /memory. Usage: /memory-edit <project|global>:<id> <text>',
+  },
+  {
     name: '/init',
     select: 'run',
     description: "Draft an O4C.md from the project's own files (languages, build and test commands, layout), show it, and write it if you say yes - no LLM call.",

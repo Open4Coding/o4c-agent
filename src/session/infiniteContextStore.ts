@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import type { ContextEntry } from '../agent/contextEntry.js';
 import { PLANS_SCHEMA, PlanStore } from './planStore.js';
 import { CHECKPOINTS_SCHEMA, CheckpointStore } from './checkpoints.js';
+import { MEMORIES_SCHEMA, MemoryStore } from './memories.js';
 import { redactSecrets } from './redact.js';
 
 /** `history.db` itself - the WAL sidecars (`-wal`/`-shm`) appear alongside it during normal use
@@ -294,8 +295,9 @@ CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_tag_id);
  * project's `.o4c/db/` (2026-10-31); anything later needs a migration keyed on this.
  * 2 (2026-11-01): `tasks.notes`, also searched - see `migrate`.
  * 3 (2026-11-01): plans and their checklists (`planStore.ts`) - new tables only, so no migration.
- * 4 (2026-11-02): `checkpoints` (plan 0006 C1, `checkpoints.ts`) - a new table only, no migration. */
-export const HISTORY_SCHEMA_VERSION = 4;
+ * 4 (2026-11-02): `checkpoints` (plan 0006 C1, `checkpoints.ts`) - a new table only, no migration.
+ * 5 (2026-11-02): `memories` (plan 0006 D3, `memories.ts`) - a new table only, no migration. */
+export const HISTORY_SCHEMA_VERSION = 5;
 
 /** How much of a task's notes is kept - the newest, since later findings build on earlier ones. */
 export const TASK_NOTES_CHARS = 6000;
@@ -338,6 +340,7 @@ export class InfiniteContextStore {
   private db: DatabaseSync;
   private planStore: PlanStore | undefined;
   private checkpointStore: CheckpointStore | undefined;
+  private memoryStore: MemoryStore | undefined;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -348,6 +351,7 @@ export class InfiniteContextStore {
     this.db.exec(SCHEMA);
     this.db.exec(PLANS_SCHEMA);
     this.db.exec(CHECKPOINTS_SCHEMA);
+    this.db.exec(MEMORIES_SCHEMA);
     if (rebuildTaskIndex) this.db.exec(`INSERT INTO tasks_fts(tasks_fts) VALUES ('rebuild');`);
     this.db
       .prepare(
@@ -755,6 +759,12 @@ export class InfiniteContextStore {
     this.db.prepare(`UPDATE search_log SET picked = ? WHERE id = ?`).run(all.join(','), searchId);
     const bump = this.db.prepare(`UPDATE tasks SET used_count = used_count + 1 WHERE id = ?`);
     for (const id of picked) bump.run(id);
+  }
+
+  /** Project memories (D3), on this same connection. */
+  memories(): MemoryStore {
+    this.memoryStore ??= new MemoryStore(this.db);
+    return this.memoryStore;
   }
 
   /** Checkpoint records (C1), on this same connection like the plans. */

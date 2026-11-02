@@ -51,6 +51,7 @@ import { grammarForPath, highlightCode } from './syntaxHighlight.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
   DEFAULT_THINK_CAPS,
@@ -141,6 +142,7 @@ import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
 import { setAskUserHandler } from '../tools/askUser.js';
 import { draftO4cMd, scanProject } from '../session/projectScan.js';
+import { activeMemoryStores } from '../session/memories.js';
 import type { CheckpointHooks } from '../session/checkpoints.js';
 import {
   COMMANDS,
@@ -1606,14 +1608,21 @@ export function App({
         // Read-only and local: database -> table -> one row in full. See dbBrowser.ts.
         pushBlock([userLine(input)]);
         const dbDir = dbDirFor(projectRoot);
-        const names = listDatabases(dbDir);
-        if (!dbDir || names.length === 0) {
+        // The project's databases, and the global ones (~/.o4c/db - global memories, D3).
+        const globalDbDir = join(homedir(), '.o4c', 'db');
+        const choices = [
+          ...(dbDir ? listDatabases(dbDir).map((n) => ({ key: `p:${n}`, label: n, dir: dbDir, file: n })) : []),
+          ...listDatabases(globalDbDir).map((n) => ({ key: `g:${n}`, label: `${n} (global, ~/.o4c/db)`, dir: globalDbDir, file: n })),
+        ];
+        if (choices.length === 0) {
           pushBlock([infoLine("No databases yet - o4c makes them in .o4c/db/ once the project is trusted.")]);
         } else {
-          const name = await pickChoice('Database (↑/↓ to choose, Enter to select, Esc to cancel):', names.map((n) => ({ key: n, label: n })));
+          const picked = await pickChoice('Database (↑/↓ to choose, Enter to select, Esc to cancel):', choices.map((c) => ({ key: c.key, label: c.label })));
+          const choice = choices.find((c) => c.key === picked);
+          const name = choice?.file;
           let db: ReturnType<typeof openReadOnly> | undefined;
           try {
-            db = name === undefined ? undefined : openReadOnly(dbDir, name);
+            db = choice === undefined ? undefined : openReadOnly(choice.dir, choice.file);
             const table = db ? await pickChoice(`${name} - tables (↑/↓ to choose, Enter to select, Esc to cancel):`, tableRows(db)) : undefined;
             const row = db && table ? await pickChoice(rowsTitle(db, table), recordRows(db, table)) : undefined;
             if (!db || !table || !row) pushBlock([infoLine('Nothing chosen.')]);
@@ -2243,6 +2252,36 @@ export function App({
             }
           }
         }
+      } else if (commandName(input) === '/memory') {
+        // D3: what o4c remembers across sessions - view, edit (back into the input box), delete.
+        pushBlock([userLine(input)]);
+        const stores = activeMemoryStores();
+        const rows = [
+          ...(stores.project?.list() ?? []).map((m) => ({ ...m, scope: 'project' as const })),
+          ...(stores.global?.list() ?? []).map((m) => ({ ...m, scope: 'global' as const })),
+        ];
+        if (rows.length === 0) {
+          pushBlock([infoLine('No memories yet. The model saves them with the remember tool, or ask it to remember something.')]);
+        } else {
+          const picked = await pickChoice('Memories (↑/↓, Enter to choose, Esc to close):', rows.map((m) => ({ key: `${m.scope}:${m.id}`, label: `[${m.kind}${m.scope === 'global' ? ', global' : ''}] ${m.text}` })));
+          const row = rows.find((m) => `${m.scope}:${m.id}` === picked);
+          const action = row ? await pickChoice<'edit' | 'delete'>('Edit or delete it?', [{ key: 'edit', label: 'Edit - put it in the input box as /memory-edit' }, { key: 'delete', label: 'Delete it' }]) : undefined;
+          const store = row?.scope === 'global' ? stores.global : stores.project;
+          if (!row || !action || !store) pushBlock([infoLine('Memories unchanged.')]);
+          else if (action === 'delete') {
+            store.remove(row.id);
+            pushBlock([infoLine(`Deleted: ${row.text}`)]);
+          } else {
+            setPrefill({ token: nextPrefillToken++, text: `/memory-edit ${row.scope}:${row.id} ${row.text}` });
+          }
+        }
+      } else if (commandName(input) === '/memory-edit') {
+        pushBlock([userLine(input)]);
+        const m = /^\/memory-edit\s+(project|global):(\d+)\s+([\s\S]+)$/.exec(input.trim());
+        const stores = activeMemoryStores();
+        const store = m?.[1] === 'global' ? stores.global : stores.project;
+        if (!m || !store) pushBlock([infoLine('Usage: /memory-edit <project|global>:<id> <new text> - /memory fills this in.')]);
+        else pushBlock([infoLine(store.update(Number(m[2]), m[3]!.trim()) ? 'Memory updated.' : 'No such memory.')]);
       } else if (commandName(input) === '/init') {
         // D2: a first O4C.md from what the project's own files say - shown, then written on Yes.
         pushBlock([userLine(input)]);

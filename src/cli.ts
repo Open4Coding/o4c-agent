@@ -33,6 +33,7 @@ import { evaluateRules, loadRules } from './session/permissionRules.js';
 import { destructiveReason, splitShellSegments } from './tools/interactive.js';
 import { loadO4cIgnore, o4cIgnoreComponent } from './tools/o4cIgnore.js';
 import { subdirInstructionsComponent } from './session/instructionFiles.js';
+import { createRememberTool, memoriesComponent, openGlobalMemories, setActiveMemoryStores, type MemoryStores } from './session/memories.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -834,6 +835,21 @@ program
         ? { shadow: new ShadowGit(projectRoot), store: history.store.checkpoints(), sessionId }
         : undefined;
     if (checkpointHooks) loop.registerCore(checkpointComponent(checkpointHooks));
+    // Memories (D3): project ones in history.db, global ones in ~/.o4c/db/global.db; a turn note when
+    // they change, and a remember tool.
+    const memoryStores: MemoryStores = { project: history?.store.memories() };
+    try {
+      const globalMemories = openGlobalMemories();
+      memoryStores.global = globalMemories.store;
+      process.on('exit', () => globalMemories.close());
+    } catch {
+      // no global store: project memories still work
+    }
+    if (memoryStores.project || memoryStores.global) {
+      setActiveMemoryStores(memoryStores);
+      loop.registerCore(memoriesComponent(memoryStores));
+      loop.addTools([createRememberTool(memoryStores)]);
+    }
     // Instruction files below the working directory, given on first touch (D1).
     if (trusted && projectRoot) {
       loop.registerCore(subdirInstructionsComponent({ projectRoot, seenFile: join(projectRoot, '.o4c', 'instructions-seen', `${sessionId}.json`) }));
