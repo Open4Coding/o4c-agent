@@ -1246,6 +1246,30 @@ export class AgentLoop {
     });
   }
 
+  /**
+   * A side question about the conversation (plan 0006 C8, `/btw`): one request built exactly like
+   * the next turn's - same system prompt, tools and messages, so the server reuses its cached
+   * prefix - plus the question, with tools off. Neither the question nor the answer is added to
+   * history, so the conversation goes on as if it had not been asked. Usage is counted.
+   */
+  async askAside(question: string, options: { signal?: AbortSignal; thinkLevel?: ThinkLevel; contextWindow?: number; onToken?: (delta: string, kind: 'think' | 'text') => void } = {}): Promise<string> {
+    await this.refreshRequestProjection({ contextWindow: options.contextWindow }, () => {});
+    const entries = this.requestProjection?.entries ?? this.entries;
+    const last = this.lastMainRequest;
+    const response = await this.provider.complete({
+      systemPrompt: last?.systemPrompt ?? this.systemPrompt,
+      messages: [...toWireMessages(entries), { role: 'user', content: question }],
+      tools: last?.tools ?? [],
+      toolChoice: 'none',
+      maxTokens: 4096,
+      thinkLevel: options.thinkLevel ?? 'low',
+      signal: options.signal,
+      onToken: options.onToken,
+    });
+    addUsage(this.usage, response.usage);
+    return splitThinkBlock(response.content).response.trim();
+  }
+
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
     const configuredMaxIterations = options.maxIterations ?? 25;
     const maxIterations = configuredMaxIterations > 0 ? configuredMaxIterations : Infinity;

@@ -2240,6 +2240,20 @@ export function App({
             }
           }
         }
+      } else if (commandName(input) === '/btw') {
+        // C8: a side question - answered from the conversation, kept out of it.
+        pushBlock([userLine(input)]);
+        const question = input.trim().slice('/btw'.length).trim();
+        if (!question) {
+          pushBlock([infoLine('Usage: /btw <question> - ask about the conversation without adding to it.')]);
+        } else {
+          try {
+            const answer = await loop.askAside(question, { contextWindow });
+            pushBlock([infoLine(`(aside, not part of the conversation)\n${answer || '(no answer)'}`)]);
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: `The side question failed: ${formatError(err)}` }]);
+          }
+        }
       } else if (commandName(input) === '/queue') {
         // C6: what waits to run after the current turn - pick one to edit (back into the input box)
         // or drop.

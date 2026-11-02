@@ -299,6 +299,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose the shell run_shell uses: auto, cmd, pwsh (PowerShell 7), powershell (5.1), bash or sh - saved to config.',
   },
   {
+    name: '/btw',
+    description: 'Ask a side question about the conversation; the question and answer stay out of it. Usage: /btw <question>',
+  },
+  {
     name: '/queue',
     select: 'run',
     description: 'Messages waiting to run after the current turn (Ctrl+Q adds one): edit one back into the input box, or drop it.',
