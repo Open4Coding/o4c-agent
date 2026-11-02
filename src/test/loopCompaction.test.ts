@@ -210,6 +210,7 @@ test('a single long turn (many tool calls, no new user message in between) compa
   };
   const tool = makeFakeTool('big_tool', padded('tool output'));
   const loop = new AgentLoop(provider, [tool], 'system');
+  loop.loopGuardEnabled = false; // a long synthetic turn of identical calls - what B16 would stop
   loop.loadEntries(buildOldTurns(6)); // 1200 estimated tokens - a real turn boundary to cut into, but under threshold on its own
 
   let toolCallsIssuedAtCompaction = -1;
@@ -316,6 +317,7 @@ test('MicroCompact rescues a single turn with no earlier turn boundary at all - 
   };
   const tool = makeFakeTool('big_tool', padded('tool output'));
   const loop = new AgentLoop(provider, [tool], 'system');
+  loop.loopGuardEnabled = false; // a long synthetic turn of identical calls - what B16 would stop
   // No loadEntries() - this turn's own opening user message is the only thing in history when it
   // starts.
 

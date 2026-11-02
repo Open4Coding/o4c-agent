@@ -740,6 +740,7 @@ program
     });
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
     loop.textToolCallRecovery = resolvedConfig.textToolCallRecovery !== false;
+    loop.loopGuardEnabled = resolvedConfig.loopGuard !== false;
     setSyntaxCheckMode(resolvedConfig.syntaxCheck);
     // This process's session id, decided now rather than at the first save - every session switch
     // (/clear, /resume, the per-turn reload) is a fresh process, so one process is one session.

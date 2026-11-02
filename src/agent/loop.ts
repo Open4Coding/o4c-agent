@@ -2,6 +2,7 @@ import type { CompletionRequest, CompletionResponse, LLMProvider, Message, ToolD
 import { recoverTextToolCalls } from './textToolCalls.js';
 import { checkArgs, resolveTool, unknownToolMessage } from './toolArgs.js';
 import { supersededReadIds } from './supersededReads.js';
+import { LoopGuard } from './loopGuard.js';
 import { describeCacheBreak, diagnoseCacheBreak, type CacheBreak } from './cacheBreak.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
@@ -291,6 +292,8 @@ export class AgentLoop {
   private wireDefs: ToolDefinition[] | undefined;
   /** Run tool calls the model wrote as text (B2); config `textToolCallRecovery`, default on. */
   textToolCallRecovery = true;
+  /** Notice and stop circles within a turn (B16); config `loopGuard`, default on. */
+  loopGuardEnabled = true;
   /** Whether history holds a snapshot of `wireDefs` (loaded or written) - see `syncWireTools`. */
   private wireDefsRecorded = false;
   /** The real, API-reported prompt-token count from the most recent request, and what
@@ -1432,6 +1435,8 @@ export class AgentLoop {
      */
     let continuationEntries: ContextEntry[] = [];
     let emptyTurnRetries = 0;
+    // Circles within this turn: the same call and result over and over, A-B-A-B (plan 0006 B16).
+    const loopGuard = new LoopGuard();
     let hadToolWork = false;
     /** Consecutive max_tokens cutoffs continued so far this turn, and the text of the last one. */
     let cutoffContinuations = 0;
@@ -1804,6 +1809,8 @@ export class AgentLoop {
           output = unknownToolMessage(call.name, this.tools.map((t) => t.name));
         } else if (checked.errors.length > 0) {
           output = `Error: this ${tool.name} call was not run: ${checked.errors.join('; ')}.`;
+        } else if (this.loopGuardEnabled && (output = loopGuard.refuse(tool.name, input) ?? '')) {
+          loopGuard.stopped = true;
         } else if (options.toolPolicy && (verdict = await options.toolPolicy(tool, input)) !== 'allow') {
           // Worded to match what actually happened - see `toolPolicy`'s own comment on why the
           // difference matters to the model rather than only to the reader.
@@ -1820,8 +1827,15 @@ export class AgentLoop {
           output = await this.core.runTool({ tool, input }, () => tool.execute(input));
         }
         output = await this.boundToolOutput(output, call.name, options);
+        // After bounding, so a truncation can never cut the note off.
+        if (tool && this.loopGuardEnabled && !loopGuard.stopped) output += loopGuard.record(tool.name, input, output) ?? '';
         onEvent({ type: 'tool_result', toolName: call.name, toolOutput: output });
         this.appendEntry(aiToolCallResponseEntry(call.id, output, tool?.mutating), onEntry);
+      }
+
+      if (loopGuard.stopped) {
+        onEvent({ type: 'warning', text: 'Stopped this turn: the model kept making the same call and getting the same result. Tell it what to try differently, or rephrase the task.' });
+        return responseText;
       }
 
       // Real bug found via direct user report: the only other maybeCompact() call (above, before

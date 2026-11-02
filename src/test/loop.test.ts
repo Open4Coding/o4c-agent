@@ -151,6 +151,8 @@ test('maxIterations of 0 or negative removes the cap entirely, not just raises i
       { content: 'done', toolCalls: [], stopReason: 'end_turn' as const },
     ]);
     const loop = new AgentLoop(provider, [tool], 'system');
+    // 30 identical calls with identical results: exactly what the loop guard (B16) stops.
+    loop.loopGuardEnabled = false;
 
     const result = await loop.run('do a lot of work', { maxIterations });
 
