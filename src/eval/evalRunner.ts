@@ -293,8 +293,9 @@ export async function runEvalCli(argv: string[], out: (line: string) => void = (
   }
 
   if (sub === 'run') {
-    const packageRoot = resolve(evalDir, '..');
-    const commit = gitCommit(packageRoot);
+    // The build being measured - which may be another checkout's dist-eval/, not this eval dir's.
+    const cli = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
+    const commit = gitCommit(dirname(cli));
     const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
     const name = flag('name') ?? `${stamp}-${commit}`;
     const configArg = flag('config');
@@ -306,7 +307,6 @@ export async function runEvalCli(argv: string[], out: (line: string) => void = (
     const file = resultsFile(evalDir, name);
     mkdirSync(dirname(file), { recursive: true });
     const done = new Set(readResults(file).map((r) => r.task));
-    const cli = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
     const agent = [process.execPath, cli, ...passThrough];
     out(`eval run ${name}: ${tasks.length} tasks${done.size ? `, ${done.size} already recorded` : ''} -> ${file}`);
     for (const task of tasks) {
