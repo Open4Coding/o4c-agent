@@ -9,6 +9,7 @@ import {
   type ThinkCaps,
 } from '../agent/thinkLevel.js';
 import { jsonError, repairJson } from './jsonRepair.js';
+import { RepetitionDetector } from './repetition.js';
 import { samplingFor } from '../agent/sampling.js';
 import type {
   CompletionRequest,
@@ -435,6 +436,9 @@ export class LocalProvider implements LLMProvider {
   /** The server's slot count (`/props` `total_slots`, from the startup probe); 1 = no pinning. */
   private slots = 1;
 
+  /** Stop a stream that is repeating itself (B17); config `repetitionAbort`, default on. */
+  repetitionGuard = true;
+
   /** Set from the startup probe, and again when a server that was down comes back (A19). */
   setSlots(count: number | undefined): void {
     this.slots = count && count > 0 ? count : 1;
@@ -651,18 +655,20 @@ export class LocalProvider implements LLMProvider {
         (id) => {
           this.liveCompletionId = id;
         },
+        this.repetitionGuard ? new RepetitionDetector() : undefined,
       );
     } finally {
       if (busyTimer) clearTimeout(busyTimer);
       this.liveCompletionId = undefined;
     }
-    const { content, toolCalls, truncatedToolCall, finishReason, usage } = parsed;
+    const { content, toolCalls, truncatedToolCall, finishReason, usage, repetition } = parsed;
     return {
       content,
       toolCalls,
       stopReason: mapStopReason(finishReason),
       usage,
       ...(truncatedToolCall ? { truncatedToolCall } : {}),
+      ...(repetition ? { repetition } : {}),
     };
   }
 }
@@ -773,6 +779,8 @@ interface ParsedStream {
   truncatedToolCall?: { name: string; argumentChars: number };
   finishReason: string;
   usage: Usage | undefined;
+  /** The repeated block, when the stream was stopped for repeating itself (B17). */
+  repetition?: string;
 }
 
 /**
@@ -788,7 +796,9 @@ export async function parseSseStream(
   onToolProgress?: (toolName: string, argumentChars: number) => void,
   onPrefillProgress?: (progress: PrefillProgress) => void,
   onCompletionId?: (id: string) => void,
+  repetition?: RepetitionDetector,
 ): Promise<ParsedStream> {
+  let repeated: string | undefined;
   let idSeen = false;
   let content = '';
   let reasoning = '';
@@ -848,10 +858,12 @@ export async function parseSseStream(
         if (choice.delta?.reasoning_content) {
           reasoning += choice.delta.reasoning_content;
           onToken?.(choice.delta.reasoning_content, 'think');
+          repeated ??= repetition?.push(choice.delta.reasoning_content);
         }
         if (choice.delta?.content) {
           content += choice.delta.content;
           onToken?.(choice.delta.content, 'text');
+          repeated ??= repetition?.push(choice.delta.content);
         }
         for (const call of choice.delta?.tool_calls ?? []) {
           const existing = toolCallsByIndex.get(call.index) ?? { id: '', name: '', args: '' };
@@ -862,6 +874,14 @@ export async function parseSseStream(
           if (call.function?.arguments && existing.name) onToolProgress?.(existing.name, existing.args.length);
         }
         if (choice.finish_reason) finishReason = choice.finish_reason;
+        // One read can carry many lines; nothing after the loop was seen is kept.
+        if (repeated) break;
+      }
+      // Chanting (B17): stop reading - cancelling the body closes the connection, and
+      // llama-server stops generating for a client that has gone.
+      if (repeated) {
+        await reader.cancel().catch(() => {});
+        break;
       }
     }
   } finally {
@@ -910,5 +930,6 @@ export async function parseSseStream(
     ...(truncatedToolCall && finishReason === 'length' ? { truncatedToolCall } : {}),
     finishReason,
     usage,
+    ...(repeated ? { repetition: repeated } : {}),
   };
 }

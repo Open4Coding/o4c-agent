@@ -1435,6 +1435,8 @@ export class AgentLoop {
      */
     let continuationEntries: ContextEntry[] = [];
     let emptyTurnRetries = 0;
+    // Streams stopped for repeating themselves this turn (B17): two get a nudge, then the turn ends.
+    let repetitionStops = 0;
     // Circles within this turn: the same call and result over and over, A-B-A-B (plan 0006 B16).
     const loopGuard = new LoopGuard();
     let hadToolWork = false;
@@ -1671,6 +1673,24 @@ export class AgentLoop {
       const responseEntry = aiResponseEntry(responseText);
       this.appendEntry(responseEntry, onEntry);
       roundEntries.push(responseEntry);
+
+      if (response.repetition && !isToolUse) {
+        repetitionStops += 1;
+        const firstLine = response.repetition.split('\n')[0].slice(0, 80);
+        if (repetitionStops > 2) {
+          onEvent({ type: 'warning', text: `Stopped: the model kept repeating itself ("${firstLine}"). Try rephrasing the task or a smaller step.` });
+          return responseText;
+        }
+        onEvent({ type: 'warning', text: `The model started repeating itself ("${firstLine}") - stopped it and asked it to move on.` });
+        this.appendEntry(
+          {
+            ...userInputEntry(`You were repeating the same text over and over ("${firstLine}"). Do not repeat it. Take the next concrete step - a tool call, or your final answer.`),
+            tags: [CONTINUATION_TAG],
+          },
+          onEntry,
+        );
+        continue;
+      }
 
       // Real bug found via direct reproduction (2026-10-02, a --parallel 4 stress test): a
       // max_tokens cutoff with no tool call used to return here immediately, ending the whole

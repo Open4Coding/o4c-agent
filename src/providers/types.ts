@@ -192,6 +192,11 @@ export interface CompletionResponse {
    * `stopReason: 'max_tokens'`.
    */
   truncatedToolCall?: { name: string; argumentChars: number };
+  /**
+   * Set when the provider stopped the stream because the model was repeating itself (plan 0006
+   * B17): the block it kept repeating. The content is what arrived up to that point.
+   */
+  repetition?: string;
 }
 
 export interface LLMProvider {
