@@ -380,10 +380,35 @@ is not a refutation of them. It is a narrower question:
   and the variance finding in the literature is specifically that the range is wide — which these
   two changes have now demonstrated from the inside, each one carrying a repository the other
   barely touched.
-- **Nothing about ranking.** This grades resolution. Whether the ranker surfaces the *right* files
-  inside a token budget is a different measurement that has not been made.
+- **Ranking is graded separately** - see "Ranking against git history" below. This section grades
+  resolution only.
 
 What it does establish is narrow and worth having: on TypeScript, at the call sites the graph
 claims to cover, **it is almost never wrong when it answers** (precision 99.4–99.7%), it answers
 most of the time (recall 91.8–94.5%), and what it now misses it misses by **declining to choose**
 between a method name's many owners rather than by failing to see the call.
+
+## Ranking against git history (first measurement, 2026-11-02)
+
+`scripts/rank-grade.mjs` treats every commit as a labelled example: index the commit's **parent**
+tree, use the commit **message** as the prompt, and count the files the commit **modified** as the
+answer (added files are unrankable and excluded). `cold` ranks from the message's identifiers only;
+`warm` also passes one changed file as the focus, and is scored on the remaining changed files.
+o4c-agent, 60 most recent eligible commits (HEAD `aad03de`), 8,000-token budget:
+
+| | r@10 | r@25 | r@50 | MRR | @8K |
+|---|---|---|---|---|---|
+| cold | 8.0% | 18.3% | 26.2% | 0.110 | 85.6% |
+| warm | 11.6% | 32.7% | 49.2% | 0.160 | 87.5% |
+
+- The 8K map held 158 of 216 indexed files on average (73% of the repository), so the high `@8K`
+  figure mostly says the repository is small, not that the ranking is good.
+- Median rank of the first wanted file: 26. Complete misses (nothing in the top 50): 23 of 60.
+  Most misses are one-file commits whose message names a behaviour, not an identifier
+  ("Bare o4c is local-first", "Log Node's load time").
+- **Reading:** the ranked map is a weak pointer from a task description to the files it needs.
+  Decision record for plan 0006: invest in targeted retrieval the model drives (read-by-symbol,
+  grep grouped by function, fuzzy symbol search - items B12-B14) rather than in a bigger ranked map;
+  re-run this grader after B11-B14 and after any ranking change.
+
+Re-run: `npm run build && node scripts/rank-grade.mjs [repoRoot] [--commits=N]`.
