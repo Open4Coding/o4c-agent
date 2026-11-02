@@ -1,4 +1,6 @@
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+
+import { redactSecrets } from './redact.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -121,7 +123,7 @@ export class SessionStore {
     await mkdir(this.dir, { recursive: true });
     await writeFile(
       this.sessionPath(sessionId),
-      JSON.stringify({ ...meta, entries: stampedEntries, inputHistory }, null, 2),
+      redactSecrets(JSON.stringify({ ...meta, entries: stampedEntries, inputHistory }, null, 2)),
       'utf-8',
     );
 
@@ -178,7 +180,7 @@ export class SessionStore {
     if (!data) {
       throw new Error(`No saved session with id "${id}" to rename.`);
     }
-    await writeFile(this.sessionPath(id), JSON.stringify({ ...data, title }, null, 2), 'utf-8');
+    await writeFile(this.sessionPath(id), redactSecrets(JSON.stringify({ ...data, title }, null, 2)), 'utf-8');
 
     const manifest = await this.readManifest();
     const updated = manifest.map((m) => (m.id === id ? { ...m, title } : m));

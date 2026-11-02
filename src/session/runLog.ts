@@ -2,6 +2,8 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
+import { redactSecrets } from './redact.js';
+
 export function defaultLogsDir(): string {
   return join(homedir(), '.o4c', 'logs');
 }
@@ -73,7 +75,7 @@ export class RunLogger {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    this.queue.push(line);
+    this.queue.push(redactSecrets(line));
     if (!this.timer) {
       this.timer = setTimeout(() => this.flush(), this.drainMs);
       this.timer.unref();

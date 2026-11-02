@@ -19,6 +19,7 @@ import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
 import { RunLogger } from './session/runLog.js';
+import { registerSecret } from './session/redact.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -502,6 +503,10 @@ program
     // this, never the shared config.json.
     const localApiKey =
       typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined;
+    // Every key o4c holds is redacted wherever o4c writes text to disk (session/redact.ts).
+    registerSecret(localApiKey);
+    registerSecret(process.env.O4C_LOCAL_API_KEY);
+    registerSecret(process.env.ANTHROPIC_API_KEY);
     // Secure/air-gapped mode (PATH_FORWARD §1a.2/§1a.3, checklist item 21f). Deliberately NOT read
     // from `resolvedConfig`, which is the ordinary global -> local -> personal override cascade:
     // this key is a ratchet, so each scope is read on its own and any `true` wins. A project's

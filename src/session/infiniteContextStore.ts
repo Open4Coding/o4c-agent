@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ContextEntry } from '../agent/contextEntry.js';
 import { PLANS_SCHEMA, PlanStore } from './planStore.js';
+import { redactSecrets } from './redact.js';
 
 /** `history.db` itself - the WAL sidecars (`-wal`/`-shm`) appear alongside it during normal use
  * and fold back into this file on checkpoint. See docs/o4c-agent-design.md §4.1/§4.2.
@@ -387,7 +388,10 @@ export class InfiniteContextStore {
    * (the `sessions` foreign key can't be satisfied) - a future `onEntry` subscriber must only call
    * this once a session id has actually been stamped in, not at raw append time.
    */
-  insertEntry(entry: ContextEntry, taskId?: number): void {
+  insertEntry(rawEntry: ContextEntry, taskId?: number): void {
+    // Held credentials never reach the database (design §3.4); `redacted` says it happened.
+    const content = redactSecrets(rawEntry.content);
+    const entry = content === rawEntry.content ? rawEntry : { ...rawEntry, content, redacted: true };
     if (!entry.session_id) {
       throw new Error('InfiniteContextStore.insertEntry: entry.session_id must be set before persisting');
     }
@@ -574,7 +578,7 @@ export class InfiniteContextStore {
         `INSERT INTO tasks (session_id, parent_task_id, sub_no, title, request, started_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.session_id, parent, subNo, deriveTaskTitle(input.request), input.request, input.started_at ?? Date.now());
+      .run(input.session_id, parent, subNo, deriveTaskTitle(redactSecrets(input.request)), redactSecrets(input.request), input.started_at ?? Date.now());
     return this.getTask(Number(result.lastInsertRowid))!;
   }
 
@@ -614,7 +618,7 @@ export class InfiniteContextStore {
   }
 
   setTaskAnswer(id: number, answer: string): void {
-    this.db.prepare(`UPDATE tasks SET answer = ? WHERE id = ?`).run(answer, id);
+    this.db.prepare(`UPDATE tasks SET answer = ? WHERE id = ?`).run(redactSecrets(answer), id);
   }
 
   /** Appends one note line, keeping the newest `maxChars` - see `TaskRow.notes`. */
@@ -630,7 +634,7 @@ export class InfiniteContextStore {
       const cut = notes.indexOf('\n', notes.length - maxChars);
       notes = cut === -1 ? clipped : notes.slice(cut + 1);
     }
-    this.db.prepare(`UPDATE tasks SET notes = ? WHERE id = ?`).run(notes, id);
+    this.db.prepare(`UPDATE tasks SET notes = ? WHERE id = ?`).run(redactSecrets(notes), id);
   }
 
   /** Appends one error line, keeping the column bounded - it is a key part, read by every search
@@ -640,7 +644,7 @@ export class InfiniteContextStore {
     if (!task || task.errors.length >= maxChars) return;
     const line = error.replace(/\s+/g, ' ').trim().slice(0, 300);
     const errors = task.errors ? `${task.errors}\n${line}` : line;
-    this.db.prepare(`UPDATE tasks SET errors = ? WHERE id = ?`).run(errors.slice(0, maxChars), id);
+    this.db.prepare(`UPDATE tasks SET errors = ? WHERE id = ?`).run(redactSecrets(errors.slice(0, maxChars)), id);
   }
 
   /** Records a path the task wrote, once. */
