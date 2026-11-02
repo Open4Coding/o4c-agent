@@ -28,7 +28,8 @@ export class FakeProvider implements LLMProvider {
     // recording them was never the point; `receivedRequests` is for asserting on what was *asked*
     // (messages, tools, systemPrompt), not on these two call-mechanics-only fields.
     // `onToolProgress` too, for the same reason: it is a function (NextUp item 43).
-    const { onToken, onToolProgress, signal, ...cloneable } = request;
+    // `onPrefillProgress`/`onServerBusy` likewise (plan 0006 A13).
+    const { onToken, onToolProgress, onPrefillProgress, onServerBusy, signal, ...cloneable } = request;
     this.receivedRequests.push(structuredClone(cloneable) as CompletionRequest);
     const next = this.queue.shift();
     if (!next) {

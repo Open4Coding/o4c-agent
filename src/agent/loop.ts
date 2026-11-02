@@ -61,7 +61,7 @@ import {
 } from '../tools/toolOutput.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'info' | 'tool_progress' | 'cache_break';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'info' | 'tool_progress' | 'cache_break' | 'prefill_progress' | 'server_busy';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -80,6 +80,8 @@ export interface AgentEvent {
   /** `'tool_progress'` only - how many characters of the tool call's arguments (`toolName`) have
    * streamed so far. A live-status signal like `'delta'`: not logged, not a transcript line. */
   chars?: number;
+  /** `'prefill_progress'` only - live status like 'tool_progress', not logged. */
+  prefill?: { total: number; cached: number; processed: number; timeMs: number };
 }
 
 export interface RunOptions {
@@ -1503,6 +1505,8 @@ export class AgentLoop {
           thinkFilter.feed(delta, kind);
         },
         onToolProgress: (toolName, chars) => onEvent({ type: 'tool_progress', toolName, chars }),
+        onPrefillProgress: (prefill) => onEvent({ type: 'prefill_progress', prefill }),
+        onServerBusy: () => onEvent({ type: 'server_busy' }),
       };
       try {
         response = await this.provider.complete(request);

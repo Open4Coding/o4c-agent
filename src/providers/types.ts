@@ -46,6 +46,13 @@ export interface ToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+export interface PrefillProgress {
+  total: number;
+  cached: number;
+  processed: number;
+  timeMs: number;
+}
+
 export interface CompletionRequest {
   systemPrompt?: string;
   messages: Message[];
@@ -95,6 +102,14 @@ export interface CompletionRequest {
    * was reported as thinking not being shown. Optional, like `onToken`.
    */
   onToolProgress?: (toolName: string, argumentChars: number) => void;
+  /**
+   * Prefill progress while the server reads the prompt (llama-server `return_progress`, plan 0006
+   * A13): `cached` tokens reused, `processed` read so far, of `total`. Live status only.
+   */
+  onPrefillProgress?: (progress: PrefillProgress) => void;
+  /** Called once if the server has not started on this request after ~2 s because its slot is busy
+   * with another client's request - the wait is otherwise silent. Live status only. */
+  onServerBusy?: () => void;
   /**
    * How much reasoning this request is allowed, from `/think` (see `agent/thinkLevel.ts`).
    *

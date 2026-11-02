@@ -98,3 +98,16 @@ test('footer share and /context lines', () => {
     '  MTP drafts:    70% accepted (7/10)',
   ]);
 });
+
+test('prefill progress chunks reach the callback and are not mistaken for content (plan 0006 A13)', async () => {
+  const progress = [
+    'data: {"choices":[],"prompt_progress":{"total":16394,"cache":0,"processed":2048,"time_ms":1259}}',
+    'data: {"choices":[],"prompt_progress":{"total":16394,"cache":0,"processed":16390,"time_ms":10972}}',
+    PHOEBE_TAIL,
+  ].join('\n\n');
+  const seen: Array<{ processed: number }> = [];
+  const { content, usage } = await parseSseStream(stream(progress), undefined, undefined, (p) => seen.push(p));
+  assert.deepEqual(seen.map((p) => p.processed), [2048, 16390]);
+  assert.equal(content, '');
+  assert.equal(usage?.inputTokens, 18);
+});

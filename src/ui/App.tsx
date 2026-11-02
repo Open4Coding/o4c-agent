@@ -760,6 +760,9 @@ export function App({
   // The tool call whose arguments are streaming right now, for the spinner's label (NextUp item
   // 43). Null whenever the model is not in the middle of writing one.
   const [toolProgress, setToolProgress] = useState<{ name: string; chars: number } | null>(null);
+  // Plan 0006 A13: what the server is doing before the first token - reading the prompt, or queued
+  // behind another client. Live status only, cleared as soon as anything streams.
+  const [serverStatusLine, setServerStatusLine] = useState<string | null>(null);
   const toolProgressShownAtRef = useRef(0);
   // Narrower than isThinking: true while waiting on the model itself (including the silent gap
   // before its first byte), false while a tool is actually executing or the final answer is
@@ -2195,6 +2198,7 @@ export function App({
         dispatchTextWindow({ type: 'clearLive' });
         setIsThinking(true);
         setToolProgress(null);
+        setServerStatusLine(null);
         // True by default at the start of every round waiting on the model - including a
         // non-streaming provider's silent gap before its first byte, which is exactly the
         // long-running-reasoning case Esc should ask about. Flipped false the instant a 'text'
@@ -2251,7 +2255,20 @@ export function App({
               // means "a new, distinct line", the opposite of what a delta continuation needs.
               // Live status only, like 'delta': not logged, never a transcript line. Throttled,
               // because it arrives once per streamed fragment of the arguments.
+              if (event.type === 'prefill_progress' && event.prefill) {
+                const { total, cached, processed } = event.prefill;
+                const done = Math.min(total, cached + processed);
+                setServerStatusLine(
+                  `Reading context ${total > 0 ? Math.round((done / total) * 100) : 0}% (${formatTokenCount(done)} of ${formatTokenCount(total)}, ${formatTokenCount(cached)} reused)`,
+                );
+                return;
+              }
+              if (event.type === 'server_busy') {
+                setServerStatusLine('Server busy with another request - waiting for it');
+                return;
+              }
               if (event.type === 'tool_progress') {
+                setServerStatusLine(null);
                 const now = Date.now();
                 if (event.toolName && now - toolProgressShownAtRef.current >= TOOL_PROGRESS_MS) {
                   toolProgressShownAtRef.current = now;
@@ -2261,6 +2278,7 @@ export function App({
               }
               if (event.type === 'delta') {
                 setToolProgress(null);
+                setServerStatusLine(null);
                 if (event.text) {
                   // event.kind reflects what the provider actually said this chunk was (see
                   // AgentEvent's own doc comment) - defaulted to 'text' only for a provider/fake
@@ -3059,7 +3077,11 @@ export function App({
           41). The "Stop now?" box is different - the model keeps working behind it. */}
       {isThinking && !confirmDialog && (
         <Spinner
-          label={toolProgress ? `Writing the ${toolProgress.name} call... ${toolProgress.chars.toLocaleString('en-US')} characters` : undefined}
+          label={
+            toolProgress
+              ? `Writing the ${toolProgress.name} call... ${toolProgress.chars.toLocaleString('en-US')} characters`
+              : (serverStatusLine ?? undefined)
+          }
         />
       )}
       <InputBox

@@ -16,6 +16,7 @@ import type {
   StopReason,
   ToolCall,
   Usage,
+  PrefillProgress,
 } from './types.js';
 import { ServerUnavailableError } from './types.js';
 
@@ -353,6 +354,22 @@ export class LocalProvider implements LLMProvider {
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
   }
 
+  /** Whether any of the server's slots is processing a request right now (`GET /slots`). False
+   * whenever the answer is unknown - the caller only uses it to word a status line. */
+  private async slotBusy(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.baseUrl}/slots`, {
+        headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {},
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!response.ok) return false;
+      const slots = (await response.json()) as Array<{ is_processing?: boolean }>;
+      return Array.isArray(slots) && slots.length > 0 && slots.every((s) => s.is_processing === true);
+    } catch {
+      return false;
+    }
+  }
+
   /** Lets the app raise or lower the reply limit once it learns the real context size - e.g. when the server
    * was down at launch and its size was unknown until it came back. */
   setMaxTokens(maxTokens: number): void {
@@ -414,6 +431,19 @@ export class LocalProvider implements LLMProvider {
         : connectController.signal
       : request.signal;
 
+    // Started before the request is sent: a request queued behind another client gets no response
+    // headers until its turn, so a timer started after them would never fire in time.
+    // Nothing back after 1 s (an unqueued request's first progress chunk arrives in ~20 ms): ask the server whether another client holds its slot, so a queued
+    // request can say so instead of spinning silently (A13). Best-effort, never blocks the request.
+    let firstChunk = false;
+    const busyTimer = request.onServerBusy
+      ? setTimeout(() => {
+          if (firstChunk) return;
+          void this.slotBusy().then((busy) => {
+            if (busy && !firstChunk) request.onServerBusy?.();
+          });
+        }, 1000)
+      : undefined;
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
@@ -438,6 +468,7 @@ export class LocalProvider implements LLMProvider {
           ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
           ...(request.responseSchema ? { response_format: { type: 'json_schema', json_schema: { schema: request.responseSchema } } } : {}),
           ...(request.grammar ? { grammar: request.grammar } : {}),
+          ...(request.onPrefillProgress ? { return_progress: true } : {}),
           stream: true,
           // Without this, a streaming response omits usage entirely (the standard OpenAI-API
           // convention llama-server also implements - confirmed directly against its source,
@@ -452,6 +483,7 @@ export class LocalProvider implements LLMProvider {
       // The server could not be reached at all: say so with a type the app acts on (it waits for the server and
       // puts the message back), rather than a bare "fetch failed". A deliberate cancel or the connect timeout
       // (the server answered the connection but not the request) keep their own handling.
+      if (busyTimer) clearTimeout(busyTimer);
       if (request.signal?.aborted || !isUnreachable(err)) throw err;
       throw new ServerUnavailableError(`The local server at ${this.baseUrl} is not reachable.`, false);
     } finally {
@@ -502,7 +534,22 @@ export class LocalProvider implements LLMProvider {
     const prefill = lastMessage?.role === 'assistant' ? lastMessage.content : '';
     const streamOnToken =
       prefill && request.onToken ? createPrefillEchoFilter(prefill, request.onToken) : request.onToken;
-    const { content, toolCalls, truncatedToolCall, finishReason, usage } = await parseSseStream(idleBody, streamOnToken, request.onToolProgress);
+    const onProgress = (p: PrefillProgress) => {
+      firstChunk = true;
+      request.onPrefillProgress?.(p);
+    };
+    let parsed;
+    try {
+      parsed = await parseSseStream(
+        idleBody,
+        streamOnToken ? (d, k) => ((firstChunk = true), streamOnToken(d, k)) : undefined,
+        request.onToolProgress,
+        onProgress,
+      );
+    } finally {
+      if (busyTimer) clearTimeout(busyTimer);
+    }
+    const { content, toolCalls, truncatedToolCall, finishReason, usage } = parsed;
     return {
       content,
       toolCalls,
@@ -585,6 +632,8 @@ interface StreamedOpenAIChunk {
    * OpenAI API - an llama.cpp extension). `predicted_per_second` is decode throughput with prefill
    * excluded, which is what the status bar shows; `prompt_per_second` is prefill and is deliberately
    * ignored, being a one-off that says nothing about how fast the answer is arriving. */
+  /** llama-server `return_progress`: sent during prefill. */
+  prompt_progress?: { total: number; cache?: number; processed?: number; time_ms?: number };
   timings?: {
     predicted_per_second?: number;
     cache_n?: number;
@@ -629,6 +678,7 @@ export async function parseSseStream(
   body: ReadableStream<Uint8Array>,
   onToken?: (delta: string, kind: 'think' | 'text') => void,
   onToolProgress?: (toolName: string, argumentChars: number) => void,
+  onPrefillProgress?: (progress: PrefillProgress) => void,
 ): Promise<ParsedStream> {
   let content = '';
   let reasoning = '';
@@ -660,6 +710,10 @@ export async function parseSseStream(
           continue; // a malformed chunk shouldn't take down an otherwise-good stream
         }
 
+        const progress = chunk.prompt_progress;
+        if (progress && typeof progress.total === 'number') {
+          onPrefillProgress?.({ total: progress.total, cached: progress.cache ?? 0, processed: progress.processed ?? 0, timeMs: progress.time_ms ?? 0 });
+        }
         if (chunk.usage) {
           usage = { ...usage, inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens };
         }
