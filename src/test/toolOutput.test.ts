@@ -66,7 +66,8 @@ test('an oversized result keeps both the head and the tail, and reports the real
   assert.ok(result.text.length <= 40_000, `got ${result.text.length}`);
   assert.ok(result.text.startsWith('FIRST-LINE-MARKER'), 'head is kept');
   assert.ok(result.text.endsWith('LAST-LINE-MARKER'), 'tail is kept');
-  assert.match(result.text, /\[o4c truncated this output: [\d,]+ chars/);
+  // "condensed" since B15: 200,000 same-shaped lines collapse rather than being cut.
+  assert.match(result.text, /\[o4c (truncated|condensed) this output: [\d,]+ chars/);
   assert.match(result.text, /~[\d,]+ tokens/);
   assert.ok(result.text.includes(`Full output: ${spillPath}.`), 'names the spill file');
   assert.match(result.text, /read_file offset\/limit/);

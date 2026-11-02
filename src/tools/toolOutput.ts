@@ -1,3 +1,4 @@
+import { distillToolOutput } from './distill.js';
 import { estimateTextTokens } from '../agent/contextEntry.js';
 
 /**
@@ -238,7 +239,8 @@ function truncateWithMarker(
  * (when it was spilled).
  */
 export function truncateToolOutput(text: string, maxChars: number, spillPath?: string): TruncatedToolOutput {
-  return truncateWithMarker(text, maxChars, toolOutputMarker, spillPath);
+  // Shape-aware first (B15): collapse repetition, keep the errors; head+tail when that cannot help.
+  return distillToolOutput(text, maxChars, spillPath) ?? truncateWithMarker(text, maxChars, toolOutputMarker, spillPath);
 }
 
 /**
