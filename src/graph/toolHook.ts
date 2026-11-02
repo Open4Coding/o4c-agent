@@ -35,13 +35,14 @@ import { join } from 'node:path';
 
 import type { CoreComponent, ToolCallContext } from '../agent/coreSeam.js';
 import { estimateTextTokens } from '../agent/contextEntry.js';
-import { resolveName } from './resolve.js';
+import { isCallable, resolveName } from './resolve.js';
 import { fitToBudget, rankDefinitions } from './ranker.js';
-import type { GraphStore } from './graphStore.js';
+import type { DefinitionRow, GraphStore } from './graphStore.js';
 import { indexSource, repoRelative, type IndexRunResult } from './indexer.js';
 import { runIndexPassInProcess, type RunIndexPass } from './indexPass.js';
 import {
   nameProjection,
+  PROJECTION_PREFIX,
   renderFileProjection,
   renderNameProjection,
   type ProjectionFreshness,
@@ -231,11 +232,9 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
           }
           return await this.annotateRead(call.input, output);
         case WRITE_TOOL:
-          await this.absorbWrite(call.input, output);
-          return output;
+          return output + (await this.absorbWrite(call.input, output));
         case EDIT_TOOL:
-          await this.absorbEdit(call.input, output);
-          return output;
+          return output + (await this.absorbEdit(call.input, output));
         case SHELL_TOOL:
           // A shell command can change anything, including files this process never saw, so the
           // only honest response is to treat the whole index as behind and rebuild it. Fire and
@@ -330,11 +329,34 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   }
 
   /** Keeps the index level with a successful write, from the content the write already carried. */
-  private async absorbWrite(input: Record<string, unknown>, output: string): Promise<void> {
-    if (output.startsWith(WRITE_ERROR_PREFIX)) return;
+  private async absorbWrite(input: Record<string, unknown>, output: string): Promise<string> {
+    if (output.startsWith(WRITE_ERROR_PREFIX)) return '';
     const rel = repoRelative(this.root, String(input.path ?? ''));
-    if (!rel) return;
+    if (!rel) return '';
+    const before = this.store.definitionsIn(rel);
     await indexSource(this.store, rel, String(input.content ?? ''));
+    return this.signatureNotice(rel, before);
+  }
+
+  /**
+   * When a change altered a function's or method's signature, the call sites elsewhere that may now
+   * be wrong (plan 0006 D9) - from the index, before the model finds out from a failing build.
+   * Only for a name with one callable definition, so the call sites are attributable.
+   */
+  private signatureNotice(rel: string, before: readonly DefinitionRow[]): string {
+    const after = this.store.definitionsIn(rel);
+    const notes: string[] = [];
+    for (const now of after) {
+      if (!isCallable(now) || !now.signature) continue;
+      const was = before.find((b) => b.name === now.name && b.kind === now.kind);
+      if (!was?.signature || was.signature === now.signature) continue;
+      if (this.store.definitionsOf(now.name).filter(isCallable).length !== 1) continue;
+      const sites = this.store.referencesTo(now.name, true).filter((r) => !(r.path === rel && r.line >= now.line && r.line <= now.endLine));
+      if (sites.length === 0) continue;
+      const shown = sites.slice(0, 8).map((r) => `${r.path}:${r.line}`).join(', ');
+      notes.push(`${now.name} changed from \`${was.signature}\` to \`${now.signature}\` - ${sites.length} call site(s) may need updating: ${shown}${sites.length > 8 ? ` (+${sites.length - 8} more)` : ''}`);
+    }
+    return notes.length ? `\n${PROJECTION_PREFIX} ${notes.join('\n')}` : '';
   }
 
   /**
@@ -342,11 +364,13 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
    * the file back and index that. Without this an edited file kept its old line numbers in the
    * graph until something read it again (found 2026-11-02, research report 08's side finding).
    */
-  private async absorbEdit(input: Record<string, unknown>, output: string): Promise<void> {
-    if (output.startsWith(EDIT_ERROR_PREFIX)) return;
+  private async absorbEdit(input: Record<string, unknown>, output: string): Promise<string> {
+    if (output.startsWith(EDIT_ERROR_PREFIX)) return '';
     const rel = repoRelative(this.root, String(input.path ?? ''));
-    if (!rel) return;
+    if (!rel) return '';
+    const before = this.store.definitionsIn(rel);
     await indexSource(this.store, rel, await readFile(join(this.root, rel), 'utf-8'));
+    return this.signatureNotice(rel, before);
   }
 
   // ---------------------------------------------------------------- the one verb

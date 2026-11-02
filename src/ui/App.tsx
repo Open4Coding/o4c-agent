@@ -145,6 +145,7 @@ import { setAskUserHandler } from '../tools/askUser.js';
 import { draftO4cMd, scanProject } from '../session/projectScan.js';
 import { activeMemoryStores } from '../session/memories.js';
 import { parseLessons, recentTasks, reflectPrompt, REFLECT_SCHEMA } from '../session/reflect.js';
+import { reviewPrompt } from '../session/review.js';
 import type { CheckpointHooks } from '../session/checkpoints.js';
 import {
   COMMANDS,
@@ -2529,8 +2530,25 @@ export function App({
         // `/ultraplan` (Q6): o4c's fixed research steps run first and go into the prompt; the model
         // then thinks harder and gets a bounded follow-up of its own.
         const ultra = planCommand?.kind === 'ultraplan';
-        const sent = planCommand ? planPrompt(planCommand, ultra ? plans?.research?.(planCommand.goal) : undefined) : input;
-        turnModeRef.current = planCommand ? 'plan' : undefined;
+        // `/review [focus]` (D9): this session's checkpoint diff, reviewed read-only.
+        const reviewCommand = commandName(input) === '/review';
+        let reviewDiff: string | undefined;
+        if (reviewCommand && checkpoints) {
+          const first = checkpoints.store.list(checkpoints.sessionId).at(-1);
+          if (first) {
+            try {
+              reviewDiff = checkpoints.shadow.diffSince(first.git_commit, 40_000);
+            } catch {
+              reviewDiff = undefined;
+            }
+          }
+        }
+        const sent = planCommand
+          ? planPrompt(planCommand, ultra ? plans?.research?.(planCommand.goal) : undefined)
+          : reviewCommand
+            ? reviewPrompt(reviewDiff, input.trim().slice('/review'.length).trim())
+            : input;
+        turnModeRef.current = planCommand || reviewCommand ? 'plan' : undefined;
 
         const responseLines: Line[] = [];
         dispatchTextWindow({ type: 'clearLive' });
