@@ -115,6 +115,7 @@ import {
   cacheReportLines,
 } from './statusBar.js';
 import { AbortedError, CONTEXT_PRESSURE_RATIO, type AgentLoop, type AgentEvent } from '../agent/loop.js';
+import { describeCacheBreak } from '../agent/cacheBreak.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import type { RunLogger } from '../session/runLog.js';
 import { ConfigStore, scopeOwningEntry, type ConfigScope } from '../session/configStore.js';
@@ -1440,6 +1441,7 @@ export function App({
           `  Output tokens: ${usage.output}`,
           `  Total tokens:  ${totalTokens}`,
           ...cacheReportLines(usage, thisProcess.last),
+          ...loop.getCacheBreaks().slice(-3).map((b) => `  Last ${describeCacheBreak(b)}`),
           `  Messages in history: ${loop.getMessages().length}`,
           // Only when it is on. A window makes the model stop seeing part of the conversation,
           // so the one place that reports context has to say so - but a line saying "off" on

@@ -1,4 +1,5 @@
 import type { CompletionRequest, CompletionResponse, LLMProvider, Message, Usage } from '../providers/types.js';
+import { describeCacheBreak, diagnoseCacheBreak, type CacheBreak } from './cacheBreak.js';
 import { ServerUnavailableError } from '../providers/types.js';
 import type { Tool } from '../tools/types.js';
 import { CoreRegistry, type CoreComponent, type SeamWarning } from './coreSeam.js';
@@ -55,7 +56,7 @@ import {
 } from '../tools/toolOutput.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'info' | 'tool_progress';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'info' | 'tool_progress' | 'cache_break';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -267,6 +268,12 @@ export class AgentLoop {
     | { readonly version: number; readonly entries: readonly ContextEntry[]; readonly estimate: number }
     | undefined;
   private usage: CumulativeUsage = emptyUsage();
+  /** The last main request and its prompt size, to tell the next one's cache miss apart from
+   * normal reuse (plan 0006 A2). Per process: the first request after a per-turn reload has
+   * nothing to compare against. */
+  private lastMainRequest: CompletionRequest | undefined;
+  private lastMainPromptTokens: number | undefined;
+  private readonly cacheBreaks: CacheBreak[] = [];
   /** The real, API-reported prompt-token count from the most recent request, and what
    * `visibleTokenEstimate` was at that exact moment - together let `hybridPromptTokenEstimate()`
    * report `realCount + estimatedDelta` instead of re-estimating the whole history from scratch
@@ -480,6 +487,11 @@ export class AgentLoop {
   /** Token usage accumulated across every provider request this session, as reported by the provider - not estimated (except MockProvider, which has no real tokenizer to ask). */
   getUsage(): Readonly<CumulativeUsage> {
     return this.usage;
+  }
+
+  /** The most recent prompt-cache breaks this process saw, newest last (at most 20). */
+  getCacheBreaks(): readonly CacheBreak[] {
+    return this.cacheBreaks;
   }
 
   /**
@@ -1381,6 +1393,15 @@ export class AgentLoop {
       try {
         response = await this.provider.complete(request);
         onProviderCall({ request, response });
+        const cacheBreak = diagnoseCacheBreak(this.lastMainRequest, this.lastMainPromptTokens, request, response.usage);
+        if (cacheBreak) {
+          this.cacheBreaks.push(cacheBreak);
+          if (this.cacheBreaks.length > 20) this.cacheBreaks.shift();
+          // Logged, not shown: the run log is where a slow turn gets explained.
+          onEvent({ type: 'cache_break', text: describeCacheBreak(cacheBreak) });
+        }
+        this.lastMainRequest = request;
+        this.lastMainPromptTokens = response.usage?.inputTokens;
         thinkFilter.flush();
         if (response.usage) {
           const plainEstimateAtSend = baseEstimateAtSendTime + this.overheadTokenEstimate(options.modeInstruction);
