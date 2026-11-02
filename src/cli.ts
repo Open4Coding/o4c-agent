@@ -236,7 +236,7 @@ async function runRepl(
   const lifecycleDir = logsDirFor(projectRoot);
   // Past this point a hang is visible on screen, so this is the line that separates
   // "never got to the UI" from "the UI itself is stuck".
-  recordLifecycle(lifecycleDir, 'render');
+  recordLifecycle(lifecycleDir, 'render', { uptimeMs: Math.round(process.uptime() * 1000) });
   const runLogger = new RunLogger(logsDirFor(projectRoot));
   // Per-session wire-level transcript - every full request sent to the provider and every full
   // response, plus tool calls/results - distinct from runLogger's own already-derived AgentEvent
@@ -419,6 +419,10 @@ program
       worker: process.env.O4C_WORKER === '1',
       freshScreen: process.env.O4C_FRESH_SCREEN === '1',
       oneShot: prompt.length > 0,
+      // Time Node spent before reaching this line - its own boot plus loading o4c's modules. The
+      // one part of a launch nothing else measures; added 2026-11-01 for David's 20-30 s starts,
+      // which the phases below (all well under a second) do not account for.
+      loadMs: Math.round(process.uptime() * 1000),
     });
     // The last thing any path writes, restart or not, so the file always says how a process
     // ended and not merely how far it got.
