@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { RunLogger } from '../session/runLog.js';
+import { RunLogger, createProviderCallLogger } from '../session/runLog.js';
 
 /** Design §3.7: RunLogger's write queue - the fix for interleaved, corrupted log lines. */
 
@@ -56,5 +56,26 @@ test('an entry that cannot be serialised becomes a marker line; flush is idempot
     logger.flush();
     const parsed = lines(await readFile(logger.getFilePath()!, 'utf-8'));
     assert.deepEqual(parsed.map((p) => p.type), ['log_write_failed', 'good']);
+  });
+});
+
+test('provider-call logger: full first call, deltas after (with system prompt or tools only when changed), full again after a compaction', async () => {
+  await withDir(async (dir) => {
+    const logger = new RunLogger(dir, 'FULLCONTEXT', 5);
+    const log = createProviderCallLogger(logger);
+    const tool = { name: 't', description: 'd', inputSchema: {} };
+    const response = { content: 'ok', toolCalls: [], stopReason: 'end_turn' as const };
+    const m = (n: number) => Array.from({ length: n }, (_, i) => ({ role: 'user' as const, content: `m${i}` }));
+    log({ request: { systemPrompt: 's', messages: m(1), tools: [] }, response });
+    log({ request: { systemPrompt: 's', messages: m(3), tools: [] }, response });
+    log({ request: { systemPrompt: 's2', messages: m(4), tools: [tool] }, response });
+    log({ request: { systemPrompt: 's2', messages: m(2), tools: [tool] }, response });
+    logger.flush();
+    const rows = lines(await readFile(logger.getFilePath()!, 'utf-8'));
+    assert.deepEqual(rows.map((r) => r.type), ['provider_call', 'provider_call_delta', 'provider_call_delta', 'provider_call']);
+    assert.equal((rows[1]!.messages as unknown[]).length, 2);
+    assert.ok(!('systemPrompt' in rows[1]!) && !('tools' in rows[1]!));
+    assert.equal(rows[2]!.systemPrompt, 's2');
+    assert.deepEqual(rows[2]!.tools, [tool]);
   });
 });

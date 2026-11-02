@@ -18,7 +18,7 @@ import { defaultTools } from './tools/index.js';
 import { AgentLoop, type AgentEvent } from './agent/loop.js';
 import { toWireMessages, type ContextEntry } from './agent/contextEntry.js';
 import { SessionStore } from './session/sessionStore.js';
-import { RunLogger } from './session/runLog.js';
+import { RunLogger, createProviderCallLogger } from './session/runLog.js';
 import { registerSecret } from './session/redact.js';
 import { defaultProvider } from './session/providerDefault.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
@@ -998,6 +998,10 @@ program
     // differ in what carries across messages. Loaded before the run, saved after it whatever happens,
     // so a crashed or failed message still leaves the session continuable.
     const oneShotStore = opts.session ? new SessionStore(sessionsDirFor(projectRoot), sessionsToSave) : undefined;
+    // The same FULLCONTEXT wire transcript the TUI writes, so a headless run is replayable.
+    const oneShotFullLogger = new RunLogger(logsDirFor(projectRoot), 'FULLCONTEXT');
+    const oneShotProviderLog = createProviderCallLogger(oneShotFullLogger);
+    process.on('exit', () => oneShotFullLogger.flush());
     if (oneShotStore && opts.session) {
       const data = await oneShotStore.load(opts.session);
       if (data) loop.loadEntries(data.entries);
@@ -1007,6 +1011,7 @@ program
       const finalAnswer = await loop.run(prompt, {
         images: opts.image ? [opts.image] : undefined,
         onEvent: printEvent,
+        onProviderCall: oneShotProviderLog,
         maxIterations,
         // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which
         // left one-shot runs with no compaction, no pre-send size check and no curated bound: the

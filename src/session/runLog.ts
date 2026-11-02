@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 import { redactSecrets } from './redact.js';
+import type { CompletionRequest, CompletionResponse } from '../providers/types.js';
 
 export function defaultLogsDir(): string {
   return join(homedir(), '.o4c', 'logs');
@@ -102,4 +103,37 @@ export class RunLogger {
       // Nothing left to do: the disk itself is the problem.
     }
   }
+}
+
+/**
+ * The FULLCONTEXT wire transcript writer, shared by the TUI and one-shot runs (one-shot had none
+ * until 2026-11-02, so a headless run left no record of what it sent - plan 0006 A1/A3).
+ *
+ * Delta logging: the request's messages are the growing visible history, so logging the full
+ * request every round-trip is O(n^2) disk over a session (and a multi-MB stringify per call). The
+ * first call - and any call after a compaction shrank the message list - logs the full request;
+ * in between, only the messages new since the previous call, plus the system prompt or the tool
+ * list when either changed. Concatenating the deltas reconstructs every request exactly, which is
+ * what the replay benchmark (`scripts/replay-bench`) relies on.
+ */
+export function createProviderCallLogger(
+  logger: RunLogger,
+): (call: { request: CompletionRequest; response: CompletionResponse }) => void {
+  let prev: { messageCount: number; systemPrompt: string | undefined; tools: string } = { messageCount: 0, systemPrompt: undefined, tools: '' };
+  return (call) => {
+    const tools = JSON.stringify(call.request.tools ?? []);
+    const compacted = call.request.messages.length < prev.messageCount;
+    if (prev.messageCount === 0 || compacted) {
+      void logger.log({ type: 'provider_call', ...call });
+    } else {
+      void logger.log({
+        type: 'provider_call_delta',
+        ...(call.request.systemPrompt !== prev.systemPrompt ? { systemPrompt: call.request.systemPrompt } : {}),
+        ...(tools !== prev.tools ? { tools: call.request.tools } : {}),
+        messages: call.request.messages.slice(prev.messageCount),
+        response: call.response,
+      });
+    }
+    prev = { messageCount: call.request.messages.length, systemPrompt: call.request.systemPrompt, tools };
+  };
 }

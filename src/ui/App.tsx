@@ -117,7 +117,7 @@ import {
 import { AbortedError, CONTEXT_PRESSURE_RATIO, type AgentLoop, type AgentEvent } from '../agent/loop.js';
 import { describeCacheBreak } from '../agent/cacheBreak.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
-import type { RunLogger } from '../session/runLog.js';
+import { createProviderCallLogger, type RunLogger } from '../session/runLog.js';
 import { ConfigStore, scopeOwningEntry, type ConfigScope } from '../session/configStore.js';
 import type { UsageStore } from '../session/usageStore.js';
 import type { CodeGraphSession } from '../graph/startup.js';
@@ -840,12 +840,8 @@ export function App({
   const deltaFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // True while openResumePicker is mid-flight, so a second /resume can't stack another picker.
   const resumePickerOpenRef = useRef(false);
-  // Tracks the previous provider call's request size so the full-context log writes deltas
-  // instead of the whole growing message list every round-trip (see onProviderCall below).
-  const lastProviderLogRef = useRef<{ messageCount: number; systemPrompt: string | undefined }>({
-    messageCount: 0,
-    systemPrompt: undefined,
-  });
+  // The full-context log writer; it remembers the previous request so it can write deltas.
+  const providerCallLoggerRef = useRef(createProviderCallLogger(fullContextLogger));
 
   /**
    * `full` view only: the piece of the current stream that has arrived with no newline after it
@@ -2245,32 +2241,7 @@ export function App({
             // already-derived AgentEvent stream below (which only ever carries the *response*
             // side, split/reshaped for display). Fire-and-forget, same reasoning as runLogger's
             // own calls: a logging failure must never interrupt the turn itself.
-            onProviderCall: (call) => {
-              // Delta logging: the request's messages are the growing visible history, so
-              // logging the full request every round-trip is O(n²) disk over a session (and a
-              // multi-MB stringify per call). The first call of the session - and any call after
-              // a compaction shrank the message list - logs the full request in the original
-              // shape; in between, only the messages new since the previous call. Concatenating
-              // the deltas reconstructs every request exactly, so nothing is lost.
-              const prev = lastProviderLogRef.current;
-              const compacted = call.request.messages.length < prev.messageCount;
-              if (prev.messageCount === 0 || compacted) {
-                void fullContextLogger.log({ type: 'provider_call', ...call });
-              } else {
-                void fullContextLogger.log({
-                  type: 'provider_call_delta',
-                  ...(call.request.systemPrompt !== prev.systemPrompt
-                    ? { systemPrompt: call.request.systemPrompt }
-                    : {}),
-                  messages: call.request.messages.slice(prev.messageCount),
-                  response: call.response,
-                });
-              }
-              lastProviderLogRef.current = {
-                messageCount: call.request.messages.length,
-                systemPrompt: call.request.systemPrompt,
-              };
-            },
+            onProviderCall: (call) => providerCallLoggerRef.current(call),
             onEvent: (event: AgentEvent) => {
               // Raw streamed text - a live-preview-only signal, not logged (the run log already
               // gets the complete, final 'think'/'text' events below once the stream ends) and
