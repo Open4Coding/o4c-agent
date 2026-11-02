@@ -24,6 +24,7 @@ const MAX_RESPONSE_TOKENS = 32768;
 import {
   CONTINUATION_TAG,
   aiCompactionEntry,
+  fileActivity,
   aiPruneEntry,
   aiResponseEntry,
   systemNoticeEntry,
@@ -1120,6 +1121,15 @@ export class AgentLoop {
       });
       if (exact !== undefined) effectiveVisible = exact;
     }
+    // Cheapest first (D7): superseded file reads go before anything is summarized; when that alone
+    // brings the request under the line, there is nothing to summarize.
+    if (!manual && shouldCompact(effectiveVisible, contextWindow, settings.reserveTokens)) {
+      const duplicates = this.pruneSupersededReads();
+      if (duplicates.pairs > 0) {
+        this.emitPruneMarker(duplicates.pairs, duplicates.tokens, 0, onEvent, onEntry, duplicates.pairs);
+        effectiveVisible = this.hybridPromptTokenEstimate(modeInstruction);
+      }
+    }
     if (!manual && !shouldCompact(effectiveVisible, contextWindow, settings.reserveTokens)) return;
     // A manual /compact (D6) folds nearly everything: only about the last turn stays verbatim.
     const cutPoint = findCutPoint(this.entries, manual ? Math.min(settings.keepRecentTokens, 1000) : settings.keepRecentTokens);
@@ -1212,7 +1222,7 @@ export class AgentLoop {
     // shouldCompact() will simply be asked again next check, once more real history has
     // accumulated and there's an actual net win to make.
     const firstKeptEntryId = this.entries[cutPoint]?.id;
-    const summaryEntry = aiCompactionEntry(summary, firstKeptEntryId, tokensBefore);
+    const summaryEntry = aiCompactionEntry(summary, firstKeptEntryId, tokensBefore, fileActivity(toCompact));
     // The pinned entry is excluded from the net-benefit arithmetic as well as from the hiding loop
     // below - counting tokens this round is not going to remove would overstate the win and could
     // wave through a compaction that actually grows the visible history, which is the exact flaw

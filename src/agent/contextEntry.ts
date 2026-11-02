@@ -242,13 +242,60 @@ export function aiCompactionEntry(
   summary: unknown,
   firstKeptEntryId: string | undefined,
   tokensBefore: number,
+  files?: FileActivity,
 ): ContextEntry {
   return newEntry({
     type: 'ai',
     sub_type: 'compaction',
-    content: JSON.stringify({ summary, first_kept_entry_id: firstKeptEntryId, tokens_before: tokensBefore }),
+    content: JSON.stringify({
+      summary,
+      first_kept_entry_id: firstKeptEntryId,
+      tokens_before: tokensBefore,
+      ...(files && (files.read.length || files.modified.length) ? { files_read: files.read, files_modified: files.modified } : {}),
+    }),
   });
 }
+
+/** Files the folded part of a conversation read and changed (plan 0006 D7). */
+export interface FileActivity {
+  read: string[];
+  modified: string[];
+}
+
+/**
+ * What a stretch of history read and changed, from its own tool calls - not from the summary,
+ * which a model may get wrong or leave out. Merged with what an earlier compaction carried, so
+ * the lists survive compaction after compaction.
+ */
+export function fileActivity(entries: readonly ContextEntry[]): FileActivity {
+  const read = new Set<string>();
+  const modified = new Set<string>();
+  for (const e of entries) {
+    if (e.type === 'ai' && e.sub_type === 'compaction') {
+      try {
+        const c = JSON.parse(e.content) as { files_read?: string[]; files_modified?: string[] };
+        for (const f of c.files_read ?? []) read.add(f);
+        for (const f of c.files_modified ?? []) modified.add(f);
+      } catch {
+        // an old compaction without lists
+      }
+      continue;
+    }
+    if (e.type !== 'ai' || e.sub_type !== 'toolcall') continue;
+    try {
+      const call = JSON.parse(e.content) as { name?: string; input?: Record<string, unknown> };
+      const path = typeof call.input?.path === 'string' ? call.input.path : undefined;
+      if (!path) continue;
+      if (call.name === 'read_file') read.add(path);
+      else if (call.name === 'write_file' || call.name === 'edit_file') modified.add(path);
+    } catch {
+      // not a tool call we can read
+    }
+  }
+  return { read: [...read], modified: [...modified] };
+}
+
+const MAX_LISTED_FILES = 40;
 
 /**
  * §2.3's MicroCompact tier (2026-09-28, `cc`/hermes-agent-derived: a free, no-API-call tier
@@ -318,6 +365,15 @@ function formatCompactionForWire(content: string): string {
       }
     }
   }
+  // From the tool calls themselves (D7), so they are complete even when the summary is not.
+  const listed = (label: string, files: unknown) => {
+    if (!Array.isArray(files) || files.length === 0) return;
+    const shown = files.slice(-MAX_LISTED_FILES).join(', ');
+    lines.push(`${label}: ${shown}${files.length > MAX_LISTED_FILES ? ` (+${files.length - MAX_LISTED_FILES} earlier)` : ''}`);
+  };
+  const withLists = parsed as { files_read?: unknown; files_modified?: unknown };
+  listed('Files changed before this point', withLists.files_modified);
+  listed('Files read before this point', withLists.files_read);
   field('Errors & fixes', 'errors_and_fixes');
   field('Problem solving', 'problem_solving');
   field('Pending tasks', 'pending_tasks');

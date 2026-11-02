@@ -182,7 +182,11 @@ export function forbiddenFindings(messages: readonly Message[], hiddenTags: Read
   const out: Finding[] = [];
   if (hiddenTags.size === 0) return out;
   messages.forEach((m, i) => {
-    const text = m.toolCalls ? m.content + JSON.stringify(m.toolCalls) : m.content;
+    const raw = m.toolCalls ? m.content + JSON.stringify(m.toolCalls) : m.content;
+    // A compaction summary's file lists (plan 0006 D7) name the files the folded calls touched, by
+    // design - and this harness names its files after the entry tags. A path is not an entry's
+    // content, so those two lines are not evidence of a leak.
+    const text = raw.replace(/^Files (changed|read) before this point: .*$/gm, '');
     for (const hit of text.matchAll(TAG_GLOBAL)) {
       if (hiddenTags.has(hit[0])) {
         out.push({ invariant: 'hidden-never-sent', detail: `message ${i} carries hidden entry ${hit[0]}` });
