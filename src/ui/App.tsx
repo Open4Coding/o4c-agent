@@ -2279,6 +2279,25 @@ export function App({
             setPrefill({ token: nextPrefillToken++, text: `/memory-edit ${row.scope}:${row.id} ${row.text}` });
           }
         }
+      } else if (commandName(input) === '/compact') {
+        // D6: compaction now, optionally told what to keep in detail.
+        pushBlock([userLine(input)]);
+        const focus = input.trim().slice('/compact'.length).trim();
+        if (!contextWindow) {
+          pushBlock([infoLine("/compact needs the model's context size, which is not known yet (the server has not answered).")]);
+        } else {
+          pushBlock([infoLine(`Compacting${focus ? ` (keeping in detail: ${focus})` : ''}...`)]);
+          try {
+            const r = await loop.compactNow({ contextWindow, focus: focus || undefined });
+            if (!r) pushBlock([infoLine('Nothing to compact yet - there is no earlier turn to fold into a summary.')]);
+            else {
+              await saveSessionNow();
+              pushBlock([infoLine(`Compacted: about ${formatTokenCount(r.before)} -> ${formatTokenCount(r.after)} tokens.`)]);
+            }
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: `Compaction failed: ${formatError(err)}` }]);
+          }
+        }
       } else if (commandName(input) === '/reflect') {
         // D4: lessons from recent finished tasks, proposed by one model call, saved only if picked.
         pushBlock([userLine(input)]);

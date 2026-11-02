@@ -86,6 +86,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/config-global-highlightcolor',
     '/set-shell',
     '/memory',
+    '/compact',
     '/reflect',
     '/memory-edit',
     '/init',
@@ -114,7 +115,7 @@ test('isComposingCommand is true for a bare "/" or a partial command name, false
 
 test('matchCommands filters by prefix (name or alias) case-insensitively, sorted alphabetically', () => {
   const matches = matchCommands('/c');
-  assert.deepEqual(matches.map((c) => c.name), ['/clear', '/colorview', '/config', '/context']);
+  assert.deepEqual(matches.map((c) => c.name), ['/clear', '/colorview', '/compact', '/config', '/context']);
 });
 
 test('matchCommands matches on an alias even when the canonical name does not start with the prefix', () => {

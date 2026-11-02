@@ -225,18 +225,25 @@ function capConversationText(conversation: string, maxContentChars: number): str
 /** Builds the one-shot prompt sent to the summarizer call. `previousSummary`, when given (this
  * isn't the session's first compaction), asks the model to *update* it rather than regenerate
  * from scratch - bounds the cost of repeated compactions over a long session (§2.3). */
+/** `/compact <focus>` (plan 0006 D6): what the user wants the summary to keep in detail. */
+export function focusLine(focus: string | undefined): string {
+  return focus?.trim() ? `The user asked this summary to keep in detail: ${focus.trim()}` : '';
+}
+
 export function buildCompactionPrompt(input: {
   entries: readonly ContextEntry[];
   previousSummary?: unknown;
   maxContentChars?: number;
+  focus?: string;
 }): string {
   const raw = input.entries.map(serializeEntryForSummary).filter(Boolean).join('\n');
   const conversation = capConversationText(raw, input.maxContentChars ?? DEFAULT_MAX_COMPACTION_PROMPT_CHARS);
+  const instructions = [SUMMARY_INSTRUCTIONS, focusLine(input.focus)].filter(Boolean).join('\n\n');
   if (input.previousSummary === undefined) {
-    return `${SUMMARY_INSTRUCTIONS}\n\nConversation to summarize:\n\n${conversation}`;
+    return `${instructions}\n\nConversation to summarize:\n\n${conversation}`;
   }
   return [
-    SUMMARY_INSTRUCTIONS,
+    instructions,
     '',
     'There is already a summary of everything before this point (as JSON). Update it with the new',
     'information below rather than starting over - move completed items into current/past fields,',
@@ -283,7 +290,7 @@ export const SUMMARY_SCHEMA: Record<string, unknown> = {
 /** The first line of that instruction - how a provider (or a test harness) can tell the call apart. */
 export const SHARED_COMPACTION_MARK = '[o4c] Pause the task: this is a context-compaction step, not a user request.';
 
-export function buildSharedCompactionInstruction(input: { keepFrom?: string; hasPreviousSummary?: boolean }): string {
+export function buildSharedCompactionInstruction(input: { keepFrom?: string; hasPreviousSummary?: boolean; focus?: string }): string {
   const scope = input.keepFrom
     ? `Summarize the conversation above, up to but not including the message that begins: "${input.keepFrom.replace(/\s+/g, ' ').slice(0, 120)}".`
     : 'Summarize the conversation above.';
@@ -292,6 +299,7 @@ export function buildSharedCompactionInstruction(input: { keepFrom?: string; has
     scope,
     input.hasPreviousSummary ? 'Fold the earlier summary that appears above into the new one rather than starting over.' : '',
     SUMMARY_INSTRUCTIONS,
+    focusLine(input.focus),
     'Do not call any tools. Reply with the JSON object only.',
   ]
     .filter(Boolean)

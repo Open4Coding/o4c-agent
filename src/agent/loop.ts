@@ -1102,6 +1102,8 @@ export class AgentLoop {
     signal?: AbortSignal,
     modeInstruction?: string,
     thinkLevel?: ThinkLevel,
+    /** `/compact` (D6): run whatever the size, and keep this in detail. */
+    manual?: { focus?: string },
   ): Promise<void> {
     // Hybrid real+delta estimate - see hybridPromptTokenEstimate's own doc comment and
     // maybeMicroCompact's identical swap above.
@@ -1118,8 +1120,9 @@ export class AgentLoop {
       });
       if (exact !== undefined) effectiveVisible = exact;
     }
-    if (!shouldCompact(effectiveVisible, contextWindow, settings.reserveTokens)) return;
-    const cutPoint = findCutPoint(this.entries, settings.keepRecentTokens);
+    if (!manual && !shouldCompact(effectiveVisible, contextWindow, settings.reserveTokens)) return;
+    // A manual /compact (D6) folds nearly everything: only about the last turn stays verbatim.
+    const cutPoint = findCutPoint(this.entries, manual ? Math.min(settings.keepRecentTokens, 1000) : settings.keepRecentTokens);
     if (cutPoint === 0) return; // no safe turn boundary to cut at yet - skip this round
 
     const toCompact = this.entries.slice(0, cutPoint);
@@ -1157,7 +1160,7 @@ export class AgentLoop {
         systemPrompt: this.systemPrompt,
         messages: [
           ...toWireMessages(this.requestProjection?.entries ?? this.entries),
-          { role: 'user', content: buildSharedCompactionInstruction({ keepFrom: keepEntry?.content, hasPreviousSummary: previousSummary !== undefined }) },
+          { role: 'user', content: buildSharedCompactionInstruction({ keepFrom: keepEntry?.content, hasPreviousSummary: previousSummary !== undefined, focus: manual?.focus }) },
         ],
         tools: this.wireDefs,
         toolChoice: 'none',
@@ -1182,7 +1185,7 @@ export class AgentLoop {
         systemPrompt:
           'You produce structured JSON summaries of coding-agent conversation history for context compaction. Output only the JSON object, nothing else.',
         messages: [
-          { role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary, maxContentChars }) },
+          { role: 'user', content: buildCompactionPrompt({ entries: toCompact, previousSummary, maxContentChars, focus: manual?.focus }) },
         ],
         tools: [],
         responseSchema: SUMMARY_SCHEMA,
@@ -1303,6 +1306,30 @@ export class AgentLoop {
       messages: toWireMessages(entries),
       tools: this.wireDefs ?? this.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
     };
+  }
+
+  /**
+   * `/compact [focus]` (plan 0006 D6): summarize the older part of the conversation now, with the
+   * focus text telling the summary what to keep in detail. Returns the estimated size before and
+   * after, or undefined when there was nothing old enough to fold (no turn boundary to cut at).
+   */
+  async compactNow(options: { contextWindow: number; focus?: string; signal?: AbortSignal; onEvent?: (event: AgentEvent) => void; onEntry?: (entry: ContextEntry) => void }): Promise<{ before: number; after: number } | undefined> {
+    const before = this.visibleTokenEstimate;
+    const compactions = this.entries.filter((e) => e.sub_type === 'compaction').length;
+    await this.refreshRequestProjection({ contextWindow: options.contextWindow }, () => {});
+    await this.maybeCompact(
+      options.contextWindow,
+      compactionSettingsForWindow(options.contextWindow),
+      options.onEvent ?? (() => {}),
+      options.onEntry ?? (() => {}),
+      () => {},
+      options.signal,
+      undefined,
+      undefined,
+      { focus: options.focus },
+    );
+    if (this.entries.filter((e) => e.sub_type === 'compaction').length === compactions) return undefined;
+    return { before, after: this.visibleTokenEstimate };
   }
 
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {

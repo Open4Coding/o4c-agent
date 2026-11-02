@@ -304,6 +304,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'What o4c remembers across sessions (rules, facts, lessons; project or global): pick one to edit or delete - no LLM call.',
   },
   {
+    name: '/compact',
+    description: 'Summarize the older part of the conversation now. Optional: what to keep in detail. Usage: /compact [focus]',
+  },
+  {
     name: '/reflect',
     select: 'run',
     description: 'Ask the model (one call) which lessons from the recent finished tasks are worth remembering; you pick which to save.',
