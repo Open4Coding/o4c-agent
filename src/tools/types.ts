@@ -62,4 +62,6 @@ export interface Tool {
 
 export interface ToolContext {
   signal?: AbortSignal;
+  /** Output as it is produced, for tools that run something long (run_shell, B24). */
+  onOutput?: (text: string) => void;
 }

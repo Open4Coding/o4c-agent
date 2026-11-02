@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { currentShell, type Shell } from './shell.js';
 
 /**
  * Runs one shell command for `run_shell` (plan 0006 B20): output collected up to a byte cap, a
@@ -29,6 +30,10 @@ export interface ShellOptions {
   signal?: AbortSignal;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** Default: the configured shell (B24). */
+  shell?: Shell;
+  /** Each chunk of output as it arrives, for a live line in the UI (B24). */
+  onOutput?: (text: string) => void;
 }
 
 const live = new Set<ChildProcess>();
@@ -73,8 +78,9 @@ export function runShellCommand(command: string, options: ShellOptions): Promise
       resolve({ stdout: '', stderr: '', code: null, killed: 'aborted' });
       return;
     }
-    const child = spawn(command, {
-      shell: true,
+    const shell = options.shell ?? currentShell();
+    const child = spawn(shell.exe, shell.argsFor(command), {
+      windowsVerbatimArguments: shell.verbatim,
       cwd: options.cwd,
       env: options.env,
       windowsHide: true,
@@ -98,6 +104,7 @@ export function runShellCommand(command: string, options: ShellOptions): Promise
         return;
       }
       into.push(chunk);
+      options.onOutput?.(chunk.toString('utf-8'));
     };
     child.stdout?.on('data', collect(out));
     child.stderr?.on('data', collect(err));

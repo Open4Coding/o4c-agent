@@ -67,7 +67,9 @@ export const runShellTool: Tool = {
     }
     const timeoutMs = typeof input.timeout_ms === 'number' && Number.isFinite(input.timeout_ms) ? input.timeout_ms : defaultTimeoutMs;
     // spawn + whole-tree kill on Esc or timeout (B20) - see shellRunner.ts.
-    const r = await runShellCommand(command, { timeoutMs, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal, env });
+    const raw = await runShellCommand(command, { timeoutMs, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal, env, onOutput: context?.onOutput });
+    // LF only: cmd and PowerShell write CRLF, which costs tokens and trips exact comparisons.
+    const r = { ...raw, stdout: raw.stdout.replace(/\r\n/g, '\n'), stderr: raw.stderr.replace(/\r\n/g, '\n') };
     if (!r.killed && r.code === 0) return [r.stdout, r.stderr].filter(Boolean).join('\n').trim() || '(no output)';
 
     let why: string;

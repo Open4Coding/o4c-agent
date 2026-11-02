@@ -25,6 +25,7 @@ import { defaultProvider } from './session/providerDefault.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
 import { setShellTimeoutDefault } from './tools/runShell.js';
+import { currentShell, setShell, SHELL_CONFIG_KEY, shellPromptLine } from './tools/shell.js';
 import { describeJob, killOwnedJobs, setJobsDir, unreportedFinished } from './tools/jobs.js';
 import { fileStateComponent, fileStatePath } from './session/fileState.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
@@ -737,10 +738,12 @@ program
     // Built here, after the probe, so the profile follows the model the server really serves (B1).
     // The tool set is the one the session starts with: the built-ins, plus code_graph when the graph
     // will expose it - fixed for the session, like everything else in the system prompt.
+    // The shell run_shell uses (B24) - set before the prompt, which names it.
+    setShell(resolvedConfig[SHELL_CONFIG_KEY]);
     const systemPrompt = buildSystemPrompt({
       profile: promptProfileFor(opts.model, resolvedConfig[PROMPT_PROFILE_CONFIG_KEY]),
       tools: [...defaultTools.map((t) => t.name), ...(trusted && resolvedConfig.codeGraph !== false ? ['code_graph'] : [])],
-      environment: [cwdLine, platformPromptLine()],
+      environment: [cwdLine, shellPromptLine(currentShell())],
       projectContext,
     });
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);

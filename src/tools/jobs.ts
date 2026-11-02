@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Tool } from './types.js';
+import { currentShell } from './shell.js';
 
 /**
  * Background jobs for `run_shell` (plan 0006 B22): a dev server, a long build, a watcher - started,
@@ -36,11 +37,11 @@ export interface JobStatus {
 }
 
 const WRAPPER = [
-  "const [cmd, log, exitFile] = process.argv.slice(1);",
+  "const [exe, argsJson, verbatim, log, exitFile] = process.argv.slice(1);",
   "const fs = require('fs');",
   "const out = fs.openSync(log, 'a');",
   "const done = (code, signal) => { try { fs.writeFileSync(exitFile, JSON.stringify({ code, signal, endedAt: Date.now() })); } catch {} process.exit(0); };",
-  "const c = require('child_process').spawn(cmd, { shell: true, stdio: ['ignore', out, out], windowsHide: true });",
+  "const c = require('child_process').spawn(exe, JSON.parse(argsJson), { stdio: ['ignore', out, out], windowsHide: true, windowsVerbatimArguments: verbatim === '1' });",
   "c.on('exit', done);",
   "c.on('error', (e) => { fs.appendFileSync(log, String(e && e.message)); done(-1, null); });",
 ].join('\n');
@@ -114,7 +115,8 @@ export function startJob(command: string, cwd = process.cwd(), env: NodeJS.Proce
   const log = join(d, `${id}.log`);
   const exitFile = join(d, `${id}.exit.json`);
   writeFileSync(log, '');
-  const child = spawn(process.execPath, ['-e', WRAPPER, command, log, exitFile], {
+  const shell = currentShell();
+  const child = spawn(process.execPath, ['-e', WRAPPER, shell.exe, JSON.stringify(shell.argsFor(command)), shell.verbatim ? '1' : '0', log, exitFile], {
     cwd,
     env,
     detached: true,

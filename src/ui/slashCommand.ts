@@ -292,6 +292,13 @@ export const COMMANDS: CommandInfo[] = [
   // action of its own - listing every configured server and what state it is in - and that
   // listing is the whole answer when no server offers prompts, which is the default.
   {
+    name: '/set-shell',
+    // Hidden like the other /set-* commands: reached through the /set family dropdown.
+    hidden: true,
+    select: 'run',
+    description: 'Choose the shell run_shell uses: auto, cmd, pwsh (PowerShell 7), powershell (5.1), bash or sh - saved to config.',
+  },
+  {
     name: '/ps',
     select: 'run',
     description: 'List background jobs started with run_shell background:true - id, state, command - no LLM call.',

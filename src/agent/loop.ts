@@ -65,7 +65,7 @@ import {
 } from '../tools/toolOutput.js';
 
 export interface AgentEvent {
-  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'info' | 'tool_progress' | 'cache_break' | 'prefill_progress' | 'server_busy';
+  type: 'text' | 'think' | 'tool_call' | 'tool_result' | 'compaction' | 'prune' | 'delta' | 'warning' | 'info' | 'tool_progress' | 'tool_output' | 'cache_break' | 'prefill_progress' | 'server_busy';
   text?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -1911,7 +1911,13 @@ export class AgentLoop {
           // can never become a route around the approval gate. This is where the Code Graph
           // answers a `grep` from its index instead of reading files; `runTool` with nothing
           // registered is a direct call to `execute`, no wrapper allocated.
-          output = await this.core.runTool({ tool, input }, () => tool.execute(input, { signal: options.signal }));
+          output = await this.core.runTool({ tool, input }, () =>
+            tool.execute(input, {
+              signal: options.signal,
+              // Live status only, like 'delta': the UI shows the latest line, nothing is logged (B24).
+              onOutput: (text) => onEvent({ type: 'tool_output', toolName: tool.name, text }),
+            }),
+          );
         }
         output = await this.boundToolOutput(output, call.name, options);
         // After bounding, so a truncation can never cut the note off.

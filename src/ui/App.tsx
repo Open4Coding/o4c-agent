@@ -128,6 +128,7 @@ import type { Message } from '../providers/types.js';
 import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
+import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -2131,6 +2132,24 @@ export function App({
           pushBlock([infoLine(detailLines.join('\n'))]);
           void runLogger.log({ type: 'system', sub_type: 'info', command: `/help-${rest}` });
         }
+      } else if (commandName(input) === '/set-shell') {
+        // B24: which shell run_shell uses. Saved to config; the next message's process picks it up
+        // (the system prompt names the shell, so changing it costs one full re-read of the context).
+        pushBlock([userLine(input)]);
+        const choice = await pickChoice('Shell for run_shell (↑/↓ to choose, Enter to select, Esc to cancel):', [
+          { key: 'auto', label: `auto - ${process.platform === 'win32' ? 'cmd.exe on Windows' : 'bash if installed, else sh'}` },
+          { key: 'cmd', label: 'cmd - Windows command prompt' },
+          { key: 'pwsh', label: 'pwsh - PowerShell 7 (&& works)' },
+          { key: 'powershell', label: 'powershell - Windows PowerShell 5.1 (no &&)' },
+          { key: 'bash', label: 'bash' },
+          { key: 'sh', label: 'sh' },
+        ]);
+        if (!choice) pushBlock([infoLine('Shell unchanged.')]);
+        else {
+          await configStore.set(projectRoot ? 'local' : 'global', SHELL_CONFIG_KEY, choice).catch(() => undefined);
+          setShell(choice);
+          pushBlock([infoLine(`Shell set to ${choice} (${currentShell().exe}). The model is told from your next message.`)]);
+        }
       } else if (commandName(input) === '/ps') {
         // Local: the job records under .o4c/jobs (B22).
         pushBlock([userLine(input)]);
@@ -2310,6 +2329,16 @@ export function App({
               }
               if (event.type === 'server_busy') {
                 setServerStatusLine('Server busy with another request - waiting for it');
+                return;
+              }
+              if (event.type === 'tool_output') {
+                // A running command's latest line, next to the spinner (B24). Throttled like tool_progress.
+                const now = Date.now();
+                const line = (event.text ?? '').split(/\r?\n/).filter((l) => l.trim()).pop();
+                if (line && now - toolProgressShownAtRef.current >= TOOL_PROGRESS_MS) {
+                  toolProgressShownAtRef.current = now;
+                  setServerStatusLine(`${event.toolName ?? 'run_shell'}: ${line.trim().slice(0, 160)}`);
+                }
                 return;
               }
               if (event.type === 'tool_progress') {
