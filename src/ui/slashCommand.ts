@@ -79,6 +79,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/view-db',
+    select: 'run',
+    description: "Look into this project's databases (.o4c/db): pick one, then a table, then a row to see it in full - read-only, no LLM call.",
+  },
+  {
     name: '/plan-reword',
     hidden: true,
     description: "Rewords a plan item - put in the input box by /view-plan's Edit items. Usage: /plan-reword <plan> <item> <text>",

@@ -32,6 +32,9 @@
 - `/context` — local token usage for this session, with no LLM call.
 - `/plan <goal>`, `/ultraplan <goal>` — make a plan with a checklist; `/plans` lists them,
   `/view-plan` views, edits, activates or exports one. See [plans.md](plans.md).
+- `/view-db` - looks into the project's own databases (`.o4c/db/`): pick a database, then a table
+  (with its row count and columns), then a row to see it in full, or "Schema" for how the table was
+  made. Newest rows first, read-only, no model call.
 - `/mode` — switch between Manual, Auto, Accept Edits, Plan and Plan-Write.
 - `/think` — reasoning depth: nothink, low, med, high, xhigh.
 - `/keyboard` — keybindings for this OS; `/keyboard-windows|-mac|-linux` for another one.

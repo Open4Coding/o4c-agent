@@ -34,7 +34,8 @@ import {
 import { PlanRuleError, formatPlanNo } from '../session/planStore.js';
 import { SelectList } from './SelectList.js';
 import { TAB_USED_KEY } from './tabHint.js';
-import { plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
+import { dbDirFor, plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
+import { listDatabases, openReadOnly, recordDetail, recordRows, rowsTitle, schemaDetail, tableRows } from './dbBrowser.js';
 import { listPlans, plansReport } from '../session/plansStore.js';
 import { clipDiff, diffLines, diffStats, formatDiffStats } from './lineDiff.js';
 import { styleCodePreview, styleDiff, type StyledDiffLine } from './diffStyle.js';
@@ -1504,6 +1505,28 @@ export function App({
             pushBlock([infoLine([`Plan ${formatPlanNo(plan.number)}: ${command.op === 'reword' ? `reworded item ${command.item}` : `added after item ${command.item}`}.`, ...formatChecklist(plans.store, plans.store.getPlan(plan.id)!)].join('\n'))]);
           } catch (err) {
             pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
+          }
+        }
+      } else if (commandName(input) === '/view-db') {
+        // Read-only and local: database -> table -> one row in full. See dbBrowser.ts.
+        pushBlock([userLine(input)]);
+        const dbDir = dbDirFor(projectRoot);
+        const names = listDatabases(dbDir);
+        if (!dbDir || names.length === 0) {
+          pushBlock([infoLine("No databases yet - o4c makes them in .o4c/db/ once the project is trusted.")]);
+        } else {
+          const name = await pickChoice('Database (↑/↓ to choose, Enter to select, Esc to cancel):', names.map((n) => ({ key: n, label: n })));
+          let db: ReturnType<typeof openReadOnly> | undefined;
+          try {
+            db = name === undefined ? undefined : openReadOnly(dbDir, name);
+            const table = db ? await pickChoice(`${name} - tables (↑/↓ to choose, Enter to select, Esc to cancel):`, tableRows(db)) : undefined;
+            const row = db && table ? await pickChoice(rowsTitle(db, table), recordRows(db, table)) : undefined;
+            if (!db || !table || !row) pushBlock([infoLine('Nothing chosen.')]);
+            else pushBlock([infoLine((row === '__schema' ? schemaDetail(db, table) : recordDetail(db, table, row)).join('\n'))]);
+          } catch (err) {
+            pushBlock([infoLine(`Could not read ${name}: ${formatError(err)}`)]);
+          } finally {
+            db?.close();
           }
         }
       } else if (commandName(input) === '/view-plan') {

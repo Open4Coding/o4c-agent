@@ -45,3 +45,9 @@ table in `history.db` / `datagraph.db`, or a new column set that changes what a 
 same change adds a way to look into it from the terminal: a `/view-...` command that opens a
 dropdown (built on `SelectList`, per the rules above) and shows the rows in readable form. No
 database content should ever need an outside SQLite tool to inspect. `/view-plan` is the first one.
+
+`/view-db` (`src/ui/dbBrowser.ts`) is the floor that makes this automatic: it browses every
+`.db` file in `.o4c/db/`, every table in it, and any row in full, read-only. A new database or
+table is covered by it the day it lands - check it reads well there (newest rows first, one-line
+labels). Add a purpose-built `/view-...` as well when raw rows do not tell the story (like a plan
+and its checklist).
