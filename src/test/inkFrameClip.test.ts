@@ -5,7 +5,7 @@ import React from 'react';
 import { Box, Text, render } from 'ink';
 import { installResizeReflowFix } from '../ui/resizeReflowFix.js';
 
-// Guards patches/ink+7.1.1.patch: a live frame as tall as the window must never be written, because
+// Guards the Ink frame clip (patches/ink+8.0.0.patch, shipped as vendor/ink-8.0.0-o4c.1.tgz): a live frame as tall as the window must never be written, because
 // each repaint of such a frame scrolls its top rows into scrollback (hundreds of duplicated lines
 // were seen there on 2026-09-30). The patched Ink clips it to the newest viewportRows-1 rows.
 
