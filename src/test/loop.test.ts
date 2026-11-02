@@ -1011,7 +1011,8 @@ test('a tool result bigger than the window is bounded before it reaches history,
   const response = loop.getEntries().find((e) => e.sub_type === 'toolcallresponse');
   assert.ok(response, 'the tool result was appended');
   assert.ok(response.content.length <= 40_000, `entry was ${response.content.length} chars`);
-  assert.match(response.content, /\[o4c truncated this output: 10,500,000 chars/);
+  // "condensed" since B15: 350,000 identical lines collapse rather than being cut.
+  assert.match(response.content, /\[o4c (truncated|condensed) this output: 10,500,000 chars/);
 
   const toolResultEvent = events.find((e) => e.type === 'tool_result');
   assert.ok(toolResultEvent?.toolOutput);
