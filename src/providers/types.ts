@@ -4,6 +4,11 @@ export interface ToolCall {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /**
+   * Set when the arguments were not valid JSON even after repair (plan 0006 B3): the call is not
+   * run, and the model is told why instead of the call vanishing.
+   */
+  argumentError?: string;
 }
 
 export type MessageRole = 'user' | 'assistant' | 'tool';

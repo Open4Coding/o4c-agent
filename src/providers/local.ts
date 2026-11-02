@@ -8,6 +8,7 @@ import {
   type LocalThinkParams,
   type ThinkCaps,
 } from '../agent/thinkLevel.js';
+import { jsonError, repairJson } from './jsonRepair.js';
 import { samplingFor } from '../agent/sampling.js';
 import type {
   CompletionRequest,
@@ -877,12 +878,23 @@ export async function parseSseStream(
   const toolCalls: ToolCall[] = [];
   let truncatedToolCall: ParsedStream['truncatedToolCall'];
   for (const [, call] of [...toolCallsByIndex.entries()].sort(([a], [b]) => a - b)) {
-    let input: Record<string, unknown>;
+    let input: Record<string, unknown> | undefined;
     try {
-      input = JSON.parse(call.args || '{}') as Record<string, unknown>;
+      const parsed = JSON.parse(call.args || '{}') as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
     } catch {
-      // Truncated/malformed arguments - see above. Remembered, so the loop can tell the model.
-      truncatedToolCall = { name: call.name || 'tool', argumentChars: call.args.length };
+      // Raw newlines in a string, a trailing comma: repaired when that is all it is (B3).
+      input = repairJson(call.args);
+    }
+    if (!input) {
+      // Cut off by the output limit - see above. Remembered, so the loop can tell the model.
+      if (finishReason === 'length') {
+        truncatedToolCall = { name: call.name || 'tool', argumentChars: call.args.length };
+        continue;
+      }
+      // Complete but unusable: kept as a call that will not run, so the model hears why (B3) -
+      // these used to be dropped without a word.
+      toolCalls.push({ id: call.id, name: call.name, input: {}, argumentError: `${jsonError(call.args)}; they began: ${call.args.slice(0, 200)}` });
       continue;
     }
     toolCalls.push({ id: call.id, name: call.name, input });

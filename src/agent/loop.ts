@@ -1756,7 +1756,9 @@ export class AgentLoop {
         this.appendEntry(aiToolCallEntry(call, tool?.mutating), onEntry);
         let output: string;
         let verdict: 'allow' | 'deny' | 'declined' = 'allow';
-        if (!tool && this.wireDefs?.some((d) => d.name === call.name)) {
+        if (call.argumentError) {
+          output = `Error: the arguments of this ${call.name} call were not valid JSON (${call.argumentError}), so it was not run. Send the call again with valid JSON arguments.`;
+        } else if (!tool && this.wireDefs?.some((d) => d.name === call.name)) {
           output = `${call.name} is not available right now - its server is not connected, or it was switched off. Use another tool.`;
         } else if (!tool) {
           output = `Error: no tool registered with name "${call.name}"`;
