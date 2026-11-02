@@ -15,7 +15,7 @@ const history: Message[] = [
 ];
 
 test('all (default): reasoning_content on every assistant message, never folded into content', async () => {
-  const out = (await toOpenAIMessages('sys', history)).filter((m) => m.role === 'assistant') as Array<Record<string, unknown>>;
+  const out = (await toOpenAIMessages('sys', history)).filter((m) => m.role === 'assistant') as unknown as Array<Record<string, unknown>>;
   assert.equal(out[0]!.reasoning_content, 'old thoughts');
   assert.equal(out[0]!.content, 'first answer');
   assert.equal(out[1]!.reasoning_content, 'current thoughts');
@@ -23,7 +23,7 @@ test('all (default): reasoning_content on every assistant message, never folded 
 
 test('current-turn: reasoning_content only after the last user message; old reasoning not sent', async () => {
   const out = await toOpenAIMessages('sys', history, 'current-turn');
-  const assistants = out.filter((m) => m.role === 'assistant') as Array<Record<string, unknown>>;
+  const assistants = out.filter((m) => m.role === 'assistant') as unknown as Array<Record<string, unknown>>;
   assert.equal(assistants[0]!.reasoning_content, undefined);
   assert.equal(assistants[0]!.content, 'first answer', 'never folded into content');
   assert.equal(assistants[1]!.reasoning_content, 'current thoughts');

@@ -1,0 +1,4 @@
+{
+  "category": "bug-fix",
+  "prompt": "In inventory.py, remove() lets a quantity go negative and keeps items that reach 0. Make it raise ValueError when removing more than is in stock (including an item that is not in stock at all), and delete an item whose quantity reaches 0."
+}

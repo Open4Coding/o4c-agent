@@ -1,0 +1,4 @@
+{
+  "category": "feature",
+  "prompt": "Add from_roman(text) to roman.py, the inverse of to_roman. It must raise ValueError for anything that is not a valid numeral in standard form, for example 'IIII', 'VX', 'IC', 'ABC' or ''."
+}

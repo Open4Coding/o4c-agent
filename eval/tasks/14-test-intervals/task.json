@@ -1,0 +1,4 @@
+{
+  "category": "tests",
+  "prompt": "Write tests for mergeIntervals in src/intervals.js, in test/intervals.test.js, using node:test and node:assert. Cover everything its comment promises. Do not change src/intervals.js."
+}

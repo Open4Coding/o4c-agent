@@ -1,0 +1,4 @@
+{
+  "category": "feature",
+  "prompt": "Add a --words option to bin/wc.js: `node bin/wc.js --words <file>` prints the number of words (separated by any whitespace) instead of the number of lines. Without the option it must still print the line count, and the option may come before or after the file name."
+}

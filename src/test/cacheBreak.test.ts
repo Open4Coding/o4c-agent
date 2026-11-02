@@ -37,6 +37,7 @@ test('diagnoseCacheBreak: held cache, system prompt, tools, history, evicted', (
 
 /** Answers every call with a tool-free reply; reports a full cache hit unless the system prompt changed. */
 class CacheAwareProvider implements LLMProvider {
+  readonly name = 'cache-aware';
   private lastSystem: string | undefined;
   private lastInput = 0;
   /** Simulates another client taking the slot. */

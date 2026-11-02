@@ -26,7 +26,7 @@ type Spend = TokenSpend & { requests?: number };
 function storeWith(file: string, spend: Spend, clock = { ms: 0 }): UsageStore {
   return new UsageStore(
     file,
-    () => ({ input: spend.input, output: spend.output, requests: spend.requests ?? 0 }),
+    () => ({ input: spend.input, output: spend.output, requests: spend.requests ?? 0, cached: 0, processed: 0, prefillMs: 0, draftN: 0, draftAccepted: 0 }),
     () => clock.ms,
   );
 }

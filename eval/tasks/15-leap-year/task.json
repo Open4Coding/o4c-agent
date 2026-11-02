@@ -1,0 +1,4 @@
+{
+  "category": "tests",
+  "prompt": "isLeapYear in src/dates.js is wrong for century years like 1900 and 2000. First add tests for those cases to test/dates.test.js, then fix the function."
+}

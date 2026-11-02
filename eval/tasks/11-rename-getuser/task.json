@@ -1,0 +1,4 @@
+{
+  "category": "refactor",
+  "prompt": "Rename getUsr to getUser everywhere in src/, including every caller, export and comment. No \"getUsr\" may remain."
+}

@@ -1,0 +1,4 @@
+{
+  "category": "tests",
+  "prompt": "Write tests for src/slugify.js in test/slugify.test.js using node:test and node:assert. Cover everything its comment promises. Do not change src/slugify.js."
+}

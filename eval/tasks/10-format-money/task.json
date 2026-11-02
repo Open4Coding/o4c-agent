@@ -1,0 +1,4 @@
+{
+  "category": "refactor",
+  "prompt": "Refactor src/report.js: all three functions repeat the same money formatting. Move it into one exported function formatMoney(cents) and use it in all three. The output must not change."
+}

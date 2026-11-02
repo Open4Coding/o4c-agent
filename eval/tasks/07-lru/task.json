@@ -1,0 +1,4 @@
+{
+  "category": "feature",
+  "prompt": "Implement the LRUCache class in src/lru.js - its comment describes the behaviour."
+}

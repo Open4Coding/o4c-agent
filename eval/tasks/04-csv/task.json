@@ -1,0 +1,4 @@
+{
+  "category": "bug-fix",
+  "prompt": "parseCsvLine in src/csv.js breaks on quoted fields that contain commas: a,\"b,c\",d should give three fields. Inside a quoted field a doubled quote (\"\") stands for one literal quote. Fix it."
+}

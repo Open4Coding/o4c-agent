@@ -1,0 +1,4 @@
+{
+  "category": "multi-file",
+  "prompt": "Add a required email field to users across src/: createUser takes it and keeps it, validateUser adds the error 'email is invalid' unless it looks like name@domain.tld, and the CSV header and row get an email column at the end."
+}

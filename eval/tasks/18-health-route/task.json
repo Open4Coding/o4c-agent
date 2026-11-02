@@ -1,0 +1,4 @@
+{
+  "category": "multi-file",
+  "prompt": "Add a health check: GET /health returns status 200 with body { status: 'ok', uptime: <seconds since the process started, as a number> }. Put it in its own file under src/routes/, the way the users routes are done, and register it in src/app.js."
+}

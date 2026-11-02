@@ -1,0 +1,4 @@
+{
+  "category": "bug-fix",
+  "prompt": "paginate() in src/paginate.js returns the wrong items: page 1 should be the first page. pageCount() also looks wrong when the last page is only partly full. Fix both."
+}

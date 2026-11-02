@@ -53,7 +53,7 @@ test('the block is a turn note: stored once, re-sent unchanged, re-noted only wh
     plans.activate(plan.id, 's1');
     let enabled = true;
     const component = planContextComponent({ plans, sessionId: 's1', enabled: () => enabled });
-    assert.match(component.turnNote!()!, /^\[o4c plan\] Active plan 0001 "P"/);
+    assert.match(component.turnNote!({ message: '' })!, /^\[o4c plan\] Active plan 0001 "P"/);
     assert.equal(component.buildRequest, undefined, 'no per-request projection any more');
 
     const provider = new EchoProvider();
@@ -72,10 +72,10 @@ test('the block is a turn note: stored once, re-sent unchanged, re-noted only wh
     assert.match(notes()[1]!.content, /Current item 2/);
 
     enabled = false;
-    assert.equal(component.turnNote!(), undefined, 'none window type: nothing');
+    assert.equal(component.turnNote!({ message: '' }), undefined, 'none window type: nothing');
     enabled = true;
     plans.park(plan.id);
-    assert.equal(component.turnNote!(), undefined, 'no active plan: nothing');
+    assert.equal(component.turnNote!({ message: '' }), undefined, 'no active plan: nothing');
   });
 });
 

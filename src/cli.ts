@@ -22,6 +22,7 @@ import { RunLogger, createProviderCallLogger } from './session/runLog.js';
 import { SYSTEM_PROMPT } from './agent/systemPrompt.js';
 import { registerSecret } from './session/redact.js';
 import { defaultProvider } from './session/providerDefault.js';
+import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -1015,10 +1016,15 @@ program
       if (data) loop.loadEntries(data.entries);
     }
 
+    // Counted for the stats line below (the eval runner reads it, plan 0006 J1).
+    let toolCalls = 0;
     try {
       const finalAnswer = await loop.run(prompt, {
         images: opts.image ? [opts.image] : undefined,
-        onEvent: printEvent,
+        onEvent: (event) => {
+          if (event.type === 'tool_call') toolCalls++;
+          printEvent(event);
+        },
         onProviderCall: oneShotProviderLog,
         maxIterations,
         // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which
@@ -1047,6 +1053,9 @@ program
       process.stderr.write(
         `--- usage --- requests ${used.requestCount} · input ${used.inputTokens} · output ${used.outputTokens}\n`,
       );
+      process.stderr.write(
+        `${STATS_MARK}${JSON.stringify({ requests: used.requestCount, inputTokens: used.inputTokens, outputTokens: used.outputTokens, cachedTokens: used.cachedTokens, toolCalls })}\n`,
+      );
       if (oneShotStore && loop.getEntries().length > 0) {
         try {
           await oneShotStore.save(loop.getEntries(), sessionId);
@@ -1061,4 +1070,10 @@ program
     }
   });
 
-program.parseAsync(process.argv);
+// `o4c eval run|diff|list` (plan 0006 J1). Checked by hand rather than as a commander subcommand,
+// so only those exact forms are taken and a prompt that merely starts with "eval" still is one.
+if (process.argv[2] === 'eval' && ['run', 'diff', 'list'].includes(process.argv[3] ?? '')) {
+  process.exitCode = await runEvalCli(process.argv.slice(3));
+} else {
+  program.parseAsync(process.argv);
+}

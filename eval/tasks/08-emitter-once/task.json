@@ -1,0 +1,4 @@
+{
+  "category": "feature",
+  "prompt": "Add a once(event, handler) method to the Emitter in src/emitter.js: the handler runs on the next emit of that event only. Calling off(event, handler) with the original handler must also remove a once handler before it fires. once returns the emitter, like on."
+}

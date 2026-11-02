@@ -1,0 +1,4 @@
+{
+  "category": "refactor",
+  "prompt": "Convert load() in src/store.js from a callback API to one that returns a Promise, and update src/main.js to match: sortedNames(path) should return a Promise too. Errors (a missing file, bad JSON) must reject."
+}

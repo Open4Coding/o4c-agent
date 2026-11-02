@@ -1,0 +1,4 @@
+{
+  "category": "bug-fix",
+  "prompt": "The tests in test/ fail (run them with node --test). Fix the code so they pass. Don't change the tests."
+}

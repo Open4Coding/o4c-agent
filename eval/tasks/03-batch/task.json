@@ -1,0 +1,4 @@
+{
+  "category": "bug-fix",
+  "prompt": "runAll in src/batch.js resolves before the jobs finish, so callers get an empty array. Fix it so it resolves with every job's result in job order. The jobs should still run concurrently, and a job that fails should make runAll reject."
+}

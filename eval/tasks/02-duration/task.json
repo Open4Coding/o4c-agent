@@ -1,0 +1,4 @@
+{
+  "category": "bug-fix",
+  "prompt": "parseDuration('1h30m') in lib/duration.js returns the wrong number of seconds. Fix it."
+}

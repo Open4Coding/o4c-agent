@@ -1,0 +1,4 @@
+{
+  "category": "feature",
+  "prompt": "loadConfig in src/config.js should also read environment variables: for each key in defaults, an env var APP_<KEY in upper case> overrides it (APP_PORT for port, APP_LOG_LEVEL for log_level). Convert the env string to the default's type: numbers to numbers, booleans from 'true'/'false', strings unchanged. Explicit overrides still win over env vars. Take the environment as an optional third argument that defaults to process.env."
+}

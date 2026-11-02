@@ -1,0 +1,4 @@
+{
+  "category": "multi-file",
+  "prompt": "Split src/utils.js into src/strings.js (capitalize, truncate) and src/numbers.js (clamp, roundTo), update every import in src/, and delete src/utils.js."
+}

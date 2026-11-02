@@ -201,7 +201,7 @@ test('sticky window: the same cut is reused while it fits; a new cut lands at th
   assert.equal(first.kept[0]!.content, 'request 0', 'first message pinned');
 
   // Grow a little: same cut, so the sent prefix is identical.
-  let cutId = first.cutId;
+  let cutId: string | undefined = first.cutId;
   let slides = 0;
   for (let t = 60; t < 90; t++) {
     entries = [...entries, ...conversation(1).map((e) => ({ ...e, content: e.content.replace('0', String(t)) }))];

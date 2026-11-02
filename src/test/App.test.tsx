@@ -725,7 +725,7 @@ async function seededUsageStore(
   );
   const store = new UsageStore(
     file,
-    () => ({ input: 0, output: 0, requests: 0 }),
+    () => ({ input: 0, output: 0, requests: 0, cached: 0, processed: 0, prefillMs: 0, draftN: 0, draftAccepted: 0 }),
     () => 0,
   );
   store.load('seeded');
