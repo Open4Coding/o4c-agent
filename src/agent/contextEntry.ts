@@ -356,6 +356,7 @@ export function toWireMessages(
   let pending: {
     content: string;
     toolCalls: ToolCall[];
+    reasoning?: string;
     thinkingText?: string;
     thinkingSignature?: string;
     redactedThinking?: string;
@@ -370,6 +371,7 @@ export function toWireMessages(
       // Only present at all when a thinking turn actually set one - keeps the overwhelmingly
       // common (non-thinking) case's wire Message exactly as small as it always was, not padded
       // with three always-undefined keys.
+      ...(pending.reasoning !== undefined ? { reasoning: pending.reasoning } : {}),
       ...(pending.thinkingText !== undefined ? { thinkingText: pending.thinkingText } : {}),
       ...(pending.thinkingSignature !== undefined ? { thinkingSignature: pending.thinkingSignature } : {}),
       ...(pending.redactedThinking !== undefined ? { redactedThinking: pending.redactedThinking } : {}),
@@ -422,29 +424,22 @@ export function toWireMessages(
         entry.sub_type === 'compaction')
     ) {
       const text = entry.sub_type === 'compaction' ? formatCompactionForWire(entry.content) : entry.content;
-      if (!pending) pending = { content: text, toolCalls: [] };
-      // A `think` entry followed by its own `response` entry (§6.6's split) need a separator so
-      // the two don't run together word-to-word - blank-line join, same convention as joining any
-      // other two logically distinct text segments in this codebase (e.g. modeInstruction's own
-      // append onto the system prompt in loop.ts).
-      else if (pending.content && text) pending.content += `\n\n${text}`;
-      else pending.content += text;
+      // Reasoning goes to its own field, never into `content` (plan 0006 A7).
       if (entry.sub_type === 'think') {
-        // Kept separate from the merged `content` above - Anthropic's replay needs the raw
-        // thinking text and its signature reassembled into their own distinct content block, not
-        // folded into the response text (see Message.thinkingText's own doc comment). thinkingText
-        // is only meaningful paired with its signature (a `ThinkingBlockParam` needs both, per
-        // Anthropic's own type) - set only when there's actually a signature to pair it with, so a
-        // plain (non-Anthropic, unsigned) think entry's wire Message stays exactly as small as it
-        // always was, same reasoning as flush()'s own conditional spread below.
+        if (!pending) pending = { content: '', toolCalls: [] };
+        if (text) pending.reasoning = pending.reasoning ? `${pending.reasoning}\n\n${text}` : text;
         if (entry.thinking_signature) {
           pending.thinkingText = entry.content;
           pending.thinkingSignature = entry.thinking_signature;
         }
-        if (entry.redacted_thinking) {
-          pending.redactedThinking = entry.redacted_thinking;
-        }
+        if (entry.redacted_thinking) pending.redactedThinking = entry.redacted_thinking;
+        continue;
       }
+      if (!pending) pending = { content: text, toolCalls: [] };
+      // Two text entries in one assistant message (a narration, then a final response) join with a
+      // blank line so they don't run together word-to-word.
+      else if (pending.content && text) pending.content += `\n\n${text}`;
+      else pending.content += text;
       continue;
     }
 

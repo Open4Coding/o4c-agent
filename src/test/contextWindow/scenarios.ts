@@ -190,8 +190,14 @@ export const SCENARIOS: ScenarioSpec[] = [
       },
     ],
     check: (r) => {
+      // Since plan 0006 A7 the prune marker (a user-role note) also ends the old rounds' reasoning on
+      // the wire, so tier 2 alone now holds a single tool-heavy turn under the tier-3 line at every
+      // window size (peak 66-78%, was 79% plus 3 compactions). Compaction is still exercised by the
+      // long-run, repeated-compaction and tool-heavy-drift scenarios. What must hold here: the turn
+      // either compacts or stays clear of the line, and never hard-stops.
       if (r.window >= 57344) {
-        assert.ok(r.compactions >= 1, 'tier 3 should fire inside a single tool-heavy turn');
+        assert.ok(r.compactions >= 1 || r.stats.peakFraction < 0.8, `peak ${r.stats.peakFraction} with no compaction`);
+        assert.equal(r.hardStops, 0);
       }
     },
   },

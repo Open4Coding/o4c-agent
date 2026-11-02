@@ -48,14 +48,30 @@ async function toImageDataUri(path: string): Promise<string> {
   return `data:${mime};base64,${data.toString('base64')}`;
 }
 
-async function toOpenAIMessages(
+/**
+ * What happens to an assistant message's reasoning on the way to llama-server (plan 0006 A7):
+ * - `current-turn` (default): sent as `reasoning_content` on the messages after the last user
+ *   message, so the chat template renders exactly what the model generated (Qwen's wraps it in
+ *   `<think>` tags) and the server reuses its cache instead of re-processing the reply; earlier
+ *   turns' reasoning is not sent at all (the template would drop it anyway).
+ * - `none`: never sent.
+ * - `all-as-text`: the old behaviour - prepended to `content` as plain text on every message.
+ */
+export type LocalReasoningReplay = 'current-turn' | 'none' | 'all-as-text';
+
+export async function toOpenAIMessages(
   systemPrompt: string | undefined,
   messages: Message[],
+  reasoningReplay: LocalReasoningReplay = 'current-turn',
 ): Promise<OpenAIMessage[]> {
   const result: OpenAIMessage[] = [];
   if (systemPrompt) result.push({ role: 'system', content: systemPrompt });
+  let lastUser = -1;
+  messages.forEach((m, i) => {
+    if (m.role === 'user') lastUser = i;
+  });
 
-  for (const msg of messages) {
+  for (const [index, msg] of messages.entries()) {
     if (msg.role === 'user') {
       if (msg.images && msg.images.length > 0) {
         const parts: ContentPart[] = [{ type: 'text', text: msg.content }];
@@ -72,9 +88,13 @@ async function toOpenAIMessages(
         type: 'function' as const,
         function: { name: call.name, arguments: JSON.stringify(call.input) },
       }));
+      const reasoning = msg.reasoning || undefined;
+      const content =
+        reasoningReplay === 'all-as-text' && reasoning ? [reasoning, msg.content].filter(Boolean).join('\n\n') : msg.content;
       result.push({
         role: 'assistant',
-        content: msg.content || null,
+        content: content || null,
+        ...(reasoningReplay === 'current-turn' && reasoning && index > lastUser ? { reasoning_content: reasoning } : {}),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
       });
     } else if (msg.role === 'tool') {
@@ -309,6 +329,7 @@ export class LocalProvider implements LLMProvider {
    * `probeThinkCaps()`. Defaults to Qwen3's shape so a server that cannot be probed still gets
    * working `/think` levels rather than none. */
   private thinkCaps: ThinkCaps;
+  private reasoningReplay: LocalReasoningReplay;
 
   constructor(
     options: {
@@ -319,8 +340,10 @@ export class LocalProvider implements LLMProvider {
       maxTokens?: number;
       reasoningBudgetTokens?: number;
       thinkCaps?: ThinkCaps;
+      reasoningReplay?: LocalReasoningReplay;
     } = {},
   ) {
+    this.reasoningReplay = options.reasoningReplay ?? 'current-turn';
     this.reasoningBudgetTokens = options.reasoningBudgetTokens;
     this.thinkCaps = options.thinkCaps ?? DEFAULT_THINK_CAPS;
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
@@ -400,7 +423,7 @@ export class LocalProvider implements LLMProvider {
           ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
         },
         body: JSON.stringify({
-          messages: await toOpenAIMessages(request.systemPrompt, request.messages),
+          messages: await toOpenAIMessages(request.systemPrompt, request.messages, this.reasoningReplay),
           tools: request.tools.map((t) => ({
             type: 'function',
             function: { name: t.name, description: t.description, parameters: t.inputSchema },

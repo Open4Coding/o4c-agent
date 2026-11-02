@@ -11,7 +11,7 @@ import { parseWindowSetting, windowArgFor } from './ui/windowSetting.js';
 import { MODES, type Mode } from './ui/modePolicy.js';
 import { parseSessionView, type SessionView } from './ui/formatEntries.js';
 import { AnthropicProvider } from './providers/anthropic.js';
-import { LocalProvider, probeLocalServer, probeThinkCaps, type ServerProbe, type ServerStatus } from './providers/local.js';
+import { LocalProvider, probeLocalServer, probeThinkCaps, type LocalReasoningReplay, type ServerProbe, type ServerStatus } from './providers/local.js';
 import { MockProvider } from './providers/mock.js';
 import type { LLMProvider, Message } from './providers/types.js';
 import { defaultTools } from './tools/index.js';
@@ -694,6 +694,10 @@ program
         thinkCaps,
         connectTimeoutMs,
         idleTimeoutMs,
+        // Plan 0006 A7; config.json "localReasoningReplay" to override.
+        reasoningReplay: ['current-turn', 'none', 'all-as-text'].includes(String(resolvedConfig.localReasoningReplay))
+          ? (resolvedConfig.localReasoningReplay as LocalReasoningReplay)
+          : undefined,
       });
     } else if (opts.provider === 'anthropic') {
       try {

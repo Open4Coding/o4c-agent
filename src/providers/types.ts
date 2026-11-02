@@ -14,6 +14,14 @@ export interface Message {
   toolCalls?: ToolCall[];
   toolCallId?: string;
   images?: string[];
+  /**
+   * `role: 'assistant'` only: the model's reasoning for this message, apart from `content` (plan
+   * 0006 A7). It used to be merged into `content` as plain text, so the local server saw a reply
+   * that differed from what it generated (re-processing it every tool round) and every past turn's
+   * reasoning was re-sent forever as if it were the answer. Providers decide what to do with it:
+   * the local one sends it as `reasoning_content` for the current turn only.
+   */
+  reasoning?: string;
   /** `role: 'assistant'` only, and only when extended thinking was used for that turn - the raw
    * thinking text, kept *separate* from `content` (which merges think+response into one display
    * string, per `toWireMessages()`) specifically because Anthropic's replay requirement needs the

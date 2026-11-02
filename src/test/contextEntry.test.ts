@@ -103,16 +103,16 @@ test('splitThinkBlock: is case-insensitive on the tag itself', () => {
   assert.equal(result.response, 'answer');
 });
 
-test('toWireMessages: a think entry followed by a response entry join with a blank-line separator', () => {
+test('toWireMessages: a think entry becomes the message reasoning, never part of its content (plan 0006 A7)', () => {
   const messages = toWireMessages([
     userInputEntry('what is 2+2'),
     aiThinkEntry('2+2 is basic addition'),
     aiResponseEntry('4'),
   ]);
-  assert.deepEqual(messages[1], { role: 'assistant', content: '2+2 is basic addition\n\n4', toolCalls: undefined });
+  assert.deepEqual(messages[1], { role: 'assistant', content: '4', toolCalls: undefined, reasoning: '2+2 is basic addition' });
 });
 
-test('toWireMessages: a thinking signature propagates onto the wire Message, separately from the merged content', () => {
+test('toWireMessages: a thinking signature propagates onto the wire Message, separately from the content', () => {
   const messages = toWireMessages([
     userInputEntry('what is 2+2'),
     aiThinkEntry('2+2 is basic addition', 'sig-abc123'),
@@ -120,8 +120,9 @@ test('toWireMessages: a thinking signature propagates onto the wire Message, sep
   ]);
   assert.deepEqual(messages[1], {
     role: 'assistant',
-    content: '2+2 is basic addition\n\n4',
+    content: '4',
     toolCalls: undefined,
+    reasoning: '2+2 is basic addition',
     thinkingText: '2+2 is basic addition',
     thinkingSignature: 'sig-abc123',
   });
@@ -169,7 +170,8 @@ test('toWireMessages: a think/response cutoff pair hoists together, as one assis
   const hoisted = toWireMessages(entries, [think.id, resp.id]);
   const last = hoisted[hoisted.length - 1];
   assert.equal(last.role, 'assistant');
-  assert.equal(last.content, 'weighing the options\n\nso the answer is');
+  assert.equal(last.content, 'so the answer is');
+  assert.equal(last.reasoning, 'weighing the options');
 });
 
 test('toWireMessages: trailingEntryIds naming nothing present leaves the order untouched', () => {
