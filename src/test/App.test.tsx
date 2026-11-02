@@ -2174,11 +2174,11 @@ test('/set opens its family dropdown; choosing a setting prefills the input box 
     await tick(50);
     assert.ok((lastFrame() ?? '').includes('/set commands'), 'the inert first row keeps the list open');
 
-    // Rows below the first are alphabetical, so /set-sessionname is the eleventh: /set,
-    // -contextwindowtype, -global-contextwindowtype, -global-sessionsToSave, -global-sessionview,
-    // -global-think, -local-contextwindowtype, -local-sessionsToSave, -local-sessionview,
-    // -local-think, -sessionname.
-    for (let i = 0; i < 10; i++) {
+    // Rows below the first are alphabetical, so /set-sessionname is the twelfth: /set,
+    // -autoallowreadonly, -contextwindowtype, -global-contextwindowtype, -global-sessionsToSave,
+    // -global-sessionview, -global-think, -local-contextwindowtype, -local-sessionsToSave,
+    // -local-sessionview, -local-think, -sessionname.
+    for (let i = 0; i < 11; i++) {
       stdin.write(DOWN);
       await tick(50);
     }
@@ -3056,9 +3056,9 @@ test('choosing /set-sessionview from the dropdown opens its picklist straight aw
     await tick(150); // the palette unmounts and the dropdown's key handler takes over input
 
     // Row 0 is the inert /set itself and the rest are alphabetical, so /set-sessionview is the
-    // thirteenth row: -contextwindowtype, the four -global-*, the four -local-*, -sessionname,
-    // -sessionsToSave, then it.
-    for (let i = 0; i < 12; i++) {
+    // fourteenth row: -autoallowreadonly, -contextwindowtype, the four -global-*, the four -local-*,
+    // -sessionname, -sessionsToSave, then it.
+    for (let i = 0; i < 13; i++) {
       stdin.write(DOWN);
       await tick(100);
     }

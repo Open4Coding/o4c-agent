@@ -3,7 +3,8 @@ import { Box, Static, Text, useApp, useInput } from 'ink';
 import { InputBox } from './InputBox.js';
 import { SessionPicker } from './SessionPicker.js';
 import { ConfirmDialog, type ConfirmChoice } from './ConfirmDialog.js';
-import { matchesPattern, patternFor } from '../session/permissionRules.js';
+import { describeRules, evaluateRules, loadRules, matchesPattern, patternFor } from '../session/permissionRules.js';
+import { splitShellSegments } from '../tools/interactive.js';
 
 /** The tool-confirmation answer (C2). */
 interface ConfirmAnswer {
@@ -1249,9 +1250,16 @@ export function App({
   const toolPolicy = useCallback(
     async (tool: Tool, input: Record<string, unknown>): Promise<PolicyAnswer> => {
       const access = classifyToolAccess(turnModeRef.current ?? modeRef.current, tool, input, plansDirRef.current);
-      if (access === 'allow') return 'allow';
+      // A mode's own refusal is absolute (Plan mode stays read-only whatever the rules say).
       if (access === 'deny') return 'deny';
-      if (alwaysAllowRef.current.some((p) => matchesPattern(p, tool, input))) return 'allow';
+      // Permission rules (C3), read fresh so an edit to config.json applies at once: deny > ask >
+      // allow, and ahead of the mode's own allow, so a deny or ask rule holds in Auto mode too.
+      const ruled = evaluateRules(await loadRules((s) => configStore.readScope(s as ConfigScope)), tool, input, splitShellSegments);
+      if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
+      if (ruled?.decision !== 'ask') {
+        if (access === 'allow' || ruled?.decision === 'allow') return 'allow';
+        if (alwaysAllowRef.current.some((p) => matchesPattern(p, tool, input))) return 'allow';
+      }
       const pattern = patternFor(tool, input);
       // `tool.mcp` is undefined for every built-in; for a proxied tool it is what puts the
       // server, the egress and the server's own claims about the tool in front of the user
@@ -2222,6 +2230,30 @@ export function App({
               }
             }
           }
+        }
+      } else if (commandName(input) === '/view-permissions') {
+        // C3: the effective rules and where each came from. Empty by default.
+        pushBlock([userLine(input)]);
+        const rules = await loadRules((s) => configStore.readScope(s as ConfigScope));
+        pushBlock([
+          infoLine(
+            [
+              'Permission rules (deny beats ask beats allow; a shell command is checked per segment):',
+              ...describeRules(rules),
+              '',
+              'Add rules to config.json under "permissions": {"allow": [...], "ask": [...], "deny": [...]}, e.g. "run_shell(npm test*)" or "edit_file(src/**)".',
+              '"Yes, and always allow" in an approval dialog adds an allow rule for you. /set-autoallowreadonly on allows read-only shell commands.',
+            ].join('\n'),
+          ),
+        ]);
+      } else if (commandName(input) === '/set-autoallowreadonly') {
+        pushBlock([userLine(input)]);
+        const arg = input.trim().split(/\s+/)[1]?.toLowerCase();
+        if (arg !== 'on' && arg !== 'off') {
+          pushBlock([infoLine('Usage: /set-autoallowreadonly on|off - whether read-only shell commands (git status, ls, dir, cat ...) run without asking.')]);
+        } else {
+          await configStore.set('global', 'autoAllowReadOnly', arg === 'on').catch(() => undefined);
+          pushBlock([infoLine(arg === 'on' ? 'Read-only shell commands now run without asking (see /view-permissions).' : 'Read-only shell commands ask again, like any other command.')]);
         }
       } else if (commandName(input) === '/set-shell') {
         // B24: which shell run_shell uses. Saved to config; the next message's process picks it up

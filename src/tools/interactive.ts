@@ -61,6 +61,11 @@ function segments(command: string): Array<{ words: string[]; piped: boolean }> {
 
 const base = (word: string) => word.replace(/^["']|["']$/g, '').split(/[\\/]/).pop()!.replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
 
+/** The commands in a chained or piped command line, as text - for the permission rules (C3). */
+export function splitShellSegments(command: string): string[] {
+  return segments(command).map((s) => s.words.join(' '));
+}
+
 /** Why this command cannot run here, or undefined when it can. */
 export function interactiveReason(command: string): string | undefined {
   for (const { words, piped } of segments(command)) {

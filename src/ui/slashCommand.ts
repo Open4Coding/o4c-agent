@@ -299,6 +299,16 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose the shell run_shell uses: auto, cmd, pwsh (PowerShell 7), powershell (5.1), bash or sh - saved to config.',
   },
   {
+    name: '/view-permissions',
+    select: 'run',
+    description: 'Show the permission rules in force (allow / ask / deny) and which config scope each comes from - no LLM call.',
+  },
+  {
+    name: '/set-autoallowreadonly',
+    hidden: true,
+    description: 'Let read-only shell commands (git status, ls, dir, cat ...) run without asking. Usage: /set-autoallowreadonly on|off',
+  },
+  {
     name: '/undo',
     select: 'run',
     description: "Put the project's files back as they were before the last turn changed them (a shadow git copy in .o4c/checkpoints - your .git is untouched). The undone state is kept as a restore point.",

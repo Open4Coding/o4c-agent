@@ -92,7 +92,7 @@ export interface AgentEvent {
 export type StepLimitChoice = 'continue' | 'summarize' | 'stop';
 
 /** A tool-policy answer; a decline may carry the user's reason, which the model is told (plan 0006 C2). */
-export type PolicyAnswer = 'allow' | 'deny' | 'declined' | { verdict: 'declined'; reason: string };
+export type PolicyAnswer = 'allow' | 'deny' | 'declined' | { verdict: 'declined' | 'deny'; reason: string };
 
 export interface RunOptions {
   /**
@@ -1914,7 +1914,9 @@ export class AgentLoop {
               ? reason
                 ? `The user declined this ${call.name} call, so it was not executed, and said why: "${reason}". Take that into account before doing anything else.`
                 : `You declined this ${call.name} call, so it was not executed. The tool is available and you may ask for it again.`
-              : `Blocked by the current mode: ${call.name} was not executed.`;
+              : reason
+                ? `Blocked: ${reason}. ${call.name} was not executed. Do not try to get the same effect another way.`
+                : `Blocked by the current mode: ${call.name} was not executed.`;
         } else {
           // §5.7's tool-dispatch hook. Reached only on the approved path - every `deny`/`declined`
           // verdict is answered in the branch above - so a core component can intercept a call but

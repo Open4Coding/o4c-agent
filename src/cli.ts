@@ -29,6 +29,8 @@ import { currentShell, setShell, SHELL_CONFIG_KEY, shellPromptLine } from './too
 import { describeJob, killOwnedJobs, setJobsDir, unreportedFinished } from './tools/jobs.js';
 import { fileStateComponent, fileStatePath } from './session/fileState.js';
 import { checkpointComponent, ShadowGit, type CheckpointHooks } from './session/checkpoints.js';
+import { evaluateRules, loadRules } from './session/permissionRules.js';
+import { splitShellSegments } from './tools/interactive.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { UsageStore } from './session/usageStore.js';
@@ -1052,6 +1054,9 @@ program
       return;
     }
 
+    const loadedRules = await loadRules((s) => configStore.readScope(s as 'global' | 'local' | 'personal'));
+    const headlessRules = loadedRules.deny.length + loadedRules.ask.length > 0 ? loadedRules : undefined;
+
     // `--session`: a headless multi-turn session, one process per message - how a script drives a
     // long run (e.g. the C:\tmp.tmp4 test project) through every context window type, which only
     // differ in what carries across messages. Loaded before the run, saved after it whatever happens,
@@ -1079,6 +1084,15 @@ program
         maxIterations,
         // Nobody to ask in one-shot mode (B18): summarize, so a script gets an answer, not a throw.
         onStepLimit: async () => 'summarize',
+        // Permission rules apply headless too (C3): deny holds, and ask is a deny - nobody can answer.
+        toolPolicy: headlessRules
+          ? async (tool, input) => {
+              const ruled = evaluateRules(headlessRules, tool, input, splitShellSegments);
+              if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
+              if (ruled?.decision === 'ask') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} asks for approval, which a headless run cannot give` };
+              return 'allow';
+            }
+          : undefined,
         // One-shot is autonomous like Auto mode: ask once to verify edits nobody checked (B19).
         verifyOnStop: resolvedConfig.verifyOnStop !== false,
         // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which

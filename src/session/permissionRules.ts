@@ -43,3 +43,85 @@ export function matchesPattern(pattern: string, tool: Tool, input: Record<string
   if (typeof input.path !== 'string') return false;
   return globToRegExp(arg).test(projectPath(input.path, cwd));
 }
+
+// ------------------------------------------------------------------ rules (plan 0006 C3)
+
+export type RuleScope = 'global' | 'local' | 'personal' | 'built-in';
+
+/**
+ * Read-only shell commands allowed without asking - only when the user turns it on
+ * (`/set-autoallowreadonly on`, config `autoAllowReadOnly`); off by default (C3).
+ */
+export const READ_ONLY_SHELL: readonly string[] = [
+  'git status*', 'git diff*', 'git log*', 'git show*', 'git branch', 'git branch --list*',
+  'ls', 'ls *', 'dir', 'dir *', 'pwd', 'cd', 'echo *', 'cat *', 'type *', 'head *', 'tail *',
+  'wc *', 'which *', 'where *', 'node --version', 'npm --version', 'python --version',
+].map((p) => `run_shell(${p})`);
+export interface Rule {
+  pattern: string;
+  scope: RuleScope;
+}
+export interface PermissionRules {
+  allow: Rule[];
+  ask: Rule[];
+  deny: Rule[];
+}
+export interface RuleDecision {
+  decision: 'allow' | 'ask' | 'deny';
+  rule: Rule;
+}
+
+export const EMPTY_RULES: PermissionRules = { allow: [], ask: [], deny: [] };
+
+/**
+ * The rules from each scope's own config file, kept apart so `/view-permissions` can say where each
+ * came from. Lists add up across scopes - a project rule does not hide a global one.
+ */
+export async function loadRules(readScope: (scope: RuleScope) => Promise<Record<string, unknown>>): Promise<PermissionRules> {
+  const out: PermissionRules = { allow: [], ask: [], deny: [] };
+  for (const scope of ['global', 'local', 'personal'] as const) {
+    const p = (await readScope(scope)).permissions as Partial<Record<keyof PermissionRules, unknown>> | undefined;
+    for (const kind of ['allow', 'ask', 'deny'] as const) {
+      const list = p?.[kind];
+      if (Array.isArray(list)) for (const pattern of list) if (typeof pattern === 'string' && pattern.trim()) out[kind].push({ pattern: pattern.trim(), scope });
+    }
+  }
+  const merged = { ...(await readScope('global')), ...(await readScope('local')), ...(await readScope('personal')) };
+  if (merged.autoAllowReadOnly === true) for (const pattern of READ_ONLY_SHELL) out.allow.push({ pattern, scope: 'built-in' });
+  return out;
+}
+
+/**
+ * What the rules say about a call, or undefined when none applies. Deny beats ask beats allow. A
+ * shell command is judged per segment (split on && || ; | &): any denied or asked segment decides
+ * for the whole command, and allow needs every segment allowed - so `npm test && rm -rf ~` is not
+ * let through by `run_shell(npm test*)`.
+ */
+export function evaluateRules(rules: PermissionRules, tool: Tool, input: Record<string, unknown>, split: (command: string) => string[], cwd = process.cwd()): RuleDecision | undefined {
+  const calls =
+    tool.name === 'run_shell' && typeof input.command === 'string'
+      ? split(input.command).map((command) => ({ ...input, command }))
+      : [input];
+  const first = (list: Rule[], each: Record<string, unknown>) => list.find((r) => matchesPattern(r.pattern, tool, each, cwd));
+  for (const each of calls) {
+    const rule = first(rules.deny, each);
+    if (rule) return { decision: 'deny', rule };
+  }
+  for (const each of calls) {
+    const rule = first(rules.ask, each);
+    if (rule) return { decision: 'ask', rule };
+  }
+  const allowed = calls.map((each) => first(rules.allow, each));
+  if (calls.length > 0 && allowed.every(Boolean)) return { decision: 'allow', rule: allowed[0]! };
+  return undefined;
+}
+
+/** For /view-permissions. */
+export function describeRules(rules: PermissionRules): string[] {
+  const lines: string[] = [];
+  for (const kind of ['deny', 'ask', 'allow'] as const) {
+    lines.push(`${kind}:${rules[kind].length ? '' : ' (none)'}`);
+    for (const r of rules[kind]) lines.push(`  ${r.pattern.padEnd(40)} (${r.scope})`);
+  }
+  return lines;
+}
