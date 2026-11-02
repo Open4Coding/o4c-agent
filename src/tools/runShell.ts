@@ -1,5 +1,6 @@
 import type { Tool } from './types.js';
 import { runShellCommand } from './shellRunner.js';
+import { startJob } from './jobs.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 let defaultTimeoutMs = DEFAULT_TIMEOUT_MS;
@@ -44,11 +45,21 @@ export const runShellTool: Tool = {
     properties: {
       command: { type: 'string', description: 'The shell command to execute.' },
       timeout_ms: { type: 'number', description: 'Kill it after this many ms (default 60000; 0 = no limit, for long builds).' },
+      background: { type: 'boolean', description: 'Start it in the background (a server, a watcher) and return at once; read it later with job_output.' },
     },
     required: ['command'],
   },
   async execute(input, context) {
     const command = String(input.command ?? '');
+    if (input.background === true) {
+      // B22: detached, outlives the per-turn reload; see jobs.ts.
+      try {
+        const job = startJob(command);
+        return `Started background job ${job.id}: ${command}\nIt keeps running after this call. Read its output with job_output (id "${job.id}"); you will be told when it finishes.`;
+      } catch (err) {
+        return `Command failed: could not start it in the background: ${(err as Error).message}`;
+      }
+    }
     const timeoutMs = typeof input.timeout_ms === 'number' && Number.isFinite(input.timeout_ms) ? input.timeout_ms : defaultTimeoutMs;
     // spawn + whole-tree kill on Esc or timeout (B20) - see shellRunner.ts.
     const r = await runShellCommand(command, { timeoutMs, maxBufferBytes: MAX_BUFFER_BYTES, signal: context?.signal });

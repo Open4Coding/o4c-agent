@@ -5,7 +5,8 @@ import { editFileTool } from './editFile.js';
 import { runShellTool } from './runShell.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
+import { jobOutputTool } from './jobs.js';
 
-export const defaultTools: Tool[] = [readFileTool, writeFileTool, editFileTool, runShellTool, globTool, grepTool];
+export const defaultTools: Tool[] = [readFileTool, writeFileTool, editFileTool, runShellTool, globTool, grepTool, jobOutputTool];
 
 export type { Tool } from './types.js';

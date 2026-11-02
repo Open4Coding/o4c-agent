@@ -20,8 +20,10 @@ import { estimateTextTokens } from '../agent/contextEntry.js';
  * Tools re-pinned 2026-11-02 for B7, 857 -> 961: edit_file's `edits` list (several changes in one
  * call, all or nothing). One multi-edit call saves more than that against separate calls, each
  * re-reading its result.
+ * Tools re-pinned 2026-11-02 for B21/B22, 961 -> 1122: run_shell timeout_ms and background, and the
+ * job_output tool - without them a dev server or a build longer than a minute cannot be run at all.
  */
-const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 961 };
+const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 1122 };
 const TOLERANCE = 0.05;
 const ALL_TOOLS = [...defaultTools.map((t) => t.name), 'code_graph'];
 

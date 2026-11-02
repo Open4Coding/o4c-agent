@@ -25,6 +25,7 @@ import { defaultProvider } from './session/providerDefault.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
 import { setShellTimeoutDefault } from './tools/runShell.js';
+import { describeJob, killOwnedJobs, setJobsDir, unreportedFinished } from './tools/jobs.js';
 import { fileStateComponent, fileStatePath } from './session/fileState.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
@@ -448,8 +449,7 @@ program
       process.stdin.isTTY &&
       process.stdout.isTTY
     ) {
-      process.exit(
-        runSupervisor({
+      const supervisorCode = runSupervisor({
           nodePath: process.execPath,
           script: process.argv[1],
           initialArgs: process.argv.slice(2),
@@ -460,8 +460,12 @@ program
           // it was ever spawned, which is exactly the case that was undiagnosable before.
           onSpawn: (args) => recordLifecycle(lifecycleDir, 'spawn', { args }),
           spawn: (command, args, options) => spawnSync(command, args, options),
-        }),
-      );
+        });
+      // The real quit (B22): background jobs the workers started belong to this process.
+      const supervisedRoot = findProjectRootSync(process.cwd());
+      setJobsDir(supervisedRoot ? join(supervisedRoot, '.o4c', 'jobs') : join(tmpdir(), 'o4c-jobs'));
+      killOwnedJobs(process.pid);
+      process.exit(supervisorCode);
     }
     const initialMode: Mode | undefined = MODES.some((m) => m.mode === opts.mode) ? (opts.mode as Mode) : undefined;
 
@@ -745,6 +749,18 @@ program
     if (provider instanceof LocalProvider) provider.repetitionGuard = resolvedConfig.repetitionAbort !== false;
     setSyntaxCheckMode(resolvedConfig.syntaxCheck);
     setShellTimeoutDefault(resolvedConfig.shellTimeoutMs);
+    // Background jobs (B22): records under .o4c/jobs; this process kills the ones it owns on exit -
+    // a reloading worker owns none (the supervisor does), so a reload never stops a dev server.
+    setJobsDir(trusted && projectRoot ? join(projectRoot, '.o4c', 'jobs') : join(tmpdir(), 'o4c-jobs'));
+    process.on('exit', () => killOwnedJobs(process.pid));
+    loop.registerCore({
+      name: 'jobs',
+      turnNote: () => {
+        const done = unreportedFinished();
+        if (done.length === 0) return undefined;
+        return `[o4c] Background job${done.length === 1 ? '' : 's'} finished: ${done.map((j) => describeJob(j).replace(/\s+/g, ' ')).join('; ')}. Read the output with job_output.`;
+      },
+    });
     // This process's session id, decided now rather than at the first save - every session switch
     // (/clear, /resume, the per-turn reload) is a fresh process, so one process is one session.
     // The history store files entries under it from the first one; App saves under it too, so the

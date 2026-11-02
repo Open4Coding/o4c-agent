@@ -127,6 +127,7 @@ import type { Tool } from '../tools/types.js';
 import type { Message } from '../providers/types.js';
 import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
+import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -2130,6 +2131,17 @@ export function App({
           pushBlock([infoLine(detailLines.join('\n'))]);
           void runLogger.log({ type: 'system', sub_type: 'info', command: `/help-${rest}` });
         }
+      } else if (commandName(input) === '/ps') {
+        // Local: the job records under .o4c/jobs (B22).
+        pushBlock([userLine(input)]);
+        const jobs = listJobs();
+        pushBlock([infoLine(jobs.length ? ['Background jobs:', ...jobs.map((j) => `  ${describeJob(j)}`)].join('\n') : 'No background jobs.')]);
+      } else if (commandName(input) === '/kill') {
+        pushBlock([userLine(input)]);
+        const id = input.trim().split(/\s+/)[1] ?? '';
+        const job = id ? getJob(id) : undefined;
+        if (!job) pushBlock([infoLine(id ? `No background job "${id}" - see /ps.` : 'Usage: /kill <id> - see /ps for the ids.')]);
+        else pushBlock([infoLine(killJob(job) ? `Stopped ${job.id}: ${job.command}` : `${job.id} is not running.`)]);
       } else if (commandName(input) === '/mcp') {
         pushBlock([userLine(input)]);
         // `mcpStatusReport` is undefined only for a session with no MCP layer at all (tests, and

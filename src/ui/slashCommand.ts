@@ -292,6 +292,15 @@ export const COMMANDS: CommandInfo[] = [
   // action of its own - listing every configured server and what state it is in - and that
   // listing is the whole answer when no server offers prompts, which is the default.
   {
+    name: '/ps',
+    select: 'run',
+    description: 'List background jobs started with run_shell background:true - id, state, command - no LLM call.',
+  },
+  {
+    name: '/kill',
+    description: 'Stop a background job and everything it started. Usage: /kill <id> (see /ps).',
+  },
+  {
     name: '/mcp',
     select: 'run',
     description:
