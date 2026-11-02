@@ -75,6 +75,7 @@ async function askForQueries(options: CuratedOptions, request: string): Promise<
     tools: [],
     maxTokens: 200,
     thinkLevel: 'nothink',
+    purpose: 'side',
     // One to three short lines and nothing else (plan 0006 A12).
     grammar: QUERY_GRAMMAR,
   });
@@ -108,6 +109,7 @@ async function askForPicks(options: CuratedOptions, request: string, candidates:
     tools: [],
     maxTokens: 100,
     thinkLevel: 'nothink',
+    purpose: 'side',
     // "#n, #n" or "none" - nothing a reply can ramble in (plan 0006 A12).
     grammar: PICK_GRAMMAR,
   });

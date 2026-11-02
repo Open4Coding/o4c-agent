@@ -78,6 +78,14 @@ export interface CompletionRequest {
    * others ignore them, and the callers keep their tolerant parsers for that case.
    */
   responseSchema?: Record<string, unknown>;
+  /**
+   * `'side'` for a call that is not the conversation itself - curated's two calls, the standalone
+   * compaction fallback (plan 0006 A19). On a server with two or more slots the local provider pins
+   * the conversation to slot 0 and side calls to slot 1, so a side call neither waits for the
+   * conversation's state to be saved nor makes the next request restore it (measured at 93K tokens:
+   * side call 6.4 -> 0.6 s, next request 4.0 -> 1.2 s). Default `'main'`.
+   */
+  purpose?: 'main' | 'side';
   grammar?: string;
   /** Lets the caller cancel an in-flight request (e.g. the user pressed Escape while the
    * "Thinking..." spinner was showing). Providers that make a real network call should pass it

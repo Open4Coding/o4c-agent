@@ -266,3 +266,14 @@ test('fetchLocalContextWindow returns undefined on a network error, never throws
     globalThis.fetch = original;
   }
 });
+
+test('slot pinning (plan 0006 A19): main to slot 0, side calls to slot 1, only on a server with 2+ slots', async () => {
+  const two = new LocalProvider({ slots: 2 });
+  await withMockedFetch(() => okResponse(), () => two.complete(baseRequest));
+  assert.equal(capturedBody().id_slot, 0);
+  await withMockedFetch(() => okResponse(), () => two.complete({ ...baseRequest, purpose: 'side' }));
+  assert.equal(capturedBody().id_slot, 1);
+  const one = new LocalProvider({});
+  await withMockedFetch(() => okResponse(), () => one.complete({ ...baseRequest, purpose: 'side' }));
+  assert.equal('id_slot' in capturedBody(), false);
+});

@@ -622,6 +622,7 @@ program
     // another model" box, waits however long a small laptop-sized server needs, and re-reads the context size once
     // it answers - startup never blocks on it.
     let autoContextWindow: number | undefined;
+    let probedSlots: number | undefined;
     // Undefined for a non-local provider (Anthropic's five efforts are already known) and until
     // the probe answers; `thinkLevel.ts` falls back to sane defaults in both cases.
     let thinkCaps: ThinkCaps | undefined;
@@ -631,6 +632,7 @@ program
       serverStatus = probe.status;
       if (probe.model) opts = { ...opts, model: probe.model };
       autoContextWindow = probe.contextWindow;
+      probedSlots = probe.totalSlots;
       // Which reasoning controls this model honours, for `/think`. Cached per model id in
       // config, so the probe runs once per model rather than at every launch - David's explicit
       // requirement. The probe itself is ~0.01s (the chat template rejects the sentinel effort
@@ -694,6 +696,7 @@ program
         idleTimeoutMs,
         modelId: opts.model,
         sampling: resolvedConfig.localSampling,
+        slots: probedSlots,
         // Plan 0006 A7; config.json "localReasoningReplay" to override.
         reasoningReplay: ['all', 'current-turn', 'none', 'all-as-text'].includes(String(resolvedConfig.localReasoningReplay))
           ? (resolvedConfig.localReasoningReplay as LocalReasoningReplay)
@@ -957,6 +960,7 @@ program
               status: serverStatus,
               probe: () => probeLocalServer(opts.baseUrl, localApiKey),
               onRecovered: (probe) => {
+                localProvider?.setSlots(probe.totalSlots);
                 // The capability probe never ran if the server was down at launch, so the levels
                 // were using assumed defaults. Re-probe here rather than in App.tsx: this is where
                 // localApiKey is in scope, and a key-protected server would simply 401 an

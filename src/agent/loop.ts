@@ -1118,6 +1118,7 @@ export class AgentLoop {
         ],
         tools: [],
         responseSchema: SUMMARY_SCHEMA,
+        purpose: 'side',
         signal,
       };
       try {

@@ -160,6 +160,8 @@ export interface ServerProbe {
   model?: string;
   /** The server's real context size (`/props` n_ctx - per slot, which is what one conversation gets). */
   contextWindow?: number;
+  /** `/props` `total_slots` - how many requests the server serves at once (plan 0006 A19). */
+  totalSlots?: number;
 }
 
 /**
@@ -180,16 +182,18 @@ export async function probeLocalServer(baseUrl: string, apiKey?: string): Promis
   }
   if (response.status === 503) return { status: 'loading' };
   let contextWindow: number | undefined;
+  let totalSlots: number | undefined;
   if (response.ok) {
     try {
-      const data = (await response.json()) as { default_generation_settings?: { n_ctx?: number } };
+      const data = (await response.json()) as { default_generation_settings?: { n_ctx?: number }; total_slots?: number };
       const nCtx = data.default_generation_settings?.n_ctx;
       if (typeof nCtx === 'number' && nCtx > 0) contextWindow = nCtx;
+      if (typeof data.total_slots === 'number' && data.total_slots > 0) totalSlots = data.total_slots;
     } catch {
       // an unparseable /props just means no context size; the server itself is up
     }
   }
-  return { status: 'up', model: await fetchLocalModelId(baseUrl, apiKey), contextWindow };
+  return { status: 'up', model: await fetchLocalModelId(baseUrl, apiKey), contextWindow, ...(totalSlots ? { totalSlots } : {}) };
 }
 
 /** True for the error fetch() raises when it could not reach the server at all (connection refused, host or
@@ -353,8 +357,11 @@ export class LocalProvider implements LLMProvider {
       modelId?: string;
       /** config.json `localSampling`, overriding the known profiles. */
       sampling?: unknown;
+      /** Server slots from the startup probe (`total_slots`); 2+ enables slot pinning (A19). */
+      slots?: number;
     } = {},
   ) {
+    this.setSlots(options.slots);
     this.modelId = options.modelId;
     this.samplingConfig = options.sampling;
     this.reasoningReplay = options.reasoningReplay ?? 'all';
@@ -422,6 +429,14 @@ export class LocalProvider implements LLMProvider {
     } catch {
       return undefined;
     }
+  }
+
+  /** The server's slot count (`/props` `total_slots`, from the startup probe); 1 = no pinning. */
+  private slots = 1;
+
+  /** Set from the startup probe, and again when a server that was down comes back (A19). */
+  setSlots(count: number | undefined): void {
+    this.slots = count && count > 0 ? count : 1;
   }
 
   /** The id of the completion now streaming, for endReasoning(); set from its first chunk. */
@@ -551,6 +566,7 @@ export class LocalProvider implements LLMProvider {
           ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
           ...(request.responseSchema ? { response_format: { type: 'json_schema', json_schema: { schema: request.responseSchema } } } : {}),
           ...(request.grammar ? { grammar: request.grammar } : {}),
+          ...(this.slots >= 2 ? { id_slot: request.purpose === 'side' ? 1 : 0 } : {}),
           ...(request.onPrefillProgress ? { return_progress: true } : {}),
           // Lets endReasoning() stop thinking mid-stream (A17); a sampler setting, not part of the
           // rendered prompt, so the cache is unaffected.
