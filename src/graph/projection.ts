@@ -52,6 +52,9 @@ const MAX_CALL_FILES_SHOWN = 6;
 const MAX_LINES_PER_FILE = 4;
 /** Definitions listed in a file outline. A 60-definition file needs a count, not a dump. */
 const MAX_OUTLINE_DEFINITIONS = 14;
+/** Definitions listed in a skeleton (B12): one line each, so more fit than in the one-line outline. */
+const MAX_SKELETON_DEFINITIONS = 60;
+const MAX_SKELETON_DOC = 100;
 
 /**
  * Per-file index state as a projection can report it.
@@ -151,7 +154,7 @@ export function renderFileProjection(
   store: GraphStore,
   repoRelativePath: string,
   freshness: ProjectionFreshness,
-  options: { readonly indexStatus?: 'fresh' | 'incomplete' } = {},
+  options: { readonly indexStatus?: 'fresh' | 'incomplete'; readonly skeleton?: boolean } = {},
 ): string | undefined {
   if (!languageForPath(repoRelativePath)) return undefined;
 
@@ -173,7 +176,10 @@ export function renderFileProjection(
 
   const lines = [header];
   if (definitions.length > 0) {
-    lines.push(`  ${describeOutline(definitions)}`);
+    // The skeleton only when the model asked for the file (code_graph path); a read_file
+    // annotation already sits next to the whole file, where one line is all that is worth adding.
+    if (options.skeleton) lines.push(...describeSkeleton(definitions));
+    else lines.push(`  ${describeOutline(definitions)}`);
     const dependents = dependentFileCount(store, definitions, repoRelativePath);
     if (dependents > 0) {
       lines.push(`  referenced from ${dependents} other ${dependents === 1 ? 'file' : 'files'}`);
@@ -221,6 +227,27 @@ function describeOutline(definitions: readonly DefinitionRow[]): string {
     .map((d) => `${d.line} ${d.name} (${d.kind})`);
   const hidden = definitions.length - shown.length;
   return shown.join(' · ') + (hidden > 0 ? ` · +${hidden} more` : '');
+}
+
+/**
+ * A file's skeleton (plan 0006 B12): one line per definition with its line span, signature and the
+ * first sentence of its doc comment - what the file offers, without reading its bodies.
+ */
+function describeSkeleton(definitions: readonly DefinitionRow[]): string[] {
+  const shown = definitions.slice(0, MAX_SKELETON_DEFINITIONS).map((d) => {
+    const span = d.endLine > d.line ? `${d.line}-${d.endLine}` : `${d.line}`;
+    const what = d.signature || `${d.kind} ${d.name}`;
+    const doc = d.doc ? ` - ${firstSentence(d.doc)}` : '';
+    return `  ${span.padEnd(9)} ${what}${doc}`;
+  });
+  const hidden = definitions.length - shown.length;
+  return hidden > 0 ? [...shown, `  +${hidden} more definitions`] : shown;
+}
+
+function firstSentence(text: string): string {
+  const cut = text.search(/[.!?](\s|$)/);
+  const sentence = cut >= 0 ? text.slice(0, cut + 1) : text;
+  return sentence.length > MAX_SKELETON_DOC ? `${sentence.slice(0, MAX_SKELETON_DOC - 3)}...` : sentence;
 }
 
 /**

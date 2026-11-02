@@ -35,6 +35,7 @@ import { join } from 'node:path';
 
 import type { CoreComponent, ToolCallContext } from '../agent/coreSeam.js';
 import { estimateTextTokens } from '../agent/contextEntry.js';
+import { resolveName } from './resolve.js';
 import { fitToBudget, rankDefinitions } from './ranker.js';
 import type { GraphStore } from './graphStore.js';
 import { indexSource, repoRelative, type IndexRunResult } from './indexer.js';
@@ -99,7 +100,12 @@ export interface CodeGraphStatus {
 export interface CodeGraphLookup {
   describeName(name: string, fromPath?: string): string;
   describeFile(path: string): Promise<string>;
+  /** The definition's own lines, read fresh from disk (plan 0006 B12). */
+  describeSource(name: string, fromPath?: string): Promise<string>;
 }
+
+/** Lines of one definition shown by `code_graph` with `source`, before it points at read_file. */
+const MAX_SOURCE_LINES = 150;
 
 export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   readonly name = CODE_GRAPH_COMPONENT_NAME;
@@ -364,6 +370,36 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   }
 
   /**
+   * The source of a definition, for `code_graph` with `source: true` - reading a function by name
+   * instead of reading its whole file (plan 0006 B12). Only when the name resolves to one
+   * definition; the lines come from disk now, and a line that no longer holds the name means the
+   * file moved under the index, which is said rather than guessed around.
+   */
+  async describeSource(name: string, fromPath?: string): Promise<string> {
+    const resolution = resolveName(this.store, name, fromPath, { indexStatus: this.indexStatus() });
+    const def = resolution.definitions.length === 1 || resolution.verdict === 'ok' ? resolution.definitions[0] : undefined;
+    if (!def) {
+      return resolution.definitions.length > 1
+        ? `  (no source shown: ${resolution.definitions.length} definitions - pass "from", or read one with read_file)`
+        : '  (no source shown: no definition found)';
+    }
+    let text: string;
+    try {
+      text = await readFile(join(this.root, def.path), 'utf-8');
+    } catch {
+      return `  (no source shown: ${def.path} could not be read)`;
+    }
+    const lines = text.split('\n');
+    if (!(lines[def.line - 1] ?? '').includes(name)) {
+      return `  (no source shown: ${def.path} changed since it was indexed - read it with read_file)`;
+    }
+    const end = Math.min(def.endLine, def.line - 1 + MAX_SOURCE_LINES);
+    const body = lines.slice(def.line - 1, end).map((l, i) => `${String(def.line + i).padStart(5)}  ${l.replace(/\r$/, '')}`);
+    const more = def.endLine > end ? `\n  (+${def.endLine - end} more lines: read_file ${def.path} offset ${end + 1})` : '';
+    return `${def.path}:${def.line}-${def.endLine}\n${body.join('\n')}${more}`;
+  }
+
+  /**
    * The file outline, for a path the model named.
    *
    * Reads the file, unlike the `read_file` annotation, because here there are no bytes in hand -
@@ -392,6 +428,7 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
 
     const projection = renderFileProjection(this.store, rel, freshness, {
       indexStatus: this.indexStatus(),
+      skeleton: true,
     });
     return (
       projection ??

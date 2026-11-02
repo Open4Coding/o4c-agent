@@ -25,8 +25,9 @@ export function createCodeGraphTool(lookup: CodeGraphLookup): Tool {
     description:
       'Ask the code index about a symbol or a file. With "name": where that name is defined, ' +
       'what kind of thing it is, and every call site, with a verdict saying how much the answer ' +
-      'is worth (ok / low_confidence / absent / degraded). With "path": what that file defines ' +
-      'and how many other files reference it. Resolution is by name, not by type, so overloads ' +
+      'is worth (ok / low_confidence / absent / degraded); add "source": true to get the definition\'s code. ' +
+      'With "path": the file\'s skeleton - every definition with its lines, signature and doc - and how many other files reference it. ' +
+      'Resolution is by name, not by type, so overloads ' +
       'and interface dispatch are not followed, and only languages with a bundled grammar are ' +
       'covered - an empty answer is reported as such, never as silence. An "ok" answer already ' +
       'lists the call sites grouped by file: "+N" after line numbers means N more lines in that ' +
@@ -42,6 +43,10 @@ export function createCodeGraphTool(lookup: CodeGraphLookup): Tool {
         path: {
           type: 'string',
           description: 'A file to outline instead, relative to the project root.',
+        },
+        source: {
+          type: 'boolean',
+          description: 'With "name": also return the definition\'s source lines (read by symbol instead of reading the whole file).',
         },
         from: {
           type: 'string',
@@ -62,7 +67,8 @@ export function createCodeGraphTool(lookup: CodeGraphLookup): Tool {
       if (name) {
         const from = typeof input.from === 'string' && input.from.trim() ? input.from.trim() : undefined;
         const answer = lookup.describeName(name, from);
-        return path ? `${answer}\n  (answered "name"; call again with only "path" for the file outline)` : answer;
+        const source = input.source === true ? `\n${await lookup.describeSource(name, from)}` : '';
+        return path ? `${answer}${source}\n  (answered "name"; call again with only "path" for the file outline)` : `${answer}${source}`;
       }
       if (path) return await lookup.describeFile(path);
 
