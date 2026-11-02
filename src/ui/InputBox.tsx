@@ -161,6 +161,8 @@ export interface InputBoxProps {
    * stay within their own cap and still push the frame past the viewport together. */
   onExpandChange?: (expanded: boolean) => void;
   onSubmit: (value: string) => void;
+  /** Ctrl+Q (plan 0006 C6): hand the text over to be queued for after the current turn. */
+  onQueue?: (value: string) => void;
   /** Fires on a bare Escape press (never on Alt/Ctrl/Shift+Escape combos - Ink only reports
    * plain Escape as `key.escape` regardless of modifiers, so this fires for all of them alike).
    * Used to cancel an in-flight turn while the "Thinking..." spinner is up. Escape is always
@@ -228,6 +230,7 @@ export function InputBox({
   prefill,
   onExpandChange,
   onSubmit,
+  onQueue,
   onEscape,
   initialHistory,
   historyAppend,
@@ -616,6 +619,20 @@ export function InputBox({
       // convention), distinct from Home/End's per-row behavior above - not asked for
       // explicitly, but a natural, useful complement (same relationship as an editor's
       // Home vs. Ctrl+Home).
+      if (key.ctrl && input === 'q') {
+        if (onQueue && value.trim()) {
+          const queued = expandPastes(value, pasteStore);
+          pasteStore.clear();
+          historyRef.current.push(queued);
+          onHistoryChange?.(historyRef.current);
+          historyIndexRef.current = -1;
+          draftRef.current = '';
+          edit(() => ({ value: '', cursor: 0 }));
+          setExpanded(false);
+          onQueue(queued);
+        }
+        return;
+      }
       if (key.ctrl && input === 'a') {
         edit((b) => ({ ...b, cursor: 0 }));
         return;

@@ -417,7 +417,7 @@ function StatusBar({
       {/* The key hints sit directly after the mode they qualify rather than on a line of their
           own at the foot of the footer, and the model name moved down to the dir line: it
           changes once a session, where everything left on this line moves constantly. */}
-      <Text color={theme.border}> Esc stop · type to queue</Text>
+      <Text color={theme.border}> Esc stop · Enter steers · Ctrl+Q queues</Text>
       <Text color={theme.border}> | </Text>
       <Text color={theme.accent}>
         {formatTokenCount(tokens)}
@@ -806,6 +806,9 @@ export function App({
   // since it's read/written from inside the async turn-processing function itself,
   // not something that drives render on its own - queuedPreview mirrors it for display.
   const queuedInputsRef = useRef<string[]>([]);
+  // Messages typed while a turn runs, for the model's next step (C6). Plain Enter steers; Ctrl+Q
+  // queues for after the turn; anything the turn did not pick up joins the queue at its end.
+  const steeringRef = useRef<string[]>([]);
 
   // undefined = no session persisted yet (fresh start, or just after /clear). Set once the first
   // turn autosaves successfully, or immediately on mount by a /resume restart handoff; reused on
@@ -2234,6 +2237,30 @@ export function App({
             }
           }
         }
+      } else if (commandName(input) === '/queue') {
+        // C6: what waits to run after the current turn - pick one to edit (back into the input box)
+        // or drop.
+        pushBlock([userLine(input)]);
+        const items = queuedInputsRef.current;
+        if (items.length === 0) {
+          pushBlock([infoLine('Nothing is queued.')]);
+        } else {
+          const picked = await pickChoice('Queued messages (↑/↓, Enter to choose, Esc to cancel):', items.map((text, i) => ({ key: String(i), label: `${i + 1}. ${text.length > 120 ? `${text.slice(0, 120)}...` : text}` })));
+          const index = picked === undefined ? -1 : Number(picked);
+          const what = index >= 0 ? await pickChoice<'edit' | 'drop'>('Edit or drop it?', [{ key: 'edit', label: 'Edit - move it back into the input box' }, { key: 'drop', label: 'Drop it' }]) : undefined;
+          if (index < 0 || !what || index >= queuedInputsRef.current.length) {
+            pushBlock([infoLine('Queue unchanged.')]);
+          } else {
+            const [text] = queuedInputsRef.current.splice(index, 1);
+            setQueuedPreview([...queuedInputsRef.current]);
+            if (what === 'edit') {
+              setPrefill({ token: nextPrefillToken++, text: text! });
+              pushBlock([infoLine('Moved back into the input box - edit it and press Enter (or Ctrl+Q to queue it again).')]);
+            } else {
+              pushBlock([infoLine(`Dropped: ${text}`)]);
+            }
+          }
+        }
       } else if (commandName(input) === '/view-permissions') {
         // C3: the effective rules and where each came from. Empty by default.
         pushBlock([userLine(input)]);
@@ -2421,6 +2448,7 @@ export function App({
                 { key: 'summarize', label: 'Summarize - one last answer, no tools: what is done, what is left, what to do next.' },
                 { key: 'stop', label: 'Stop - end the turn now' },
               ])) ?? 'stop',
+            takeSteering: () => steeringRef.current.splice(0),
             // Auto mode only: nobody approves each step, so ask once to verify unchecked edits (B19).
             verifyOnStop: mode === 'auto' && (await configStore.get('verifyOnStop')) !== false,
             modeInstruction: modeSystemPrompt(planCommand ? 'plan' : mode, plansDir),
@@ -2786,6 +2814,11 @@ export function App({
         }
       }
 
+      // Steering the turn never reached (it ended first) runs next, ahead of the queue (C6).
+      if (steeringRef.current.length > 0) {
+        queuedInputsRef.current.unshift(...steeringRef.current.splice(0));
+        setQueuedPreview([...queuedInputsRef.current]);
+      }
       const next = queuedInputsRef.current.shift();
       if (next !== undefined) {
         setQueuedPreview([...queuedInputsRef.current]);
@@ -3114,15 +3147,37 @@ export function App({
       }
 
       if (isProcessing) {
-        queuedInputsRef.current.push(input);
-        setQueuedPreview([...queuedInputsRef.current]);
+        // A command waits for the turn to end; a message steers the turn now (C6).
+        if (input.startsWith('/')) {
+          queuedInputsRef.current.push(input);
+          setQueuedPreview([...queuedInputsRef.current]);
+        } else {
+          steeringRef.current.push(input);
+          pushBlock([infoLine(`↪ ${input.length > 100 ? `${input.slice(0, 100)}...` : input}  (goes to the model at its next step; Ctrl+Q queues for after the turn instead)`)]);
+        }
         return;
       }
 
       setIsProcessing(true);
       void processTurn(input);
     },
-    [isProcessing, processTurn, exit, restart, openResumePicker],
+    [isProcessing, processTurn, exit, restart, openResumePicker, pushBlock],
+  );
+
+  // Ctrl+Q (C6): queue a message to run as its own turn after the current one, instead of steering.
+  const handleQueue = useCallback(
+    (value: string) => {
+      const text = value.trim();
+      if (!text) return;
+      if (!isProcessing) {
+        setIsProcessing(true);
+        void processTurn(text);
+        return;
+      }
+      queuedInputsRef.current.push(text);
+      setQueuedPreview([...queuedInputsRef.current]);
+    },
+    [isProcessing, processTurn],
   );
 
   // A command run straight from the palette or a family dropdown bypasses InputBox's own Enter
@@ -3286,6 +3341,7 @@ export function App({
       )}
       <InputBox
         disabled={isProcessing}
+        onQueue={handleQueue}
         active={!confirmDialog && !stopConfirm && !clearConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker && !choicePicker}
         suppressNav={paletteOpen || familyOpen}
         onChange={handleInputChange}

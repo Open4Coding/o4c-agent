@@ -593,7 +593,7 @@ test('the footer is three lines, in order, with the model and dir line last', as
     const status = frameLines.findIndex((l) => l.includes('/mode or Tab'));
     assert.ok(status >= 0, 'no status line in the frame');
     // The key hints share the status line now instead of occupying a fourth line below.
-    assert.match(frameLines[status], /Esc stop · type to queue/, `hints belong on the status line: ${frameLines[status]}`);
+    assert.match(frameLines[status], /Esc stop · Enter steers · Ctrl\+Q queues/, `hints belong on the status line: ${frameLines[status]}`);
     // The two settings lead line 2, in that order, with the token totals after them - they are not
     // on line 1, which was running to ~126 columns with them on it.
     const settings = frameLines.findIndex((l) => /^view: (compact|full) \| Think: \w+ \| [ts]-tks: /.test(l));

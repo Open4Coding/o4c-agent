@@ -299,6 +299,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose the shell run_shell uses: auto, cmd, pwsh (PowerShell 7), powershell (5.1), bash or sh - saved to config.',
   },
   {
+    name: '/queue',
+    select: 'run',
+    description: 'Messages waiting to run after the current turn (Ctrl+Q adds one): edit one back into the input box, or drop it.',
+  },
+  {
     name: '/view-permissions',
     select: 'run',
     description: 'Show the permission rules in force (allow / ask / deny) and which config scope each comes from - no LLM call.',

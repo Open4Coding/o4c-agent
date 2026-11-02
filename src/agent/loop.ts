@@ -91,6 +91,9 @@ export interface AgentEvent {
 /** What to do when a turn reaches its step limit (plan 0006 B18). */
 export type StepLimitChoice = 'continue' | 'summarize' | 'stop';
 
+/** Tag on a user message injected mid-turn (C6). */
+export const STEER_TAG = 'steer';
+
 /** A tool-policy answer; a decline may carry the user's reason, which the model is told (plan 0006 C2). */
 export type PolicyAnswer = 'allow' | 'deny' | 'declined' | { verdict: 'declined' | 'deny'; reason: string };
 
@@ -107,6 +110,11 @@ export interface RunOptions {
    * is watching each step.
    */
   verifyOnStop?: boolean;
+  /**
+   * Messages the user typed while this turn runs (plan 0006 C6), taken before each model step after
+   * the first and given to the model as a user message - steering, not a new turn.
+   */
+  takeSteering?: () => string[];
   /** Caps how many provider round-trips a single `run()` call can make before giving up with
    * `MaxIterationsError`. Undefined (unset) falls back to 25. 0 or negative means "no cap at all"
    * - the same "0/negative disables it" convention `LocalProvider`'s connect/idle timeouts already
@@ -1535,6 +1543,14 @@ export class AgentLoop {
           );
         } else {
           break;
+        }
+      }
+      // Steering (C6): what the user typed since the last step goes in before the next request.
+      if (i > 0) {
+        for (const text of options.takeSteering?.() ?? []) {
+          if (!text.trim()) continue;
+          this.appendEntry({ ...userInputEntry(`[Typed by the user while you were working:] ${text}`), tags: [STEER_TAG] }, onEntry);
+          onEvent({ type: 'info', text: `Steering given to the model: ${text.slice(0, 80)}` });
         }
       }
       checkAborted();
