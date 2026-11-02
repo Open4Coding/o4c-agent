@@ -29,6 +29,7 @@
  * `toolHook.ts` drops a projection entirely when it has nothing to say.
  */
 
+import { fuzzyCandidates } from './fuzzy.js';
 import type { DefinitionRow, FileFreshness, GraphStore, ReferenceRow } from './graphStore.js';
 import { isCallable, resolveName, type ResolutionVerdict, type ResolveOptions } from './resolve.js';
 import { isAssertedCall } from './edgeKind.js';
@@ -136,6 +137,13 @@ export function nameProjection(
       }
       lines.push(`  ${describeCallSites(callSites)}`);
     }
+  }
+
+  // Not there: the closest real names (B14). Only for `absent` - the grep annotation drops that
+  // verdict anyway, so this costs nothing where the graph is volunteering rather than asked.
+  if (resolution.verdict === 'absent') {
+    const close = fuzzyCandidates(store, name);
+    if (close.length > 0) lines.push(`  closest names: ${close.map((d) => `${d.name} (${d.kind}) ${d.path}:${d.line}`).join(' · ')}`);
   }
 
   return { verdict: resolution.verdict, text: lines.join('\n') };
