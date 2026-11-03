@@ -40,6 +40,7 @@ import { setRecentTasksSource } from './session/reflect.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { globalUsageFile, UsageStore } from './session/usageStore.js';
+import { latestSession, startupLine } from './session/sessionExtras.js';
 import { setTaskCountSource } from './ui/statsReport.js';
 import { ConfigStore } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
@@ -237,6 +238,7 @@ async function runRepl(
   plans?: PlanHooks,
   checkpoints?: CheckpointHooks,
   tip?: string,
+  startup?: string,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -315,6 +317,7 @@ async function runRepl(
       plans,
       checkpoints,
       tip,
+      startup,
       restart,
       initialMode,
       sessionView,
@@ -419,6 +422,7 @@ program
   )
   .option('--image <path>', 'path to an image file to attach (vision-capable providers only)')
   .option('--resume <sessionId>', 'resume a saved session by id (used internally by /resume)')
+  .option('-c, --continue', 'resume the most recent session in this project')
   .option(
     '--session <sessionId>',
     'one-shot only: continue the saved session with this id (or start it), and save it afterwards - lets a script drive a multi-turn session without the TUI',
@@ -432,7 +436,7 @@ program
     '--profile <name>',
     'named preset (~/.o4c/profiles/<name>.json) to seed this project\'s config.json from on first trust - only has an effect the one time a project is first trusted; ignored on an already-trusted project. See "o4c-agent-design.md" §1.5/§5.',
   )
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; session?: string; profile?: string; mode?: string; window?: string }) => {
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; continue?: boolean; session?: string; profile?: string; mode?: string; window?: string }) => {
     const prompt = promptParts.join(' ');
 
     // Before anything that can block - the trust gate prompts, the server probes wait, and a
@@ -495,6 +499,12 @@ program
     const { trusted, projectRoot } = await ensureTrusted(cwd, undefined, undefined, opts.profile);
     recordLifecycle(lifecycleDir, 'trusted', { trusted, projectRoot });
     const projectContext = trusted ? await resolveO4cMd(cwd, projectRoot) : '';
+    // E13: --continue is --resume with the newest saved session in this project.
+    if (opts.continue && !opts.resume) {
+      const last = await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined);
+      if (last) opts = { ...opts, resume: last.id };
+      else console.error('No saved session in this project yet - starting a new one.');
+    }
     // Named explicitly: told only "their current directory", the model invented a plausible-looking
     // path when asked where it was (seen live 2026-10-24) and could do the same in a tool call.
     const cwdLine = `Working directory: ${cwd}`;
@@ -701,6 +711,16 @@ program
       configuredContextWindow ??
       autoContextWindow ??
       (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : undefined);
+    // E13: one health line under the banner on a fresh start (not on the per-turn reload).
+    const startup = opts.resume
+      ? undefined
+      : startupLine({
+          provider: opts.provider,
+          status: serverStatus,
+          model: opts.model,
+          contextWindow,
+          last: await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined),
+        });
     // Half the configured context window, not the flat 4096 both providers used to hardcode -
     // that flat cap was unrelated to the model's real budget and silently truncated any turn
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
@@ -1096,6 +1116,7 @@ program
         },
         checkpointHooks,
         tip,
+        startup,
       );
       return;
     }

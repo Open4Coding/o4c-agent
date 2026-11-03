@@ -152,6 +152,7 @@ import { editText } from './externalEditor.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
 import { formatStats, taskCounts } from './statsReport.js';
+import { cleanTitle, forkSession, GENERATE_TITLES_KEY, lastErrorReport, recordLastError, titlePrompt } from '../session/sessionExtras.js';
 import {
   DEFAULT_NOTIFY,
   DEFAULT_NOTIFY_AFTER_SECONDS,
@@ -257,6 +258,8 @@ export interface AppProps {
   showTabHint?: boolean;
   /** This start's tip (E5); undefined when tips are off, on a reload, or the tab hint shows instead. */
   tip?: string;
+  /** The startup health line (E13): server, model, context, last session. Fresh starts only. */
+  startup?: string;
   /** How the local server answered at launch (`up` when unknown/not a local server). When it is `down` or
    * `loading` the app opens the "Server is down: wait or choose another model" box straight away. */
   serverStatus?: ServerStatus;
@@ -704,6 +707,7 @@ export function App({
   sessionView,
   showTabHint,
   tip,
+  startup,
   projectRoot,
   thinkCaps: probedThinkCaps,
   usageStore,
@@ -778,6 +782,7 @@ export function App({
       // primary, which is the wrong weight for a tip, and splash.ts stays a pure word-mark +
       // startup-snapshot formatter. The cycle is derived from MODES so it cannot drift out of step
       // with what Tab actually does.
+      ...(startup ? ([{ kind: 'system', text: startup }] as const) : []),
       ...(showTabHint
         ? ([
             { kind: 'system', text: 'Tip: press Tab to cycle modes, or /mode to pick one directly.' },
@@ -1687,6 +1692,24 @@ export function App({
           shellNotesRef.current.push(note);
           pushBlock([infoLine(`${output}\n(the model sees this with your next message)`)]);
         }
+      } else if (commandName(input) === '/fork') {
+        // E13: the conversation so far under a new id; this window carries on in the fork.
+        pushBlock([userLine(input)]);
+        const entries = [...loop.getEntries()];
+        if (entries.length === 0) pushBlock([infoLine('Nothing to fork yet - send a message first.')]);
+        else {
+          await saveSessionNow();
+          const original = currentSessionIdRef.current;
+          const title = (original ? (await sessionStore.readManifest()).find((m) => m.id === original)?.title : undefined) ?? 'Session';
+          const fork = await forkSession(sessionStore, entries, [...inputHistoryRef.current], title);
+          currentSessionIdRef.current = fork.id;
+          usageStore?.setSessionId(fork.id);
+          pushBlock([infoLine(`Forked: you are now in "${fork.title}". The original is unchanged - /resume to go back to it.`)]);
+        }
+      } else if (commandName(input) === '/last-error') {
+        // E13: the last failed request in full, and the end of crash.log.
+        pushBlock([userLine(input)]);
+        pushBlock([infoLine(lastErrorReport().join('\n'))]);
       } else if (commandName(input) === '/stats') {
         // E11: session, project and machine totals - no model call.
         pushBlock([userLine(input)]);
@@ -3169,6 +3192,7 @@ export function App({
           }
         } catch (err) {
           turnFailed = true;
+          if (!(err instanceof AbortedError)) recordLastError(err); // E13: /last-error shows it in full
           if (err instanceof AbortedError) {
             // Escape while thinking: history was already rolled back inside loop.run() itself -
             // just put the prompt that started this turn back in the input box, unedited, so the
@@ -3250,6 +3274,20 @@ export function App({
               turnSaved = (await saveSessionNow()) !== undefined;
             } catch (saveErr) {
               if (!stale) pushBlock([{ kind: 'error', text: `Warning: failed to save session: ${formatError(saveErr)}` }]);
+            }
+          }
+
+          // E13: a generated title after the session's first answered message - off unless
+          // generateTitles is set; otherwise the title stays the first line of that message.
+          // Awaited (one short call) so the per-turn reload cannot cut it off.
+          if (turnSaved && !turnFailed && !stale && currentSessionIdRef.current && loop.getMessages().filter((m) => m.role === 'user').length === 1) {
+            try {
+              if ((await configStore.get(GENERATE_TITLES_KEY)) === true) {
+                const title = cleanTitle(await loop.sideRequest(titlePrompt(input)));
+                if (title) await sessionStore.rename(currentSessionIdRef.current, title);
+              }
+            } catch {
+              // The first-line title stays.
             }
           }
 

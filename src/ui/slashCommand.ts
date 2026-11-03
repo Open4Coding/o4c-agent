@@ -87,6 +87,14 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Copy the last reply to the clipboard - /copy 2 for the one before. Works over SSH in terminals that support OSC 52.',
   },
   {
+    name: '/fork',
+    description: 'Copy this conversation to a new session and carry on in the copy; the original stays as it was (/resume returns to it).',
+  },
+  {
+    name: '/last-error',
+    description: 'Show the last failed request in full and the end of crash.log - no LLM call.',
+  },
+  {
     name: '/stats',
     description: 'What this session, this project and this computer have used: tokens, cache share, active time, requests, tasks and tool calls - no LLM call.',
   },
