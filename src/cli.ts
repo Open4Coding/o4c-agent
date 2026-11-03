@@ -43,6 +43,32 @@ import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
+import { combinePrompt, eventLine, EXIT, exitCodeFor, parseAllowedTools, parseOutputFormat, parsePermissionMode, readStdin, resultObject, schemaPrompt, type PermissionMode, type RunFacts } from './headless.js';
+
+/**
+ * H1: the headless policy's outer layer - --allowed-tools and --permission-mode plan first, then the
+ * run's own policy; and every "nobody can approve this" denial is noted, for exit code 2.
+ */
+function headlessGate(
+  facts: RunFacts,
+  mode: PermissionMode,
+  allowed: string[] | undefined,
+  inner: (tool: Tool, input: Record<string, unknown>) => Promise<PolicyAnswer>,
+): (tool: Tool, input: Record<string, unknown>) => Promise<PolicyAnswer> {
+  return async (tool, input) => {
+    if (allowed && !allowed.includes(tool.name)) {
+      facts.refusals.push(`${tool.name}: not in --allowed-tools`);
+      return { verdict: 'deny', reason: `--allowed-tools allows only ${allowed.join(', ')}` };
+    }
+    if (mode === 'plan' && tool.mutating) {
+      facts.refusals.push(`${tool.name}: read-only run (--permission-mode plan)`);
+      return { verdict: 'deny', reason: 'this run is read-only (--permission-mode plan)' };
+    }
+    const answer = await inner(tool, input);
+    if (typeof answer === 'object' && answer.verdict === 'deny' && /cannot give/.test(answer.reason)) facts.refusals.push(`${tool.name}: ${answer.reason}`);
+    return answer;
+  };
+}
 import { PTY_CONFIG_KEY, ptyTool } from './tools/pty.js';
 import { CUSTOM_MODE_KEY, parseCustomModes, setCustomModes } from './ui/customModes.js';
 import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
@@ -125,6 +151,7 @@ import { theme } from './ui/theme.js';
 import { formatEvent } from './ui/formatEvent.js';
 import { formatError } from './ui/formatError.js';
 import { appendFile, mkdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { defaultLogsDir } from './session/runLog.js';
 import { detectCurrentOs, platformPromptLine } from './ui/platform.js';
@@ -466,8 +493,37 @@ program
     '--profile <name>',
     'named preset (~/.o4c/profiles/<name>.json) to seed this project\'s config.json from on first trust - only has an effect the one time a project is first trusted; ignored on an already-trusted project. See "o4c-agent-design.md" §1.5/§5.',
   )
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; continue?: boolean; session?: string; profile?: string; mode?: string; window?: string }) => {
-    const prompt = promptParts.join(' ');
+  // H1: the headless contract (see headless.ts).
+  .option('--output-format <format>', 'one-shot output: text (default), json (one object at the end) or stream-json (a JSON line per event, then the result)')
+  .option('--max-turns <n>', 'one-shot: the most model round-trips before it stops and summarizes (exit code 3)')
+  .option('--permission-mode <mode>', 'one-shot: deny-ask (default - anything that would ask is refused, exit code 2) or plan (read-only)')
+  .option('--allowed-tools <list>', 'one-shot: the only tools the model may use, comma-separated (e.g. read_file,grep_files)')
+  .option('--json-schema <file>', 'one-shot: reshape the final answer into JSON matching this JSON schema (constrained decoding)')
+  .option('--stdin', 'one-shot: read stdin and add it after the prompt (with no prompt, piped stdin is the prompt anyway)')
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; continue?: boolean; session?: string; profile?: string; mode?: string; window?: string; outputFormat?: string; maxTurns?: string; permissionMode?: string; allowedTools?: string; jsonSchema?: string; stdin?: boolean }) => {
+    let prompt = promptParts.join(' ');
+    // H1: stdin is read only when it can be meant - no prompt with a pipe, or --stdin - so a caller
+    // that leaves stdin open cannot hang o4c.
+    if ((!prompt && !process.stdin.isTTY) || opts.stdin) prompt = combinePrompt(prompt, await readStdin());
+    const outputFormat = parseOutputFormat(opts.outputFormat);
+    const permissionMode = parsePermissionMode(opts.permissionMode);
+    const allowedTools = parseAllowedTools(opts.allowedTools);
+    const maxTurns = opts.maxTurns !== undefined ? Number(opts.maxTurns) : undefined;
+    if (!outputFormat || !permissionMode || (maxTurns !== undefined && !(Number.isInteger(maxTurns) && maxTurns > 0))) {
+      console.error(!outputFormat ? '--output-format must be text, json or stream-json.' : !permissionMode ? '--permission-mode must be deny-ask or plan.' : '--max-turns must be a whole number above 0.');
+      process.exitCode = EXIT.error;
+      return;
+    }
+    let jsonSchema: unknown;
+    if (opts.jsonSchema) {
+      try {
+        jsonSchema = JSON.parse(readFileSync(opts.jsonSchema, 'utf-8'));
+      } catch (err) {
+        console.error(`--json-schema: could not read ${opts.jsonSchema}: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = EXIT.error;
+        return;
+      }
+    }
 
     // Before anything that can block - the trust gate prompts, the server probes wait, and a
     // process that dies in here used to leave nothing behind at all. Resolved synchronously
@@ -1257,20 +1313,27 @@ program
 
     // Counted for the stats line below (the eval runner reads it, plan 0006 J1).
     let toolCalls = 0;
+    // H1: what the exit code and the json result report.
+    const facts: RunFacts = { refusals: [], stepLimit: false };
+    let result: unknown;
     try {
       const finalAnswer = await loop.run(prompt, {
         images: opts.image ? [opts.image] : undefined,
         onEvent: (event) => {
           if (event.type === 'tool_call') toolCalls++;
-          printEvent(event);
+          if (outputFormat === 'text') printEvent(event);
+          else if (outputFormat === 'stream-json') process.stdout.write(eventLine(event));
         },
         onProviderCall: oneShotProviderLog,
-        maxIterations,
+        maxIterations: maxTurns ?? maxIterations,
         // Nobody to ask in one-shot mode (B18): summarize, so a script gets an answer, not a throw.
-        onStepLimit: async () => 'summarize',
+        onStepLimit: async () => {
+          facts.stepLimit = true;
+          return 'summarize';
+        },
         // Permission rules apply headless too (C3): deny holds, and ask is a deny - nobody can answer.
         // G4: whatever policy this run uses is also the one its sub-agents use.
-        toolPolicy: withTaskPolicy(headlessRules
+        toolPolicy: withTaskPolicy(headlessGate(facts, permissionMode, allowedTools, headlessRules
           ? async (tool, input) => {
               const skillDenied = skillGate(tool.name);
               if (skillDenied) return { verdict: 'deny', reason: skillDenied };
@@ -1292,7 +1355,7 @@ program
               const hooked = await preToolHookVerdict(tool.name, input, cwd);
               if (hooked === 'ask') return { verdict: 'deny', reason: 'a PreToolUse hook asks for approval, which a headless run cannot give' };
               return hooked ?? 'allow';
-            }),
+            })),
         // One-shot is autonomous like Auto mode: ask once to verify edits nobody checked (B19).
         verifyOnStop: resolvedConfig.verifyOnStop !== false,
         // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which
@@ -1309,11 +1372,27 @@ program
         thinkLevel: oneShotThinkLevel(resolvedConfig, opts.model),
       });
 
-      process.stdout.write(`\n--- final ---\n${finalAnswer}\n`);
+      result = finalAnswer;
+      // H1: --json-schema reshapes the answer into JSON that matches, by constrained decoding.
+      if (jsonSchema !== undefined) {
+        const shaped = await loop.sideRequest(schemaPrompt(finalAnswer, jsonSchema), { responseSchema: jsonSchema as Record<string, unknown> });
+        try {
+          result = JSON.parse(shaped);
+        } catch {
+          facts.error = `The answer could not be shaped into JSON for --json-schema: ${shaped.slice(0, 200)}`;
+        }
+      }
+      if (outputFormat === 'text') process.stdout.write(`\n--- final ---\n${typeof result === 'string' ? result : JSON.stringify(result, null, 2)}\n`);
     } catch (err) {
-      printError(err);
-      process.exitCode = 1;
+      facts.error = err instanceof Error ? err.message : String(err);
+      if (outputFormat === 'text') printError(err);
     } finally {
+      process.exitCode = exitCodeFor(facts);
+      if (outputFormat !== 'text') {
+        const u = loop.getUsage();
+        const line = JSON.stringify(resultObject({ result: result ?? null, facts, usage: { requests: u.requestCount, inputTokens: u.inputTokens, outputTokens: u.outputTokens, cachedTokens: u.cachedTokens }, toolCalls, sessionId: opts.session }));
+        process.stdout.write(`${line}\n`);
+      }
       // On stderr so it never mixes into an answer a script is reading from stdout. In `finally`
       // so a message that ends on an error - the iteration cap a long scripted run sets on purpose
       // - still reports what it spent.
