@@ -90,7 +90,7 @@ macro-heavy C measured 0.58 against a 1.00 grep baseline in the codebase-memory 
 
 ## Bundled but not registered
 
-`css`, `html`*, `powershell`, `solidity`, `vue` - grammars load, but no tag query exists yet,
+`css`, `html`*, `solidity`, `vue` - grammars load, but no tag query exists yet,
 so `languageForPath` returns `undefined` and these report `degraded` rather than an empty
 result. CSS/HTML need a different extraction model entirely: *selector defined -> class/id
 referenced*, not definitions and calls.
@@ -101,4 +101,14 @@ referenced*, not definitions and calls.
 
 **SQL** and **Assembly** have no ABI-compatible prebuilt WASM on npm. `tree-sitter-sql@0.1.0`
 is grammar source only, and building it needs a toolchain - which would destroy the
-zero-native-modules property. **Kotlin** and **Lua** likewise, for now.
+zero-native-modules property. Re-checked 2026-11-03 (plan 0006 K2): the maintained grammar,
+`@derekstride/tree-sitter-sql@0.3.11`, ships `parser.c` and queries but no `.wasm`, and its GitHub
+release attaches only a source tarball. A `.sql` file therefore reports `degraded`. The way out is
+a one-off build with `tree-sitter build --wasm` (tree-sitter-cli 0.27.1, matching this
+`web-tree-sitter`), vendored like the others - the package stays free of native modules, since
+the build happens once, here, not on install. Not done yet: it compiles third-party code and
+needs a go-ahead first.
+
+**PowerShell** is registered as of K2 (`.ps1`, `.psm1`). The grammar came with the
+`@vscode/tree-sitter-wasm` payload; the tag query is authored here, since no upstream one
+exists. **Kotlin** and **Lua** likewise, for now.

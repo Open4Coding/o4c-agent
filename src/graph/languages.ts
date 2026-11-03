@@ -75,7 +75,7 @@ const TS_TYPE_ONLY = ['type', 'interface', 'enum', 'module'] as const;
  * `read`-projection feature that does not need them.
  *
  * Grammars present in `grammars/wasm/` but deliberately **not** registered, because no tag
- * query exists for them yet: `css`, `html`, `powershell`, `solidity`, `vue`. CSS/HTML need a
+ * query exists for them yet: `css`, `html`, `solidity`, `vue`. CSS/HTML need a
  * different extraction model entirely - selector defined -> class/id referenced, not
  * definitions and calls - which is its own design task. Until a query lands, a `.css` file
  * must report `degraded`, never an empty result.
@@ -112,6 +112,10 @@ export const DEFAULT_LANGUAGES: readonly GraphLanguage[] = [
   { id: 'c_sharp', extensions: ['.cs'], typeOnlyKinds: ['interface', 'module'] },
   // rank 8
   { id: 'java', extensions: ['.java'], typeOnlyKinds: ['interface'] },
+  // K2 (2026-11-03): query authored here, as for bash - a script's calls are its commands. Names
+  // match exactly, so `get-thing` does not reach `Get-Thing` although PowerShell would call it.
+  // `.psd1` is a data manifest with nothing to define or call, so it is left out.
+  { id: 'powershell', extensions: ['.ps1', '.psm1'] },
   // rank 10 - reference patterns authored here; macros stay invisible.
   // `.h` is deliberately claimed by C++ rather than C: the extension is genuinely ambiguous,
   // and the two failure modes are not symmetric. A C header parsed by the C++ grammar parses

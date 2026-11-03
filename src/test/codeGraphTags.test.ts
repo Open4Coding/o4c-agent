@@ -47,6 +47,12 @@ const SAMPLES: Record<string, { source: string; path: string; defines: string[];
     defines: ['build'],
     references: ['build', 'make'],
   },
+  powershell: {
+    path: 'deploy.ps1',
+    source: ['function Invoke-Build {', '  Remove-Item ./dist', '}', '', 'Invoke-Build'].join('\n'),
+    defines: ['Invoke-Build'],
+    references: ['Invoke-Build', 'Remove-Item'],
+  },
   typescript: {
     path: 'shapes.ts',
     source: [
@@ -437,4 +443,23 @@ test('a callback held in a property or a parameter is a definition', async () =>
 
   const tsxDefs = (await extractTags(source, 'tsx')).filter((t) => t.kind === 'def').map((t) => t.name);
   assert.ok(tsxDefs.includes('emit') && !tsxDefs.includes('count'), 'tsx query should match typescript');
+});
+
+test('PowerShell (K2): functions, classes and methods are defined; commands and method invocations are calls', async () => {
+  assert.equal(languageForPath('tools/build.ps1')?.id, 'powershell');
+  assert.equal(languageForPath('tools/Mod.psm1')?.id, 'powershell');
+  const src =
+    'function Get-Thing {\n  param([string]$Name)\n  Write-Output $Name\n}\n' +
+    'class Server : Base {\n  [void] Start([int]$port) { $this.Listen($port) }\n}\n' +
+    '$s = [Server]::new()\n$s.Start(80)\nGet-Thing -Name foo\n';
+  const tags = await extractTags(src, 'powershell');
+  const defs = tags.filter((t) => t.kind === 'def').map((t) => `${t.capture}:${t.name}`);
+  assert.deepEqual(defs, ['name.definition.function:Get-Thing', 'name.definition.class:Server', 'name.definition.method:Start']);
+  const refs = tags.filter((t) => t.kind === 'ref').map((t) => `${t.name}@${t.line}`);
+  for (const r of ['Write-Output@3', 'Listen@6', 'Start@9', 'Get-Thing@10']) assert.ok(refs.includes(r), `missing ${r} in ${refs.join(' ')}`);
+  assert.ok(!defs.some((d) => d.endsWith(':Base')), 'a base type is not a definition');
+});
+
+test('SQL has no loadable grammar (K2), so a .sql file is not claimed - the graph reports it degraded', () => {
+  assert.equal(languageForPath('db/schema.sql'), undefined);
 });
