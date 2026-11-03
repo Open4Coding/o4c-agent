@@ -182,6 +182,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Open a config file (global, local or personal) in your editor; it is checked when you close the editor.',
   },
   {
+    name: '/view-model',
+    description: 'What o4c knows about the current model: its registry entry (name, comment, context, think level, sampling, price) and what was detected.',
+  },
+  {
     name: '/keyboard-bindings',
     description: 'Your Ctrl+letter key bindings and how to remap them in ~/.o4c/keybindings.json.',
     hidden: true,
@@ -383,6 +387,11 @@ export const COMMANDS: CommandInfo[] = [
     // Hidden like the other /config-* commands: reached through the /config family dropdown.
     hidden: true,
     description: 'Choose the editor o4c opens (Ctrl+G, /view-log, /edit-config). Usage: /config-editor <command>|default',
+  },
+  {
+    name: '/config-model',
+    hidden: true,
+    description: 'Set the current model\'s registry entry (~/.o4c/models.json). Usage: /config-model name="..." comment="..." context=<tokens> think=<level> price_in=<$/1M> price_out=<$/1M>',
   },
   {
     name: '/review',

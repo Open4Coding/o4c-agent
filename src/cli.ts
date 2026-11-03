@@ -41,6 +41,7 @@ import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsD
 import { recordLifecycle } from './lifecycleLog.js';
 import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
+import { modelEntry } from './session/modelRegistry.js';
 import { EDITOR_CONFIG_KEY } from './ui/externalEditor.js';
 import { setTaskCountSource } from './ui/statsReport.js';
 import { ConfigStore } from './session/configStore.js';
@@ -710,8 +711,11 @@ program
       serverStatus,
     });
     const ANTHROPIC_DEFAULT_CONTEXT_WINDOW = 200_000;
+    // E19: the models registry - below config.json, above what the server reports.
+    const registryModel = modelEntry(opts.model);
     const contextWindow =
       configuredContextWindow ??
+      registryModel?.contextWindow ??
       autoContextWindow ??
       (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : undefined);
     // E18: /config-editor's choice, unless O4C_EDITOR is already set in the environment.
@@ -754,7 +758,7 @@ program
         connectTimeoutMs,
         idleTimeoutMs,
         modelId: opts.model,
-        sampling: resolvedConfig.localSampling,
+        sampling: resolvedConfig.localSampling ?? registryModel?.sampling,
         slots: probedSlots,
         // Plan 0006 A7; config.json "localReasoningReplay" to override.
         reasoningReplay: ['all', 'current-turn', 'none', 'all-as-text'].includes(String(resolvedConfig.localReasoningReplay))
@@ -1099,7 +1103,7 @@ program
                 // it (loop.ts's dynamicMaxTokens comment has the measured numbers). This is only
                 // the fallback anyway - loop.ts computes a tighter per-request budget from the
                 // actual prompt size and overrides it on every real call.
-                if (probe.contextWindow && configuredContextWindow === undefined) {
+                if (probe.contextWindow && configuredContextWindow === undefined && registryModel?.contextWindow === undefined) {
                   localProvider?.setMaxTokens(Math.min(32768, Math.floor(probe.contextWindow / 4)));
                 }
               },

@@ -33,6 +33,8 @@ export interface StatsInput {
   turns: number;
   toolCalls: number;
   tasks?: TaskCounts;
+  /** E19: what the session cost at the registry price for this model, when it has one. */
+  cost?: { session: number; model: string };
 }
 
 export function formatDuration(ms: number): string {
@@ -54,6 +56,7 @@ export function formatStats(s: StatsInput): string[] {
     `            cache ${cache === undefined ? 'n/a' : `${cache}%`} of prompt tokens; active ${formatDuration(s.session.activeMs)}${rate}`,
     ...(s.project ? [`  Project:  ${tok(s.project)}`] : ['  Project:  not counted (this folder is not a trusted project)']),
     ...(s.machine ? [`  Machine:  ${tok(s.machine)} (every project on this computer)`] : []),
+    ...(s.cost ? [`  Cost:     about $${s.cost.session.toFixed(s.cost.session < 1 ? 4 : 2)} this session (registry price for ${s.cost.model}, /view-model)`] : []),
     ...(s.tasks ? [`  Tasks:    ${s.tasks.total} in this project, ${s.tasks.done} finished, ${s.tasks.worked} marked as worked (/worked)`] : []),
   ];
 }

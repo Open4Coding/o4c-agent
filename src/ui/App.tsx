@@ -154,6 +154,7 @@ import { completeMention, expandMentions, mentionCandidates, mentionPrefix } fro
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
+import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
 import { formatDebugDump, lastRequestFromLogs, type LoggedRequest } from '../session/debugDump.js';
 import { redactSecrets } from '../session/redact.js';
 import { logsDirFor } from '../session/projectContext.js';
@@ -1292,7 +1293,8 @@ export function App({
       try {
         const saved = (await configStore.get(THINK_LEVEL_CONFIG_KEY)) as Record<string, unknown> | undefined;
         const forModel = saved && typeof saved === 'object' ? saved[model] : undefined;
-        const level = typeof forModel === 'string' ? parseThinkLevel(forModel) : undefined;
+        // E19: the models registry's level is the default until /think saves one for this model.
+        const level = (typeof forModel === 'string' ? parseThinkLevel(forModel) : undefined) ?? modelEntry(model)?.thinkLevel;
         if (!cancelled && level) setThinkLevel(level);
       } catch {
         // A cosmetic preference - an unreadable config must not stop the app starting.
@@ -1723,6 +1725,32 @@ export function App({
           process.env.O4C_EDITOR = arg;
           pushBlock([infoLine(`o4c now opens ${arg}.${isTerminalEditor(arg) ? ' (A terminal editor - it takes over this window until you quit it.)' : ''}`)]);
         }
+      } else if (commandName(input) === '/view-model') {
+        // E19: this model's registry entry beside what was detected.
+        pushBlock([userLine(input)]);
+        pushBlock([
+          infoLine(
+            describeModel(model, modelEntry(model), {
+              provider,
+              contextWindow,
+              thinkCaps: thinkCaps ? JSON.stringify(thinkCaps) : undefined,
+            }).join('\n'),
+          ),
+        ]);
+      } else if (commandName(input) === '/config-model') {
+        // E19: set fields of this model's registry entry.
+        pushBlock([userLine(input)]);
+        const text = input.trim().slice('/config-model'.length).trim();
+        if (!text) {
+          pushBlock([infoLine('Usage: /config-model name="..." comment="..." context=<tokens> think=<level> price_in=<$/1M> price_out=<$/1M> - key= clears a field. /view-model shows the entry.')]);
+        } else {
+          const { fields, errors } = parseModelArgs(text);
+          if (errors.length) pushBlock([infoLine(`Not saved:\n${errors.map((e) => `  ${e}`).join('\n')}`)]);
+          else {
+            setModelFields(model, fields);
+            pushBlock([infoLine(`Saved for ${model}. Context and sampling take effect on the next start (o4c reloads after most turns); /view-model shows the entry.`)]);
+          }
+        }
       } else if (commandName(input) === '/keyboard-bindings') {
         // E17: the remappable Ctrl+letter actions as bound now, and any problem in the file.
         pushBlock([userLine(input)]);
@@ -1855,6 +1883,10 @@ export function App({
               turns: messages.filter((m) => m.role === 'user').length,
               toolCalls: messages.filter((m) => m.role === 'tool').length,
               tasks: taskCounts(),
+              ...(() => {
+                const c = totals?.session ? costOf(totals.session, modelEntry(model)) : undefined;
+                return c === undefined ? {} : { cost: { session: c, model } };
+              })(),
             }).join('\n'),
           ),
         ]);
