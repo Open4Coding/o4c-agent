@@ -169,6 +169,7 @@ import { redactSecrets } from '../session/redact.js';
 import { logsDirFor } from '../session/projectContext.js';
 import { defaultLogsDir } from '../session/runLog.js';
 import { MOUSE_CONFIG_KEY } from './mouse.js';
+import { CUSTOM_MODE_KEY, customModeGate, customModes, findCustomMode, initialCustomMode, nextInCycle, withCustomNote, type CustomMode } from './customModes.js';
 import { BLOCK_GAP_KEY, parseBlockGap, settingLabel, settingValues } from './settingsIndex.js';
 import { describeKeybindings, isAction } from './keybindings.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
@@ -438,7 +439,10 @@ function StatusBar({
   liveText,
   mode,
   busy,
+  customMode,
 }: {
+  /** G10: a custom mode on top of `mode`, shown by its own name. */
+  customMode?: CustomMode;
   loop: AgentLoop;
   /** Where the clock's elapsed time comes from, because this process is not the session: o4c
    * reloads itself into a fresh process after most turns, so a clock counting from mount restarted
@@ -483,8 +487,8 @@ function StatusBar({
   // two token figures rather than being the same number printed twice in two formats.
   return (
     <Text>
-      <Text color={modeInfo(mode).color}>
-        Mode: {modeInfo(mode).label} (/mode or Tab)
+      <Text color={customMode?.color ?? modeInfo(mode).color}>
+        Mode: {customMode ? `${customMode.name} (${modeInfo(mode).label})` : modeInfo(mode).label} (/mode or Tab)
       </Text>
       {/* The key hints sit directly after the mode they qualify rather than on a line of their
           own at the foot of the footer, and the model name moved down to the dir line: it
@@ -1068,6 +1072,19 @@ export function App({
   // - see src/ui/modePolicy.ts. Manual is the default: a deliberate behavior change from "nothing
   // is ever confirmed" today, the actual fix for the long-open run_shell/write_file safety gap.
   const [mode, setMode] = useState<Mode>(initialMode ?? 'manual');
+  // G10: the custom mode in force on top of `mode` (its base), if any; remembered across reloads.
+  const [customMode, setCustomModeState] = useState<CustomMode | undefined>(() => {
+    const c = initialCustomMode();
+    return c && c.base === (initialMode ?? 'manual') ? c : undefined;
+  });
+  const customModeRef = useRef<CustomMode | undefined>(customMode);
+  customModeRef.current = customMode;
+  const chooseMode = (next: Mode, custom?: CustomMode) => {
+    setMode(next);
+    setCustomModeState(custom);
+    // Written only when a custom mode is entered or left - a built-in to built-in switch touches no file.
+    if (custom?.name !== customModeRef.current?.name) void configStore.set(projectRoot ? 'local' : 'global', CUSTOM_MODE_KEY, custom?.name ?? '').catch(() => undefined);
+  };
   // `/think`'s level. Seeded from the default (unrestricted, i.e. exactly what the server did
   // before this command existed) and replaced by the per-model value from config once it loads,
   // so a first paint never shows a level the next turn would not actually use.
@@ -1417,6 +1434,9 @@ export function App({
       // G2: an active skill's allowed-tools come first - a skill that says read-only means it.
       const skillDenied = skillGate(tool.name);
       if (skillDenied) return { verdict: 'deny', reason: skillDenied };
+      // G10: a custom mode's own tool list.
+      const modeDenied = customModeGate(customModeRef.current, tool.name);
+      if (modeDenied) return { verdict: 'deny', reason: modeDenied };
       const access = classifyToolAccess(turnModeRef.current ?? modeRef.current, tool, input, plansDirRef.current);
       // A mode's own refusal is absolute (Plan mode stays read-only whatever the rules say).
       if (access === 'deny') return 'deny';
@@ -1616,10 +1636,9 @@ export function App({
           setPrefill({ token: nextPrefillToken++, text: completeMention(inputValueRef.current, mentionChoices[0]!) });
           return;
         }
-        const currentIndex = MODES.findIndex((m) => m.mode === mode);
-        const next = MODES[(currentIndex + 1) % MODES.length].mode;
-        setMode(next);
-        pushBlock([{ kind: 'system', text: `Mode set to ${modeInfo(next).label}.` }]);
+        const step = nextInCycle(mode, customModeRef.current);
+        chooseMode(step.mode, step.custom);
+        pushBlock([{ kind: 'system', text: `Mode set to ${step.custom ? `${step.custom.name} (${modeInfo(step.mode).label})` : modeInfo(step.mode).label}.` }]);
         // The banner tip has done its job the moment Tab is actually used, so retire it for good
         // (front-end checklist #11). Global scope: knowing this shortcut is a fact about the user,
         // not about one project. Only written while the tip is still showing, and once per process
@@ -2304,13 +2323,29 @@ export function App({
             pushBlock([infoLine(`${planActionTitle(plan).split(' (')[0]} is parked - still saved, no longer active.`)]);
           }
         }
+      } else if (input.startsWith('/mode ') && input.trim() !== '/mode') {
+        // G10: /mode <name> - a custom mode by name, or a built-in one by its label.
+        pushBlock([userLine(input)]);
+        const want = input.trim().slice('/mode'.length).trim().toLowerCase();
+        const custom = findCustomMode(want);
+        const builtIn = MODES.find((m) => m.mode.toLowerCase() === want || m.label.toLowerCase() === want);
+        if (custom) {
+          chooseMode(custom.base, custom);
+          pushBlock([infoLine(`Mode set to ${custom.name} (${modeInfo(custom.base).label}).${custom.note ? ` ${custom.note}` : ''}`)]);
+        } else if (builtIn) {
+          chooseMode(builtIn.mode);
+          pushBlock([infoLine(`Mode set to ${builtIn.label}.`)]);
+        } else {
+          pushBlock([infoLine(`No mode "${want}". Built-in: ${MODES.map((m) => m.label).join(', ')}.${customModes().length ? ` Custom: ${customModes().map((c) => c.name).join(', ')}.` : ' Custom modes go in config "modes".'}`)]);
+        }
       } else if (input === '/mode') {
         pushBlock([userLine(input)]);
+        if (customModes().length) pushBlock([infoLine(`Custom modes (/mode <name>, or Tab): ${customModes().map((c) => `${c.name} (${modeInfo(c.base).label})`).join(', ')}`)]);
         const chosen = await new Promise<Mode | undefined>((resolve) => {
           setModePicker({ resolve });
         });
         if (chosen) {
-          setMode(chosen);
+          chooseMode(chosen);
           pushBlock([infoLine(`Mode set to ${modeInfo(chosen).label}.`)]);
         } else {
           pushBlock([infoLine('Mode unchanged.')]);
@@ -3390,7 +3425,7 @@ export function App({
             takeSteering: () => steeringRef.current.splice(0),
             // Auto mode only: nobody approves each step, so ask once to verify unchecked edits (B19).
             verifyOnStop: mode === 'auto' && (await configStore.get('verifyOnStop')) !== false,
-            modeInstruction: modeSystemPrompt(planCommand ? 'plan' : mode, plansDir),
+            modeInstruction: planCommand ? modeSystemPrompt('plan', plansDir) : withCustomNote(modeSystemPrompt(mode, plansDir), customModeRef.current),
             signal: controller.signal,
             contextWindow,
             toolOutputDir,
@@ -4404,7 +4439,7 @@ export function App({
           the session (model, branch, directory). Front-end plan item #8 put context
           max/current/%used on the Mode line; the hint line that used to sit last is now folded
           into it. */}
-      <StatusBar loop={loop} usage={usageStore} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} />
+      <StatusBar loop={loop} usage={usageStore} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} customMode={customMode} />
       <UsageBar loop={loop} usage={usageStore} busy={isProcessing} sessionView={shownSessionView} thinkLevel={shownThinkLevel} />
       <ProjectBar model={model} branch={gitBranch} dirty={gitDirty} project={projectLabelText} />
       {confirmDialog ? (

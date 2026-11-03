@@ -4232,3 +4232,23 @@ test('/goal (G5) starts work, checks after each turn, and stops when its budget 
     await waitFor(() => anyFrameIncludes(frames, 'budget of 2 turns is spent'), 20000);
   });
 });
+
+test('a custom mode (G10) joins the Tab cycle, shows by name, and its tool list blocks other tools', async () => {
+  const { parseCustomModes, setCustomModes } = await import('../ui/customModes.js');
+  setCustomModes(parseCustomModes([{ name: 'lookonly', base: 'auto', tools: ['glob_files'] }]).modes);
+  try {
+    await withTempDir(async (dir) => {
+      const { stdin, frames, lastFrame } = await setup({ dir });
+      // Tab past every built-in mode to reach it.
+      for (let i = 0; i < 10 && !(lastFrame() ?? '').includes('Mode: lookonly (Auto)'); i++) {
+        stdin.write('\t');
+        await tick(80);
+      }
+      assert.ok((lastFrame() ?? '').includes('Mode: lookonly (Auto)'));
+      await submit(stdin, 'read something please');
+      await waitFor(() => anyFrameIncludes(frames, 'the "lookonly" mode allows only glob_files'));
+    });
+  } finally {
+    setCustomModes([]);
+  }
+});

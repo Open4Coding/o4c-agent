@@ -43,6 +43,7 @@ import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
+import { CUSTOM_MODE_KEY, parseCustomModes, setCustomModes } from './ui/customModes.js';
 import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
 import { loadSkills, setSkills, skillGate, skillListing } from './session/skills.js';
 import { createTaskTool, loadProfiles, setTaskPolicy, setTaskRuntime } from './agent/subAgents.js';
@@ -557,6 +558,9 @@ program
       const { keep, keepDays } = logRotationSettings(resolvedConfig);
       pruneRunLogs(logsDirFor(trusted ? projectRoot : undefined), keep, keepDays);
     }
+    // G10: custom modes from config, and the one that was active when this session last ran.
+    const customModeSetup = parseCustomModes(resolvedConfig.modes);
+    setCustomModes(customModeSetup.modes, typeof resolvedConfig[CUSTOM_MODE_KEY] === 'string' ? (resolvedConfig[CUSTOM_MODE_KEY] as string) : undefined);
     function configOr(optName: 'model' | 'provider' | 'baseUrl', cliValue: string): string {
       if (program.getOptionValueSource(optName) !== 'default') return cliValue;
       const configValue = resolvedConfig[optName];
@@ -777,7 +781,7 @@ program
           last: await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined),
         });
     // A restore that just ran (E20) is reported even on a resume - the restart that applied it is one.
-    const startup = [restoreNote, ...credentials.problems, ...hookProblems().map((p) => `config.json hooks: ${p}`), health].filter(Boolean).join('\n') || undefined;
+    const startup = [restoreNote, ...credentials.problems, ...hookProblems().map((p) => `config.json hooks: ${p}`), ...customModeSetup.problems.map((p) => `config.json ${p}`), health].filter(Boolean).join('\n') || undefined;
     // Half the configured context window, not the flat 4096 both providers used to hardcode -
     // that flat cap was unrelated to the model's real budget and silently truncated any turn
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
