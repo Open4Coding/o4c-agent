@@ -94,7 +94,10 @@ export function searchDocs(question: string, limit = 3): DocSection[] {
 /** The docs section about a command, for its /help-<command> page, if the docs have one. */
 export function commandSection(name: string): DocSection | undefined {
   index ??= build(docFiles());
-  return index.sections.find((s) => s.heading.includes(name) || s.heading.includes(`\`${name}`));
+  // A whole command token in the heading, so /set's section is not /set-shell's (I4).
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const token = new RegExp(`(^|[^\\w/-])${esc}($|[^\\w-])`);
+  return index.sections.find((s) => token.test(s.heading));
 }
 
 export function formatSection(s: DocSection, maxLines = 25): string {

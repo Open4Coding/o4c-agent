@@ -35,3 +35,12 @@ test('the bundled docs are found and searchable', () => {
   assert.ok(docFiles().some((f) => f.endsWith('README.md')));
   assert.ok(searchDocs('mcp server').length > 0);
 });
+
+test('I4: every command has its own section in .docs, matched by the whole command name', async () => {
+  const { COMMANDS } = await import('../ui/slashCommand.js');
+  const { commandSection } = await import('../session/helpDocs.js');
+  const missing = COMMANDS.filter((c) => !commandSection(c.name)).map((c) => c.name);
+  assert.deepEqual(missing, [], `commands without docs: ${missing.join(' ')}`);
+  assert.match(commandSection('/set')!.heading, /`\/set`$/, '/set finds its own section, not /set-shell');
+  assert.match(commandSection('/plan')!.heading, /`\/plan`$/);
+});

@@ -1,0 +1,176 @@
+# Commands: sessions, context, plans and history
+
+Every command here is local unless it says otherwise - no model call, nothing sent anywhere.
+
+## `/clear`
+
+Start a fresh session. Asks first; the current session is saved and stays in `/resume`. If a turn is
+running it is stopped. o4c restarts into an empty conversation.
+
+## `/resume`
+
+Pick one of the saved sessions (the newest 20 by default - see `/set-sessionsToSave`) and continue it:
+the conversation, the input history and the session's token totals come back. From the shell,
+`o4c -c` resumes the newest one without the picker.
+
+## `/fork`
+
+Copy the conversation so far into a new session and carry on in the copy. The original stays exactly as
+it was; `/resume` goes back to it. The copy is titled "<title> (fork)".
+
+## `/context` (alias `/ctx`)
+
+What the next request will contain and how big it is: a breakdown by part (system prompt, tools,
+project instructions, memories, history), how full the context window is, the sliding window if one is
+on, and this session's token use.
+
+## `/compact`
+
+Summarise the older part of the conversation now instead of waiting for the window to fill. Keeps about
+the last turn word for word. `/compact <focus>` tells the summary what to keep in detail. Superseded file
+reads are dropped first, which is often enough on its own.
+
+## `/window`
+
+Send only the recent part of the conversation: `/window 40000` (tokens), `/window 50%`, or
+`/window off`. Nothing is deleted - turning it off sends everything again. Useful on small context
+windows; the model can still search what fell outside it.
+
+## `/stats`
+
+Totals for this session, this project and the whole machine: prompt and generated tokens, cache share,
+active time, requests, your messages, tool calls, tasks, and (with a price set in `/config-model`) the
+cost.
+
+## `/status`
+
+Setup and health on one screen: model and server, context use, cache and drafting rates, which
+instruction files were read, the prompt profile, thinking level, shell, MCP servers, checkpoints,
+memories and permission rules.
+
+## `/plan`
+
+`/plan <goal>` - the model researches read-only and writes a plan with a checklist, saved in this
+project (`.o4c/db/history.db`, exported to `.o4c/plans/`). The active plan's open items ride along with
+every message so the model keeps to it; it ticks items with the `update_plan` tool.
+
+## `/ultraplan`
+
+Like `/plan`, but o4c first gathers research itself - past tasks, the code graph's map of the code
+involved, the files - and the model thinks harder before writing the plan.
+
+## `/plans`
+
+List this project's plans with their state, and import any plan files someone dropped into
+`.o4c/plans/`.
+
+## `/view-plan`
+
+Pick a plan, then read it (summary or in full, checklist last), make it the active one, park it, edit
+its items, or export it.
+
+## `/plan-reword`
+
+`/plan-reword <plan> <item> <text>` - change an item's wording. Normally filled in for you by
+`/view-plan`'s "Edit items".
+
+## `/plan-add`
+
+`/plan-add <plan> <after item> <text>` - add an item after another one. Normally filled in by
+`/view-plan`.
+
+## `/goal`
+
+`/goal <what done looks like>` sets a goal o4c keeps working toward: after every turn it is checked -
+by `goalVerifyCommand` from config (exit 0 = met, e.g. `npm test`) or, without one, by the model
+answering "GOAL MET" after checking - and if it is not met the next step is queued for you to see.
+`/goal budget 20 <goal>` sets the turn budget (default 10), `/goal` shows it, `/goal off` clears it.
+
+## `/btw`
+
+`/btw <question>` - ask something on the side without it entering the conversation: the model answers
+from the current context, nothing is added to history, and the main task is not disturbed.
+
+## `/queue`
+
+Show the messages waiting to run after the current turn (queued with Ctrl+Q while the model works).
+
+## `/review`
+
+Have the model review this session's changes (from the checkpoint diff), read-only: bugs, missing tests,
+callers left behind. `/review <focus>` narrows it.
+
+## `/reflect`
+
+The model reads your recent finished tasks and writes short lessons into memory - what worked, what to
+avoid - which later sessions see. Uses one model call.
+
+## `/memory`
+
+List what o4c remembers: rules and lessons for this project and globally (`~/.o4c/db/global.db`). The
+model adds to it with the `remember` tool; you can too.
+
+## `/memory-edit`
+
+Edit or delete a remembered rule or lesson.
+
+## `/init`
+
+Scan the project (languages, build and test commands, layout) and write an `O4C.md` with what the model
+should know. Read every session afterwards; edit it freely.
+
+## `/worked`
+
+Mark the last task as having worked so history search ranks it higher: `/worked`, `/worked no`,
+`/worked clear`, or `/worked #412` for a specific task. See also `/mark-incorrect`.
+
+## `/mark-incorrect`
+
+The last answer was wrong: `/mark-incorrect [#task] [reason]` ranks that task down in history search and
+keeps your reason with it, so a later search that finds it - and `/reflect` - see what was wrong.
+`/worked clear` undoes the mark.
+
+## `/datagraph`
+
+Show or hide the code graph from the model: `/datagraph on`, `/datagraph off`. Off, the model uses grep,
+glob and reading files only; the index keeps updating either way.
+
+## `/undo`
+
+Put the files back as they were before the last turn's changes (from the checkpoint taken before it).
+Only files o4c changed; your git repository is never touched - checkpoints live in a shadow repository
+under `.o4c/checkpoints`.
+
+## `/rewind`
+
+Pick an earlier turn and go back to it: the files, the conversation, or both.
+
+## `/diff`
+
+Show what changed in this session's files since the first checkpoint.
+
+## `/commit`
+
+Commit with a message the model writes from the diff, shown to you first: commit, edit it in your
+editor, or cancel. Commits what is staged, or everything when nothing is. No Co-Authored-By or other
+trailer unless config `commitTrailer` sets one. `/commit <hint>` steers the message.
+
+## `/copy`
+
+Copy the last reply to the clipboard; `/copy 2` the one before. Uses the system clipboard and, for SSH,
+the terminal's OSC 52.
+
+## `/update`
+
+Ask npm and GitHub whether a newer o4c is out and say how to update. Only when you run it - o4c never
+checks on its own - and not at all in secure mode. Same as `o4c --check-update`.
+
+## `/setup`
+
+Find a model server (llama.cpp on 8080, Ollama on 11434, LM Studio on 1234, and the configured URL), ask
+for its key if it wants one, check one real tool call, and save it in the global config. Runs by itself
+the first time o4c starts.
+
+## `/exit` (alias `/quit`)
+
+End the session. It is saved and can be resumed.
