@@ -222,6 +222,8 @@ test('a too-tall frame renders correctly through the POSIX branch, including acr
     stdin: fakeStdin() as never,
     patchConsole: false,
     exitOnCtrlC: false,
+    // These measure live frames; Ink renders none when CI is set unless told it is interactive.
+    interactive: true,
   });
 
   const problems: string[] = [];

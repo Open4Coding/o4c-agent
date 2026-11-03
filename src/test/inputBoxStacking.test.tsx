@@ -171,6 +171,8 @@ async function drive(
     stdin: stdin as never,
     stderr: new FakeTty(columns, rows) as never,
     patchConsole: false,
+    // These measure live frames; Ink renders none when CI is set unless told it is interactive.
+    interactive: true,
     exitOnCtrlC: false,
   });
   assert.ok(await repainted(stdout, 0), 'the box must paint a first frame');

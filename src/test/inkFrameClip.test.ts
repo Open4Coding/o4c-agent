@@ -61,6 +61,8 @@ async function runCase(rows: number, cols: number): Promise<string[]> {
     stdin: fakeStdin() as never,
     patchConsole: false,
     exitOnCtrlC: false,
+    // These measure live frames; Ink renders none when CI is set unless told it is interactive.
+    interactive: true,
   });
   const problems: string[] = [];
   const check = (label: string, from: number, lastTick: number) => {
@@ -128,7 +130,7 @@ test('a live frame that fits the window is left completely intact', async () => 
       { flexDirection: 'column' },
       ...Array.from({ length: 32 }, (_, i) => React.createElement(Text, { key: i }, `row ${i}`)),
     ),
-    { stdout: stdout as never, stdin: fakeStdin() as never, patchConsole: false },
+    { stdout: stdout as never, stdin: fakeStdin() as never, patchConsole: false, interactive: true },
   );
   await sleep(200);
   const all = stdout.writes.join('');

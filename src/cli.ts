@@ -412,6 +412,10 @@ async function runRepl(
       codeGraph: graph,
     }),
     {
+      // Ink turns live rendering off whenever CI or CONTINUOUS_INTEGRATION is set (is-in-ci), even
+      // on a real terminal - the TUI then shows nothing until exit. This is the interactive TUI on a
+      // TTY by construction, so say so rather than let an inherited CI=1 freeze it.
+      interactive: true,
       // Opt-in, off by default (confirmed in ink's own source: does nothing unless set). 'auto'
       // safely queries the terminal (CSI ? u, 200ms timeout) and only turns the protocol on if
       // it actually answers - harmless no-op on terminals that don't support it. Windows
