@@ -175,7 +175,7 @@ export const COMMANDS: CommandInfo[] = [
   {
     name: '/think',
     description:
-      'Set how much the model reasons: nothink, low, med, high, xhigh. /think <level> to set it directly.',
+      'Set how much the model reasons: nothink, low, med, high, xhigh. /think <level> to set it directly, or /think <tokens> (e.g. 4000 or 4k) for an exact budget.',
     select: 'run',
   },
   {

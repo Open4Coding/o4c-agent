@@ -57,6 +57,10 @@ import {
   DEFAULT_THINK_CAPS,
   DEFAULT_THINK_LEVEL,
   THINK_LEVEL_CONFIG_KEY,
+  THINK_BUDGET_CONFIG_KEY,
+  parseThinkBudget,
+  setThinkBudgetOverride,
+  thinkBudgetOverride,
   THINK_LEVELS,
   THINK_LEVEL_INFO,
   effectiveThinkLevel,
@@ -569,7 +573,10 @@ function UsageBar({
           session, while at the left edge these two only move when you actually change one. */}
       <Text color={theme.accent}>view: {sessionView}</Text>
       <Text color={theme.border}> | </Text>
-      <Text color={theme.accent}>Think: {THINK_LEVEL_INFO[thinkLevel].label}</Text>
+      <Text color={theme.accent}>
+        Think: {THINK_LEVEL_INFO[thinkLevel].label}
+        {thinkLevel !== 'nothink' && thinkBudgetOverride() !== undefined ? ` ${formatCumulativeTokens(thinkBudgetOverride()!)}` : ''}
+      </Text>
       <Text color={theme.border}> | </Text>
       {totals && (
         <Text>
@@ -2023,19 +2030,53 @@ export function App({
         // opens the dropdown rather than erroring - a typo should land you in the list, not a
         // rejection message.
         const typed = input.slice('/think'.length).trim();
-        const direct = typed ? parseThinkLevel(typed) : undefined;
-        if (typed && !direct) {
+        // E14: `/think 4000` (or 4k) sets a token budget instead of a level.
+        const budget = typed ? parseThinkBudget(typed) : undefined;
+        const saveBudget = (value: number | undefined) =>
+          void (async () => {
+            try {
+              const scope = await scopeOwningEntry(configStore, THINK_BUDGET_CONFIG_KEY, model);
+              const own = (await configStore.readScope(scope))[THINK_BUDGET_CONFIG_KEY];
+              const next: Record<string, unknown> = { ...(own && typeof own === 'object' ? own : {}) };
+              if (value === undefined) delete next[model];
+              else next[model] = value;
+              await configStore.set(scope, THINK_BUDGET_CONFIG_KEY, next);
+            } catch {
+              // Live for this process either way.
+            }
+          })();
+        if (budget !== undefined) {
+          if (thinkLevel === 'nothink') {
+            pushBlock([infoLine('Thinking is off (nothink), so a budget would do nothing - choose a level first, then /think <tokens>.')]);
+          } else {
+            setThinkBudgetOverride(budget);
+            saveBudget(budget);
+            pushBlock([infoLine(`Thinking budget set to ${budget.toLocaleString()} tokens (replaces ${THINK_LEVEL_INFO[thinkLevel].label}'s own budget; choosing a level clears it).${thinkCaps && !thinkCaps.supportsBudget ? ' This model cannot take a budget, so it has no effect here.' : ''}`)]);
+          }
+        }
+        const direct = typed && budget === undefined ? parseThinkLevel(typed) : undefined;
+        if (budget !== undefined) {
+          // Done above.
+        } else if (typed && !direct) {
           pushBlock([
             infoLine(`"${typed}" is not a thinking level - choose one of ${THINK_LEVELS.join(', ')}.`),
           ]);
         }
         const chosen =
-          direct ??
-          (await new Promise<ThinkLevel | undefined>((resolve) => {
-            setThinkPicker({ resolve });
-          }));
-        if (chosen) {
+          budget !== undefined
+            ? undefined
+            : direct ??
+              (await new Promise<ThinkLevel | undefined>((resolve) => {
+                setThinkPicker({ resolve });
+              }));
+        if (budget !== undefined) {
+          // A budget was set; the level stays as it is.
+        } else if (chosen) {
           setThinkLevel(chosen);
+          if (thinkBudgetOverride() !== undefined) {
+            setThinkBudgetOverride(undefined);
+            saveBudget(undefined);
+          }
           const effective = effectiveThinkLevel(chosen, thinkCaps ?? DEFAULT_THINK_CAPS);
           // Said plainly when the model cannot deliver what was asked for, rather than letting the
           // status bar quietly show something else than the command reported.

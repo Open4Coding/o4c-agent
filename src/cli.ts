@@ -73,6 +73,8 @@ import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import {
   DEFAULT_THINK_LEVEL,
   THINK_LEVEL_CONFIG_KEY,
+  savedThinkBudget,
+  setThinkBudgetOverride,
   parseThinkLevel,
   type ThinkCaps,
   type ThinkLevel,
@@ -711,6 +713,8 @@ program
       configuredContextWindow ??
       autoContextWindow ??
       (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : undefined);
+    // E14: a numeric /think budget saved for this model replaces the level's own budget.
+    setThinkBudgetOverride(savedThinkBudget(resolvedConfig, opts.model));
     // E13: one health line under the banner on a fresh start (not on the per-turn reload).
     const startup = opts.resume
       ? undefined

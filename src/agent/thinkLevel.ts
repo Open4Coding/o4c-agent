@@ -210,6 +210,40 @@ export interface LocalThinkParams {
   reasoning_budget_message?: string;
 }
 
+/**
+ * `/think <tokens>` (plan 0006 E14): a numeric thinking budget that replaces the level's own one
+ * (`THINK_BUDGET_TOKENS`) while it is set - the level still picks the effort hint and whether
+ * thinking is on at all. Saved per model like the level; choosing a level clears it. Process-wide
+ * state because the provider builds the request fields and the per-turn reload re-reads config.
+ */
+export const THINK_BUDGET_CONFIG_KEY = 'thinkBudgetByModel';
+export const MIN_THINK_BUDGET = 128;
+export const MAX_THINK_BUDGET = 131_072;
+let budgetOverride: number | undefined;
+
+export function setThinkBudgetOverride(tokens: number | undefined): void {
+  budgetOverride = tokens;
+}
+
+export function thinkBudgetOverride(): number | undefined {
+  return budgetOverride;
+}
+
+/** "4000", "4k", "16K", "1,500" - a budget in range, or undefined when the text is not a number. */
+export function parseThinkBudget(text: string): number | undefined {
+  const m = /^(\d[\d,_]*)(k?)$/i.exec(text.trim());
+  if (!m) return undefined;
+  const n = Number(m[1]!.replace(/[,_]/g, '')) * (m[2] ? 1000 : 1);
+  return Number.isFinite(n) && n >= MIN_THINK_BUDGET && n <= MAX_THINK_BUDGET ? n : undefined;
+}
+
+/** The budget saved for `model`, if any. */
+export function savedThinkBudget(config: Record<string, unknown>, model: string | undefined): number | undefined {
+  const saved = config[THINK_BUDGET_CONFIG_KEY];
+  const v = model && saved && typeof saved === 'object' ? (saved as Record<string, unknown>)[model] : undefined;
+  return typeof v === 'number' && v >= MIN_THINK_BUDGET && v <= MAX_THINK_BUDGET ? v : undefined;
+}
+
 /** What the model is told when its thinking budget is spent (A17). */
 export const REASONING_BUDGET_MESSAGE = 'Thinking budget reached - stop thinking now and act on what you have.';
 
@@ -242,7 +276,7 @@ export function localThinkParams(
   const effort = THINK_EFFORT[level];
   if (effort && caps.efforts.includes(effort)) params.reasoning_effort = effort;
 
-  const budget = THINK_BUDGET_TOKENS[level];
+  const budget = budgetOverride ?? THINK_BUDGET_TOKENS[level];
   if (caps.supportsBudget && budget !== undefined && budget !== BROKEN_ZERO_BUDGET) {
     params.reasoning_budget_tokens =
       budget > 0 && maxOutputTokens !== undefined && maxOutputTokens > 0
