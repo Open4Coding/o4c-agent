@@ -144,6 +144,7 @@ import { checkConfigFiles, checkDatabases, checkDisk, checkGit, checkNode, forma
 import { runShellCommand } from '../tools/shellRunner.js';
 import { loadLanguage } from '../graph/loadLanguage.js';
 import { probeLocalServer } from '../providers/local.js';
+import { commandSection, formatSection, searchDocs } from '../session/helpDocs.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
@@ -2271,6 +2272,18 @@ export function App({
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
         }
+      } else if (commandName(input) === '/help' && input.trim() !== '/help') {
+        // E4: /help <question> - the shipped docs, searched locally; no model call.
+        pushBlock([userLine(input)]);
+        const question = input.trim().slice('/help'.length).trim();
+        const hits = searchDocs(question);
+        pushBlock([
+          infoLine(
+            hits.length
+              ? [`From the o4c docs (best ${hits.length} match${hits.length === 1 ? '' : 'es'} for "${question}"):`, '', ...hits.map((h) => formatSection(h)).join('\n\n').split('\n')].join('\n')
+              : `Nothing in the o4c docs matches "${question}". /help lists the commands; /all shows hidden ones too.`,
+          ),
+        ]);
       } else if (input === '/help') {
         pushBlock([userLine(input)]);
         // Dynamic rows included: /help is the single full reference, and a command that exists
@@ -2302,6 +2315,9 @@ export function App({
             detailLines.push('', 'Modes:');
             for (const m of MODES) detailLines.push(`  ${m.label} — ${m.description}`);
           }
+          // E4: the docs' own section on this command, when they have one.
+          const docSection = commandSection(target.name);
+          if (docSection) detailLines.push('', formatSection(docSection, 40));
           pushBlock([infoLine(detailLines.join('\n'))]);
           void runLogger.log({ type: 'system', sub_type: 'info', command: `/help-${rest}` });
         }
