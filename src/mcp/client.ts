@@ -1,6 +1,11 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { elicit, expandHeaders, type ElicitParams } from './elicitation.js';
+import { askUserHandler } from '../tools/askUser.js';
+import { FileOAuthProvider, waitForCode } from './oauth.js';
+import { UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { McpServerConfig } from './serverConfig.js';
 import type { McpCallOptions, McpCallResult, McpToolDescriptor } from './toolProxy.js';
@@ -93,7 +98,7 @@ function killPid(pid: number | undefined): void {
   }
 }
 
-function transportFor(server: McpServerConfig, onStderr: (chunk: string) => void): Transport {
+function transportFor(server: McpServerConfig, onStderr: (chunk: string) => void, authProvider?: OAuthClientProvider): Transport {
   if (server.transport === 'stdio') {
     const transport = new StdioClientTransport({
       command: server.command as string,
@@ -121,7 +126,13 @@ function transportFor(server: McpServerConfig, onStderr: (chunk: string) => void
     transport.stderr?.on('data', (chunk: Buffer | string) => onStderr(String(chunk)));
     return transport;
   }
-  return new StreamableHTTPClientTransport(new URL(server.url as string));
+  // G7: headers with ${VAR} filled in now, so a token lives in the environment, not in config.
+  const { headers, missing } = expandHeaders(server.headers);
+  if (missing.length) onStderr(`headers: environment variable${missing.length === 1 ? '' : 's'} ${missing.join(', ')} not set\n`);
+  return new StreamableHTTPClientTransport(new URL(server.url as string), {
+    ...(Object.keys(headers).length ? { requestInit: { headers } } : {}),
+    ...(authProvider ? { authProvider } : {}),
+  });
 }
 
 /**
@@ -136,8 +147,33 @@ export async function connectServer(server: McpServerConfig): Promise<ConnectedS
     stderr = (stderr + chunk).slice(-STDERR_KEEP_CHARS);
   };
 
-  const client = new Client(CLIENT_INFO);
-  const transport = transportFor(server, appendStderr);
+  // G7: elicitation - the server may ask the user for input mid-call; see mcp/elicitation.ts.
+  const makeClient = () => {
+    const c = new Client(CLIENT_INFO, { capabilities: { elicitation: { form: {}, url: {} } } });
+    c.setRequestHandler(ElicitRequestSchema, async (request) => {
+      const h = askUserHandler();
+      return (await elicit(server.id, request.params as unknown as ElicitParams, h ? (q, o) => h(q, o) : undefined)) as never;
+    });
+    return c;
+  };
+  let client = makeClient();
+  // G7: OAuth - a 401 opens the sign-in in the browser; the redirect's code finishes it, then o4c
+  // connects again (new client and transport, as the SDK requires) with the token it now holds.
+  const authProvider = server.transport === 'http' && server.oauth ? new FileOAuthProvider(server.id) : undefined;
+  let transport = transportFor(server, appendStderr, authProvider);
+  if (authProvider && transport instanceof StreamableHTTPClientTransport) {
+    try {
+      await client.connect(transport, { timeout: MCP_CONNECT_TIMEOUT_MS });
+    } catch (err) {
+      if (!(err instanceof UnauthorizedError)) throw err;
+      appendStderr(`OAuth: sign-in opened in the browser; waiting for it to finish (5 minutes).\n`);
+      const code = await waitForCode();
+      await transport.finishAuth(code);
+      await client.close().catch(() => undefined);
+      client = makeClient();
+      transport = transportFor(server, appendStderr, authProvider);
+    }
+  }
 
   // Recorded rather than read on demand: the SDK's `pid` getter reads `this._process?.pid`, and
   // `close()` clears `_process` before it starts waiting - so by the time a graceful close has

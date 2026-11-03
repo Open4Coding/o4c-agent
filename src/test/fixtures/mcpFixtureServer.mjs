@@ -19,6 +19,7 @@
 //   silent   - connects at the transport level but never answers, to exercise the timeout
 //   promptfail - lists tools fine, then throws on prompts/list, to prove prompts failing does
 //              not cost the server its tools
+//   elicit   - adds a `greet` tool that asks the user for a name through elicitation (G7)
 //   progress - adds a `slow` tool that sends progress notifications (plan 0006 G6) and, when the
 //              client cancels it, writes O4C_FIXTURE_CANCELFILE so a test can see the server heard
 //
@@ -80,6 +81,9 @@ if (MODE === 'silent') {
         inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
         annotations: { readOnlyHint: true },
       },
+      ...(MODE === 'elicit'
+        ? [{ name: 'greet', description: 'Asks the user for a name, then greets them', inputSchema: { type: 'object', properties: {} } }]
+        : []),
       ...(MODE === 'progress'
         ? [{ name: 'slow', description: 'Takes a while and reports progress', inputSchema: { type: 'object', properties: { steps: { type: 'number' } } } }]
         : []),
@@ -131,6 +135,14 @@ if (MODE === 'silent') {
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (MODE === 'callfail') throw new Error('fixture: this tool always fails');
+    if (request.params.name === 'greet') {
+      const answer = await server.elicitInput({
+        message: 'Who should I greet?',
+        requestedSchema: { type: 'object', properties: { name: { type: 'string', title: 'Name' } }, required: ['name'] },
+      });
+      const text = answer.action === 'accept' ? `hello ${answer.content?.name}` : `no greeting (${answer.action})`;
+      return { content: [{ type: 'text', text }] };
+    }
     if (request.params.name === 'slow') {
       const steps = Number(request.params.arguments?.steps ?? 3);
       const token = request.params._meta?.progressToken;

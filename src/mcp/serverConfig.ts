@@ -119,6 +119,10 @@ export interface McpServerConfig {
   readonly cwd?: string;
   /** http only: the endpoint o4c POSTs to. */
   readonly url?: string;
+  /** http only (G7): request headers; `${VAR}` in a value is filled from the environment on connect. */
+  readonly headers?: Readonly<Record<string, string>>;
+  /** http only (G7): sign in with OAuth in the browser; tokens kept in ~/.o4c/mcp-oauth. */
+  readonly oauth?: boolean;
 }
 
 export interface ParsedServers {
@@ -273,7 +277,8 @@ function parseOne(id: string, raw: unknown, problems: string[]): McpServerConfig
     problems.push(`MCP server "${id}": "url" must be http: or https:, not ${parsed.protocol} - MCP's remote transport is Streamable HTTP.`);
     return undefined;
   }
-  return { id, transport, enabled, grants, url: raw.url };
+  const headers = parseStringRecord(raw.headers, id, 'headers', problems);
+  return { id, transport, enabled, grants, url: raw.url, ...(headers && Object.keys(headers).length ? { headers } : {}), ...(raw.oauth === true ? { oauth: true } : {}) };
 }
 
 /**

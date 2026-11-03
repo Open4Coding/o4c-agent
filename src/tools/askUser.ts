@@ -17,6 +17,11 @@ export function setAskUserHandler(next: AskUserHandler | undefined): void {
   handler = next;
 }
 
+/** The dialog itself, for other askers (MCP elicitation, G7); undefined when nobody can answer. */
+export function askUserHandler(): AskUserHandler | undefined {
+  return handler;
+}
+
 export const askUserTool: Tool = {
   name: 'ask_user',
   description:
