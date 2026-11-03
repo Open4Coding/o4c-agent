@@ -1423,12 +1423,14 @@ test('the per-OS keyboard commands stay out of the main "/" palette', async () =
     // The bare "/" palette lists every non-hidden command. Hidden family members are reachable
     // from their own dropdown and by typing their exact name, never by flooding this list - the
     // same rule every /set-* and /config-* follows.
-    await type(stdin, '/');
+    // '/k' rather than a bare '/': the full list is now longer than the palette's window, so
+    // /keyboard can sit below its fold - the rule under test is about hidden rows, not the fold.
+    await type(stdin, '/k');
     await waitFor(() => (lastFrame() ?? '').includes('/keyboard'));
 
     const frame = lastFrame() ?? '';
     assert.equal(frame.includes('/keyboard-windows'), false);
-    assert.equal(frame.includes('/set-sessionname'), false);
+    assert.equal(frame.includes('/keyboard-bindings'), false);
   });
 });
 

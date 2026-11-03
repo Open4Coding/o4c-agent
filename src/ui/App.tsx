@@ -154,6 +154,7 @@ import { completeMention, expandMentions, mentionCandidates, mentionPrefix } fro
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
+import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
 import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
 import { formatDebugDump, lastRequestFromLogs, type LoggedRequest } from '../session/debugDump.js';
 import { redactSecrets } from '../session/redact.js';
@@ -1724,6 +1725,49 @@ export function App({
           await configStore.set('global', EDITOR_CONFIG_KEY, arg).catch(() => undefined);
           process.env.O4C_EDITOR = arg;
           pushBlock([infoLine(`o4c now opens ${arg}.${isTerminalEditor(arg) ? ' (A terminal editor - it takes over this window until you quit it.)' : ''}`)]);
+        }
+      } else if (commandName(input) === '/database-backup') {
+        // E20: a consistent snapshot of every o4c database (project and global).
+        pushBlock([userLine(input)]);
+        try {
+          const b = backupDatabases(dbDirsFor(projectRoot));
+          pushBlock([
+            infoLine(
+              b.files.length
+                ? [`Backed up ${b.files.length} database${b.files.length === 1 ? '' : 's'} to ${b.dir}:`, ...b.files.map((f) => `  ${f.name} (${(f.bytes / 1024).toFixed(0)} KB)`), '/database-restore puts one back.'].join('\n')
+                : 'No databases to back up yet.',
+            ),
+          ]);
+        } catch (err) {
+          pushBlock([infoLine(`Backup failed: ${err instanceof Error ? err.message : String(err)}`)]);
+        }
+      } else if (commandName(input) === '/database-restore') {
+        // E20: pick a backup, check it, confirm; applied by the restart before any database opens.
+        pushBlock([userLine(input)]);
+        const dirs = dbDirsFor(projectRoot);
+        const backups = listBackups(dirs);
+        if (backups.length === 0) pushBlock([infoLine('No backups yet - /database-backup makes one.')]);
+        else {
+          const stamp = await pickChoice(
+            'Restore which backup? (↑/↓, Enter, Esc to cancel)',
+            backups.map((b) => ({ key: b.stamp, label: `${b.stamp} - ${b.files.join(', ')} (${(b.bytes / 1024).toFixed(0)} KB)` })),
+          );
+          const problems = stamp ? checkBackup(dirs, stamp) : [];
+          if (!stamp) pushBlock([infoLine('Nothing restored.')]);
+          else if (problems.length) pushBlock([infoLine(`That backup failed its check, so it was not restored:\n${problems.map((p) => `  ${p}`).join('\n')}`)]);
+          else {
+            const ok = await pickChoice(`Replace the current databases with the ${stamp} backup? The current ones are kept (in a "before-restore" folder beside the backups).`, [
+              { key: 'yes', label: 'Yes - restore it and restart o4c' },
+              { key: 'no', label: 'No - keep the current databases' },
+            ]);
+            if (ok !== 'yes') pushBlock([infoLine('Nothing restored.')]);
+            else {
+              scheduleRestore(dirs, stamp);
+              await saveSessionNow();
+              pushBlock([infoLine(`Restoring ${stamp} - restarting...`)]);
+              restart(currentSessionIdRef.current, modeRef.current);
+            }
+          }
         }
       } else if (commandName(input) === '/view-model') {
         // E19: this model's registry entry beside what was detected.

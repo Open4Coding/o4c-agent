@@ -182,6 +182,15 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Open a config file (global, local or personal) in your editor; it is checked when you close the editor.',
   },
   {
+    name: '/database-backup',
+    description: 'Back up every o4c database (this project\'s history and code graph, and the global memories) to a dated folder in .o4c/backups.',
+  },
+  {
+    name: '/database-restore',
+    select: 'run',
+    description: 'Put a /database-backup back: pick one, it is checked, you confirm, o4c restarts with it. The databases it replaces are kept.',
+  },
+  {
     name: '/view-model',
     description: 'What o4c knows about the current model: its registry entry (name, comment, context, think level, sampling, price) and what was detected.',
   },

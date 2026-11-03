@@ -53,6 +53,7 @@ export type LifecyclePhase =
   | 'trusted'
   | 'provider'
   | 'history'
+  | 'restore'
   | 'graph'
   | 'render'
   | 'handoff'

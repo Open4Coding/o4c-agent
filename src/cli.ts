@@ -42,6 +42,7 @@ import { recordLifecycle } from './lifecycleLog.js';
 import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
+import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
 import { EDITOR_CONFIG_KEY } from './ui/externalEditor.js';
 import { setTaskCountSource } from './ui/statsReport.js';
 import { ConfigStore } from './session/configStore.js';
@@ -503,6 +504,14 @@ program
     const { trusted, projectRoot } = await ensureTrusted(cwd, undefined, undefined, opts.profile);
     recordLifecycle(lifecycleDir, 'trusted', { trusted, projectRoot });
     const projectContext = trusted ? await resolveO4cMd(cwd, projectRoot) : '';
+    // E20: a /database-restore scheduled by the last process, before anything opens a database.
+    let restoreNote: string | undefined;
+    try {
+      restoreNote = applyPendingRestore(dbDirsFor(trusted ? projectRoot : undefined));
+    } catch (err) {
+      restoreNote = `Database restore failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (restoreNote) recordLifecycle(lifecycleDir, 'restore', { note: restoreNote });
     // E13: --continue is --resume with the newest saved session in this project.
     if (opts.continue && !opts.resume) {
       const last = await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined);
@@ -725,7 +734,7 @@ program
     // E14: a numeric /think budget saved for this model replaces the level's own budget.
     setThinkBudgetOverride(savedThinkBudget(resolvedConfig, opts.model));
     // E13: one health line under the banner on a fresh start (not on the per-turn reload).
-    const startup = opts.resume
+    const health = opts.resume
       ? undefined
       : startupLine({
           provider: opts.provider,
@@ -734,6 +743,8 @@ program
           contextWindow,
           last: await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined),
         });
+    // A restore that just ran (E20) is reported even on a resume - the restart that applied it is one.
+    const startup = [restoreNote, health].filter(Boolean).join('\n') || undefined;
     // Half the configured context window, not the flat 4096 both providers used to hardcode -
     // that flat cap was unrelated to the model's real budget and silently truncated any turn
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
