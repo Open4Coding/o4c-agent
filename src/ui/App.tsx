@@ -150,6 +150,7 @@ import { completeMention, expandMentions, mentionCandidates, mentionPrefix } fro
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { editText } from './externalEditor.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
+import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
 import { runShellTool } from '../tools/runShell.js';
 import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
@@ -1651,6 +1652,43 @@ export function App({
           const { output, note } = await runBang(command, runShellTool);
           shellNotesRef.current.push(note);
           pushBlock([infoLine(`${output}\n(the model sees this with your next message)`)]);
+        }
+      } else if (commandName(input) === '/commit') {
+        // E10: a generated commit message, shown for approval; no trailer unless commitTrailer is set.
+        pushBlock([userLine(input)]);
+        const d = commitDiff();
+        if ('error' in d) pushBlock([infoLine(d.error)]);
+        else {
+          pushBlock([infoLine(`Writing a commit message for:\n${d.stat}`)]);
+          let message: string | undefined;
+          try {
+            const trailer = (await configStore.get('commitTrailer')) as string | undefined;
+            message = cleanCommitMessage(await loop.sideRequest(commitPrompt(d, input.trim().slice('/commit'.length).trim())), trailer);
+          } catch (err) {
+            pushBlock([infoLine(`Could not write a message: ${err instanceof Error ? err.message : String(err)}`)]);
+          }
+          while (message) {
+            pushBlock([infoLine(`Commit message:\n\n${message}`)]);
+            const pick = await pickChoice(
+              d.staged ? 'Commit the staged changes with this message?' : 'Nothing is staged - stage ALL changes (git add -A) and commit with this message?',
+              [
+                { key: 'commit', label: 'Commit' },
+                { key: 'edit', label: 'Edit the message in your editor, then ask again' },
+                { key: 'cancel', label: 'Cancel - nothing is committed' },
+              ],
+            );
+            if (pick === 'edit') {
+              const r = editText(message);
+              if (r.text?.trim()) message = r.text;
+              else if (r.error) pushBlock([infoLine(`Could not open the editor (${r.editor}): ${r.error}`)]);
+              continue;
+            }
+            if (pick === 'commit') {
+              const r = runCommit(message, !d.staged);
+              pushBlock([infoLine(r.hash ? `Committed ${r.hash}.` : `git commit failed:\n${r.error ?? ''}`)]);
+            } else pushBlock([infoLine('Not committed.')]);
+            break;
+          }
         }
       } else if (commandName(input) === '/copy') {
         // E9: a reply to the clipboard - /copy is the last one, /copy 2 the one before.

@@ -79,6 +79,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/commit',
+    description: 'Commit with a generated message, shown for your approval (or edit it first). Commits what is staged, else everything. No trailer unless commitTrailer is set. Usage: /commit [hint]',
+  },
+  {
     name: '/copy',
     description: 'Copy the last reply to the clipboard - /copy 2 for the one before. Works over SSH in terminals that support OSC 52.',
   },
