@@ -273,6 +273,11 @@ export async function runEvalCli(argv: string[], out: (line: string) => void = (
   const dashdash = argv.indexOf('--');
   const own = dashdash >= 0 ? argv.slice(0, dashdash) : argv;
   const passThrough = dashdash >= 0 ? argv.slice(dashdash + 1) : [];
+  // Before anything else: `o4c eval run --help` used to start a real 30-task run (found 2026-11-03).
+  if (own.includes('--help') || own.includes('-h')) {
+    out(USAGE);
+    return 0;
+  }
   const flag = (name: string) => {
     const i = own.indexOf(`--${name}`);
     return i >= 0 ? own[i + 1] : undefined;

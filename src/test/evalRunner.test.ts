@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -115,4 +115,13 @@ test('o4c eval list prints every task; an unknown subcommand prints usage', asyn
   const usage: string[] = [];
   assert.equal(await runEvalCli(['nope'], (l) => usage.push(l)), 2);
   assert.match(usage.join('\n'), /o4c eval run/);
+});
+
+test('o4c eval run --help prints usage and runs nothing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'o4c-eval-help-'));
+  const lines: string[] = [];
+  assert.equal(await runEvalCli(['run', '--help', '--dir', dir], (l) => lines.push(l)), 0);
+  assert.ok(lines.some((l) => l.includes('o4c eval run')));
+  assert.equal(existsSync(join(dir, 'results')), false);
+  assert.equal(await runEvalCli(['diff', '-h'], () => {}), 0);
 });

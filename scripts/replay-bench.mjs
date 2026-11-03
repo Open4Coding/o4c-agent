@@ -13,7 +13,7 @@
 // change can be measured on old sessions before it lands. Items add their transforms below.
 //
 // Usage: npm run build && node scripts/replay-bench.mjs <log.jsonl> [--base-url URL]
-//        [--max-tokens N] [--limit N] [--transform none] [--csv out.csv]
+//        [--max-tokens N] [--limit N] [--slots N] [--transform none] [--csv out.csv]
 // The server and key come from ~/.o4c/config.json / config.local.json unless given (the key is
 // never printed).
 
@@ -32,7 +32,7 @@ const flag = (name, fallback) => {
 };
 const logPath = args.find((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1].startsWith('--')));
 if (!logPath) {
-  console.error('usage: node scripts/replay-bench.mjs <log.FULLCONTEXT.jsonl> [--base-url URL] [--max-tokens N] [--limit N] [--transform name] [--csv file]');
+  console.error('usage: node scripts/replay-bench.mjs <log.FULLCONTEXT.jsonl> [--base-url URL] [--max-tokens N] [--limit N] [--slots N] [--transform name] [--csv file]');
   process.exit(2);
 }
 
@@ -48,6 +48,10 @@ const baseUrl = flag('base-url', config.baseUrl ?? 'http://localhost:8080');
 const apiKey = process.env.O4C_LOCAL_API_KEY ?? config.localApiKey;
 const maxTokensCap = flag('max-tokens') ? Number(flag('max-tokens')) : undefined;
 const limit = flag('limit') ? Number(flag('limit')) : Infinity;
+// `--slots 2` pins the requests to slot 0 the way o4c itself does on a 2-slot server (A19). Without
+// it the server picks the slot, and two replays can land on slots that prefill at different speeds
+// (measured on PHOEBE 2026-11-03: slot 0 ~700 tok/s, slot 1 ~1020 tok/s on the same prompt).
+const slots = flag('slots') ? Number(flag('slots')) : undefined;
 const transformName = flag('transform', 'none');
 const csvPath = flag('csv');
 
@@ -89,7 +93,7 @@ if (!transform) {
 }
 const plan = transform(rebuildRequests(rows)).slice(0, limit);
 
-const provider = new LocalProvider({ baseUrl, apiKey, maxTokens: maxTokensCap ?? 4096 });
+const provider = new LocalProvider({ baseUrl, apiKey, maxTokens: maxTokensCap ?? 4096, slots });
 const results = [];
 console.log(`replaying ${plan.length} requests from ${logPath} against ${baseUrl} (transform: ${transformName})`);
 for (const [i, { request, recorded }] of plan.entries()) {
