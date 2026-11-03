@@ -1,0 +1,41 @@
+# o4c CI (plan 0006 I5): typecheck, the test suite, a dependency audit, and an install smoke test of
+# the real package - npm pack, install it globally, run it - on Windows and Linux.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Audit (high and critical)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Pack and install smoke test
+        shell: bash
+        run: |
+          npm run build
+          npm pack
+          npm install -g ./open4coding-o4c-agent-*.tgz
+          mkdir -p "$RUNNER_TEMP/smoke" && cd "$RUNNER_TEMP/smoke"
+          o4c --version
+          o4c --provider mock --output-format json "read something" > out.json
+          node -e "const o = JSON.parse(require('fs').readFileSync('out.json', 'utf8')); if (o.exit_code !== 0 || o.tool_calls < 1) { console.error(o); process.exit(1); } console.log('smoke ok:', o.result.slice(0, 60));"
