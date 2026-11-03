@@ -78,6 +78,11 @@ export class ConfigStore {
     return this.namespace.length ? join(base, ...this.namespace) : base;
   }
 
+  /** Where a scope's config file is (or would be) - /doctor and /edit-config (plan 0006 E3). */
+  configPath(scope: ConfigScope): string | undefined {
+    return this.pathFor(scope);
+  }
+
   private pathFor(scope: ConfigScope): string | undefined {
     const dir = this.dirFor(scope);
     return dir ? join(dir, configFileName(scope)) : undefined;

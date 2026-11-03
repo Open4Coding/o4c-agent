@@ -140,6 +140,10 @@ import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } fro
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import { contextBreakdown, formatBreakdown } from '../agent/contextBreakdown.js';
 import { formatStatus } from './statusReport.js';
+import { checkConfigFiles, checkDatabases, checkDisk, checkGit, checkNode, formatChecks, type Check } from '../session/doctor.js';
+import { runShellCommand } from '../tools/shellRunner.js';
+import { loadLanguage } from '../graph/loadLanguage.js';
+import { probeLocalServer } from '../providers/local.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
@@ -1598,6 +1602,43 @@ export function App({
             pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
           }
         }
+      } else if (commandName(input) === '/doctor') {
+        // E3: each check, and for each failure what to do.
+        pushBlock([userLine(input), infoLine('Running checks (one small model call for the tool round trip)...')]);
+        const checks: Check[] = [checkNode()];
+        checks.push(...checkConfigFiles((['global', 'local', 'personal'] as const).flatMap((sc) => { const p = configStore.configPath(sc); return p ? [{ scope: sc, path: p }] : []; })));
+        checks.push(checkGit());
+        const shellRun = await runShellCommand('echo o4c-ok', { timeoutMs: 10_000, maxBufferBytes: 100_000 }).catch(() => undefined);
+        checks.push(shellRun?.stdout.includes('o4c-ok')
+          ? { name: 'Shell', state: 'ok', detail: `${currentShell().kind} (${currentShell().exe})` }
+          : { name: 'Shell', state: 'fail', detail: `${currentShell().exe} did not run a command`, fix: 'Pick another shell with /set-shell (auto, cmd, pwsh, bash, sh).' });
+        try {
+          await loadLanguage('javascript');
+          await loadLanguage('python');
+          checks.push({ name: 'Grammars', state: 'ok', detail: 'bundled tree-sitter grammars load' });
+        } catch (err) {
+          checks.push({ name: 'Grammars', state: 'warn', detail: formatError(err), fix: 'Reinstall o4c (npm i -g @open4coding/o4c-agent): the grammars/ folder is missing or damaged. The code graph and syntax checks are off until then.' });
+        }
+        checks.push(...checkDatabases([...(dbDirFor(projectRoot) ? [{ label: 'project', dir: dbDirFor(projectRoot)! }] : []), { label: 'global', dir: join(homedir(), '.o4c', 'db') }]));
+        checks.push(checkDisk(projectRoot ?? process.cwd()));
+        if (provider === 'local') {
+          const apiKey = process.env.O4C_LOCAL_API_KEY ?? ((await configStore.get('localApiKey')) as string | undefined);
+          const probe = await probeLocalServer(baseUrl, apiKey).catch(() => undefined);
+          if (probe?.status !== 'up') {
+            checks.push({ name: 'Server', state: 'fail', detail: `${baseUrl}: ${probe?.status ?? 'unreachable'}`, fix: 'Start llama-server (or check the address with /config, and the network path - a closed tunnel is the usual cause), then /doctor again.' });
+          } else {
+            checks.push({ name: 'Server', state: 'ok', detail: `${baseUrl}: ${probe.model ?? 'model id not reported'}, context ${probe.contextWindow?.toLocaleString() ?? 'unknown'}${probe.totalSlots ? `, ${probe.totalSlots} slot(s)` : ''}` });
+            try {
+              const r = await loop.probeToolCall();
+              checks.push(r.ok
+                ? { name: 'Tool calls', state: 'ok', detail: r.detail }
+                : { name: 'Tool calls', state: 'fail', detail: r.detail, fix: 'Start llama-server with --jinja and a chat template that supports tools (the model card says which); o4c also runs tool calls written as text, but a model that cannot call tools works badly.' });
+            } catch (err) {
+              checks.push({ name: 'Tool calls', state: 'fail', detail: formatError(err), fix: 'See the server log; /last-error shows the provider error.' });
+            }
+          }
+        }
+        pushBlock([infoLine(formatChecks(checks).join('\n'))]);
       } else if (commandName(input) === '/status') {
         // E2: setup and health at a glance - all local.
         pushBlock([userLine(input)]);

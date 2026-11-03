@@ -1394,6 +1394,27 @@ export class AgentLoop {
     return { before, after: this.visibleTokenEstimate };
   }
 
+  /**
+   * /doctor's tool-call round trip (E3): one tiny request with one tool, asking the model to call
+   * it. A model or chat template that cannot make structured tool calls fails here, plainly.
+   */
+  async probeToolCall(signal?: AbortSignal): Promise<{ ok: boolean; detail: string }> {
+    const started = Date.now();
+    const response = await this.provider.complete({
+      messages: [{ role: 'user', content: 'Call the ping tool with n = 1. Do nothing else.' }],
+      tools: [{ name: 'ping', description: 'A health check. Call it when asked to.', inputSchema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] } }],
+      maxTokens: 400,
+      thinkLevel: 'nothink',
+      purpose: 'side',
+      signal,
+    });
+    addUsage(this.usage, response.usage);
+    const call = response.toolCalls[0];
+    const ms = Date.now() - started;
+    if (call?.name === 'ping') return { ok: true, detail: `ping called with ${JSON.stringify(call.input)} in ${(ms / 1000).toFixed(1)} s` };
+    return { ok: false, detail: `no structured tool call came back (reply: ${JSON.stringify(response.content.slice(0, 120))})` };
+  }
+
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
     const configuredMaxIterations = options.maxIterations ?? 25;
     const maxIterations = configuredMaxIterations > 0 ? configuredMaxIterations : Infinity;
