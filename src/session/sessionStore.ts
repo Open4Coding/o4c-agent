@@ -1,7 +1,9 @@
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, rename as renameFile } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 import { redactSecrets } from './redact.js';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { Message } from '../providers/types.js';
@@ -34,6 +36,30 @@ export interface SessionData extends SessionMeta {
 // behavior for anyone who never touches the new /set-sessionsToSave family.
 export const DEFAULT_MAX_SESSIONS = 20;
 const TITLE_MAX_LENGTH = 50;
+
+const SESSIONS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  message_count INTEGER NOT NULL,
+  seq INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_seq ON sessions(seq);
+`;
+
+interface ManifestRow {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+function fromRow(r: ManifestRow): SessionMeta {
+  return { id: r.id, title: r.title, createdAt: r.created_at, updatedAt: r.updated_at, messageCount: Number(r.message_count) };
+}
 
 export function defaultSessionsDir(): string {
   return join(homedir(), '.o4c', 'sessions');
@@ -68,8 +94,56 @@ export class SessionStore {
     public maxSessions: number = DEFAULT_MAX_SESSIONS,
   ) {}
 
+  /** The pre-F4 manifest, imported once into the database and then renamed `.migrated`. */
   private manifestPath(): string {
     return join(this.dir, 'index.json');
+  }
+
+  /**
+   * The manifest lives in SQLite (plan 0006 F4) - `.o4c/db/sessions.db` beside the other databases
+   * (so /view-db shows it), or inside the sessions folder when that folder is not `.o4c/sessions`
+   * (tests, odd layouts). It used to be `index.json`, rewritten whole on every save, so two o4c
+   * processes saving at once could each drop the other's entry; a transaction cannot.
+   *
+   * Opened per operation and closed after: a few milliseconds per save, and nothing held open - an
+   * open SQLite file cannot be deleted on Windows, and session folders do get deleted.
+   */
+  private manifestDbPath(): string {
+    return basename(this.dir) === 'sessions' ? join(dirname(this.dir), 'db', 'sessions.db') : join(this.dir, 'sessions.db');
+  }
+
+  private async withDb<T>(fn: (db: DatabaseSync) => T): Promise<T> {
+    const path = this.manifestDbPath();
+    mkdirSync(dirname(path), { recursive: true });
+    const db = new DatabaseSync(path);
+    try {
+      db.exec('PRAGMA busy_timeout = 5000;');
+      db.exec(SESSIONS_SCHEMA);
+      await this.migrateIndexJson(db);
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  private async migrateIndexJson(db: DatabaseSync): Promise<void> {
+    if ((db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n > 0) return;
+    let old: SessionMeta[];
+    try {
+      old = JSON.parse(await readFile(this.manifestPath(), 'utf-8')) as SessionMeta[];
+    } catch {
+      return;
+    }
+    const insert = db.prepare('INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at, message_count, seq) VALUES (?, ?, ?, ?, ?, ?)');
+    db.exec('BEGIN');
+    try {
+      old.forEach((m, i) => insert.run(m.id, m.title, m.createdAt, m.updatedAt, m.messageCount, old.length - i));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    await renameFile(this.manifestPath(), `${this.manifestPath()}.migrated`).catch(() => undefined);
   }
 
   private sessionPath(id: string): string {
@@ -78,18 +152,9 @@ export class SessionStore {
 
   /** Manifest entries, newest-first. Empty if no sessions have ever been saved. */
   async readManifest(): Promise<SessionMeta[]> {
-    try {
-      const raw = await readFile(this.manifestPath(), 'utf-8');
-      return JSON.parse(raw) as SessionMeta[];
-    } catch (err) {
-      if (isNotFound(err)) return [];
-      throw err;
-    }
-  }
-
-  private async writeManifest(entries: SessionMeta[]): Promise<void> {
-    await mkdir(this.dir, { recursive: true });
-    await writeFile(this.manifestPath(), JSON.stringify(entries, null, 2), 'utf-8');
+    return this.withDb((db) =>
+      (db.prepare('SELECT id, title, created_at, updated_at, message_count FROM sessions ORDER BY seq DESC').all() as unknown as ManifestRow[]).map(fromRow),
+    );
   }
 
   /**
@@ -104,8 +169,12 @@ export class SessionStore {
     }
 
     const now = new Date().toISOString();
-    const manifest = await this.readManifest();
-    const existing = id ? manifest.find((m) => m.id === id) : undefined;
+    const existing = id
+      ? await this.withDb((db) => {
+          const row = db.prepare('SELECT id, title, created_at, updated_at, message_count FROM sessions WHERE id = ?').get(id) as unknown as ManifestRow | undefined;
+          return row ? fromRow(row) : undefined;
+        })
+      : undefined;
     const sessionId = existing?.id ?? id ?? randomUUID();
     const firstUserEntry = entries.find((e) => e.type === 'user' && e.sub_type === 'input');
     // Stamped in here, not at entry-creation time - AgentLoop itself has no concept of "which
@@ -127,13 +196,27 @@ export class SessionStore {
       'utf-8',
     );
 
-    let updated = [meta, ...manifest.filter((m) => m.id !== sessionId)];
-    if (updated.length > this.maxSessions) {
-      const pruned = updated.slice(this.maxSessions);
-      updated = updated.slice(0, this.maxSessions);
-      await Promise.all(pruned.map((p) => rm(this.sessionPath(p.id), { force: true })));
-    }
-    await this.writeManifest(updated);
+    // One transaction: this session to the top, and anything past maxSessions out.
+    const pruned = await this.withDb((db) => {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare(
+          `INSERT INTO sessions (id, title, created_at, updated_at, message_count, seq)
+           VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sessions))
+           ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at,
+             message_count = excluded.message_count, seq = excluded.seq`,
+        ).run(meta.id, meta.title, meta.createdAt, meta.updatedAt, meta.messageCount);
+        const old = (db.prepare('SELECT id FROM sessions ORDER BY seq DESC LIMIT -1 OFFSET ?').all(this.maxSessions) as { id: string }[]).map((r) => r.id);
+        const del = db.prepare('DELETE FROM sessions WHERE id = ?');
+        for (const oldId of old) del.run(oldId);
+        db.exec('COMMIT');
+        return old;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    });
+    await Promise.all(pruned.map((p) => rm(this.sessionPath(p), { force: true })));
 
     return sessionId;
   }
@@ -161,11 +244,7 @@ export class SessionStore {
   /** Permanently removes a session's file and manifest entry. No-op if it doesn't exist. */
   async delete(id: string): Promise<void> {
     await rm(this.sessionPath(id), { force: true });
-    const manifest = await this.readManifest();
-    const updated = manifest.filter((m) => m.id !== id);
-    if (updated.length !== manifest.length) {
-      await this.writeManifest(updated);
-    }
+    await this.withDb((db) => db.prepare('DELETE FROM sessions WHERE id = ?').run(id));
   }
 
   /**
@@ -182,8 +261,6 @@ export class SessionStore {
     }
     await writeFile(this.sessionPath(id), redactSecrets(JSON.stringify({ ...data, title }, null, 2)), 'utf-8');
 
-    const manifest = await this.readManifest();
-    const updated = manifest.map((m) => (m.id === id ? { ...m, title } : m));
-    await this.writeManifest(updated);
+    await this.withDb((db) => db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(title, id));
   }
 }
