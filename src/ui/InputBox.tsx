@@ -387,6 +387,9 @@ export function InputBox({
   const historyRef = useRef<string[]>(initialHistory ?? []);
   const historyIndexRef = useRef<number>(-1); // -1 = not currently browsing history
   const draftRef = useRef<string>(''); // what was being typed before browsing started
+  // Whether that draft was expanded (Ctrl+O) - it comes back expanded; recalled entries do not
+  // (plan 0006 E15, 0002 item 18).
+  const draftExpandedRef = useRef(false);
   // Long text arriving from outside the box (a paste, a recalled history entry, a restored prompt) is shown as a
   // placeholder too, so the box never jumps to a height that makes Ink commit its frames into scrollback.
   //
@@ -559,6 +562,7 @@ export function InputBox({
         if (hist.length === 0) return;
         if (historyIndexRef.current === -1) {
           draftRef.current = value;
+          draftExpandedRef.current = expanded;
           historyIndexRef.current = hist.length - 1;
         } else if (historyIndexRef.current > 0) {
           historyIndexRef.current -= 1;
@@ -588,6 +592,9 @@ export function InputBox({
         // session's persisted inputHistory the same way a real submission would, instead of
         // being discarded.
         if (historyIndexRef.current === -1) {
+          // E15: a multi-line or expanded draft stays put - one keypress too many must not
+          // discard a long edit. Only a one-line draft is cleared (into history) this way.
+          if (value.includes('\n') || expanded) return;
           const entry = expandPastes(value, pasteStore);
           if (entry && historyRef.current.at(-1) !== entry) {
             historyRef.current.push(entry);
@@ -606,6 +613,7 @@ export function InputBox({
         } else {
           historyIndexRef.current = -1;
           edit(() => ({ value: draftRef.current, cursor: draftRef.current.length }));
+          setExpanded(draftExpandedRef.current);
         }
         return;
       }

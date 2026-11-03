@@ -1320,3 +1320,34 @@ test('findHistoryMatch is case-insensitive and respects the from index', () => {
   assert.deepEqual(findHistoryMatch(h, 'alpha', 2), { index: 0, text: 'Alpha' });
   assert.equal(findHistoryMatch(h, 'gamma', 3), undefined);
 });
+
+// E15 (0002 item 18): a long draft survives history browsing and the bottom-edge down-arrow.
+test('down arrow at the bottom of a multi-line draft leaves it alone instead of clearing it', async () => {
+  const submitted: string[] = [];
+  const { stdin } = render(React.createElement(InputBox, { onSubmit: (v) => submitted.push(v) }));
+  await tick();
+  await type(stdin, 'line one');
+  await press(stdin, CTRL_J);
+  await type(stdin, 'line two');
+  await press(stdin, DOWN);
+  await press(stdin, ENTER);
+  assert.deepEqual(submitted, ['line one\nline two']);
+});
+
+test('an expanded draft comes back expanded after browsing history', async () => {
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, { onSubmit: () => {}, initialHistory: ['older entry'] }),
+  );
+  const long = Array.from({ length: 40 }, (_, i) => `row ${i}`).join('\n');
+  stdin.write(long);
+  await frameWith(lastFrame, 'pasted #1');
+  await press(stdin, CTRL_O);
+  const expandedFrame = await frameWith(lastFrame, 'row 39');
+  const expandedRows = expandedFrame.split('\n').length;
+  await press(stdin, CTRL_A);
+  await press(stdin, UP);
+  await frameWith(lastFrame, 'older entry');
+  await press(stdin, DOWN);
+  const back = await frameWith(lastFrame, 'row 39');
+  assert.equal(back.split('\n').length, expandedRows, 'same height as before - still expanded');
+});
