@@ -46,7 +46,7 @@ export function matchesPattern(pattern: string, tool: Tool, input: Record<string
 
 // ------------------------------------------------------------------ rules (plan 0006 C3)
 
-export type RuleScope = 'global' | 'local' | 'personal' | 'built-in' | 'protectedPaths';
+export type RuleScope = 'global' | 'solution' | 'local' | 'personal' | 'built-in' | 'protectedPaths';
 
 /**
  * Read-only shell commands allowed without asking - only when the user turns it on
@@ -81,14 +81,14 @@ export const EMPTY_RULES: PermissionRules = { allow: [], ask: [], deny: [] };
  */
 export async function loadRules(readScope: (scope: RuleScope) => Promise<Record<string, unknown>>): Promise<PermissionRules> {
   const out: PermissionRules = { allow: [], ask: [], deny: [] };
-  for (const scope of ['global', 'local', 'personal'] as const) {
+  for (const scope of ['global', 'solution', 'local', 'personal'] as const) {
     const p = (await readScope(scope)).permissions as Partial<Record<keyof PermissionRules, unknown>> | undefined;
     for (const kind of ['allow', 'ask', 'deny'] as const) {
       const list = p?.[kind];
       if (Array.isArray(list)) for (const pattern of list) if (typeof pattern === 'string' && pattern.trim()) out[kind].push({ pattern: pattern.trim(), scope });
     }
   }
-  const merged = { ...(await readScope('global')), ...(await readScope('local')), ...(await readScope('personal')) };
+  const merged = { ...(await readScope('global')), ...(await readScope('solution')), ...(await readScope('local')), ...(await readScope('personal')) };
   if (merged.autoAllowReadOnly === true) for (const pattern of READ_ONLY_SHELL) out.allow.push({ pattern, scope: 'built-in' });
   // C5: protected paths are deny rules for the tools that change files.
   if (Array.isArray(merged.protectedPaths)) {

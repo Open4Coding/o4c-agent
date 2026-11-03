@@ -2,8 +2,10 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { deepMerge } from './jsonMerge.js';
+import { findSolutionDir } from './solution.js';
 
-export type ConfigScope = 'local' | 'global' | 'personal';
+/** `solution` (plan 0006 E21) sits between global and local - see solution.ts. */
+export type ConfigScope = 'local' | 'global' | 'personal' | 'solution';
 
 /** `~/.o4c` - deliberately a standalone copy of this one-line computation rather than importing
  * it from `projectContext.ts` (which already has its own `defaultGlobalDir()`): that module
@@ -55,11 +57,17 @@ async function readJsonIfExists(path: string): Promise<Record<string, unknown>> 
  * parallel implementation of the tiering/merge logic.
  */
 export class ConfigStore {
+  /** The solution folder above the project (E21), found once; `null` passed in means none. */
+  private readonly solutionDir: string | undefined;
+
   constructor(
     private projectRoot: string | undefined,
     private globalDir: string = defaultGlobalConfigDir(),
     private namespace: string[] = [],
-  ) {}
+    solutionDir?: string | null,
+  ) {
+    this.solutionDir = solutionDir === null ? undefined : (solutionDir ?? findSolutionDir(projectRoot));
+  }
 
   /** Base directory for a scope, before applying `namespace` - `global` is always the machine's
    * global dir; `local` and `personal` share the same project-local `.o4c` dir (they only differ
@@ -69,6 +77,7 @@ export class ConfigStore {
    * untrusted project, the opposite of what they say. */
   private baseDirFor(scope: ConfigScope): string | undefined {
     if (scope === 'global') return this.globalDir;
+    if (scope === 'solution') return this.solutionDir;
     return this.projectRoot ? join(this.projectRoot, '.o4c') : undefined;
   }
 
@@ -107,12 +116,13 @@ export class ConfigStore {
    * previous key-by-key. What a feature should read when it just wants "the current value," not
    * caring which scope it came from. */
   async resolve(): Promise<Record<string, unknown>> {
-    const [global, local, personal] = await Promise.all([
+    const [global, solution, local, personal] = await Promise.all([
       this.readScope('global'),
+      this.readScope('solution'),
       this.readScope('local'),
       this.readScope('personal'),
     ]);
-    return deepMerge(deepMerge(global, local), personal);
+    return deepMerge(deepMerge(deepMerge(global, solution), local), personal);
   }
 
   /** A single key from the effective (merged) view. */
@@ -163,7 +173,7 @@ export async function scopeOwningEntry(
   fallback: ConfigScope = 'global',
 ): Promise<ConfigScope> {
   // Highest precedence first - personal wins over local, so it is also where an update must go.
-  for (const scope of ['personal', 'local'] as const) {
+  for (const scope of ['personal', 'local', 'solution'] as const) {
     if (!store.hasScope(scope)) continue;
     const own = (await store.readScope(scope))[key];
     if (own && typeof own === 'object' && (own as Record<string, unknown>)[entry] !== undefined) return scope;
@@ -197,7 +207,9 @@ export async function seedLocalConfig(
   if (await fileExists(localPath)) return;
 
   const globalPath = join(globalDir, 'config.json');
-  const globalExists = await fileExists(globalPath);
+  // Inside a solution (E21) the project is not seeded from global: a snapshot would shadow every
+  // solution setting it happened to share a key with. It follows global and solution live instead.
+  const globalExists = !findSolutionDir(projectRoot) && (await fileExists(globalPath));
   if (!globalExists && !profileBundle) return;
 
   let seedContent: Record<string, unknown> = globalExists

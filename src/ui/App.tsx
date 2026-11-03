@@ -1686,6 +1686,9 @@ export function App({
         pushBlock([userLine(input)]);
         const scope = await pickChoice<ConfigScope>('Which config file? (↑/↓, Enter, Esc to cancel)', [
           { key: 'global', label: `global - every project (${configStore.configPath('global') ?? 'n/a'})` },
+          ...(configStore.hasScope('solution')
+            ? ([{ key: 'solution', label: `solution - every project in this solution (${configStore.configPath('solution') ?? 'n/a'})` }] as const)
+            : []),
           ...(projectRoot
             ? ([
                 { key: 'local', label: `local - this project, shared (${configStore.configPath('local') ?? 'n/a'})` },
@@ -1995,7 +1998,7 @@ export function App({
         // E3: each check, and for each failure what to do.
         pushBlock([userLine(input), infoLine('Running checks (one small model call for the tool round trip)...')]);
         const checks: Check[] = [checkNode()];
-        checks.push(...checkConfigFiles((['global', 'local', 'personal'] as const).flatMap((sc) => { const p = configStore.configPath(sc); return p ? [{ scope: sc, path: p }] : []; })));
+        checks.push(...checkConfigFiles((['global', 'solution', 'local', 'personal'] as const).flatMap((sc) => { const p = configStore.configPath(sc); return p ? [{ scope: sc, path: p }] : []; })));
         checks.push(checkGit());
         const shellRun = await runShellCommand('echo o4c-ok', { timeoutMs: 10_000, maxBufferBytes: 100_000 }).catch(() => undefined);
         checks.push(shellRun?.stdout.includes('o4c-ok')

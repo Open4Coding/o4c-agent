@@ -8,6 +8,7 @@ import { defaultLogsDir } from './runLog.js';
 import { seedLocalConfig } from './configStore.js';
 import { loadProfile, recordAppliedProfile } from './profiles.js';
 import { instructionFileIn, loadInstructionFile } from './instructionFiles.js';
+import { findSolutionDir } from './solution.js';
 
 export function defaultGlobalDir(): string {
   return join(homedir(), '.o4c');
@@ -238,6 +239,14 @@ export async function resolveO4cMd(
 
   const globalPath = join(globalDir, 'o4c.md');
   if ((await readIfExists(globalPath))?.trim()) sections.push({ path: globalPath, content: loadInstructionFile(globalPath) });
+
+  // E21: the solution's instructions, between global and the project's own.
+  const solutionDir = findSolutionDir(projectRoot);
+  const solutionPath = solutionDir ? instructionFileIn(solutionDir) : undefined;
+  if (solutionPath) {
+    const content = loadInstructionFile(solutionPath);
+    if (content.trim()) sections.push({ path: solutionPath, content });
+  }
 
   // Per directory: O4C.md, else AGENTS.md, else CLAUDE.md (plan 0006 D1), with @path imports expanded.
   if (projectRoot) {
