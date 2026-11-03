@@ -1490,5 +1490,11 @@ if (process.argv[2] === 'acp') process.argv.splice(2, 1, '--acp');
 if (process.argv[2] === 'eval' && ['run', 'diff', 'list'].includes(process.argv[3] ?? '')) {
   process.exitCode = await runEvalCli(process.argv.slice(3));
 } else {
-  program.parseAsync(process.argv);
+  // An action that fails must say so and exit non-zero. Left to the unhandledRejection net it was
+  // only logged to crash.log, and the process then ended with code 0 and no output at all.
+  program.parseAsync(process.argv).catch((err: unknown) => {
+    void logCrash('action', err);
+    console.error(`o4c: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+  });
 }

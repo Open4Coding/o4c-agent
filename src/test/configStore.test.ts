@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ConfigStore, seedLocalConfig } from '../session/configStore.js';
+import { ConfigStore, seedLocalConfig, writeJsonAtomic } from '../session/configStore.js';
 
 async function withTempDirs(
   fn: (globalDir: string, projectRoot: string) => Promise<void>,
@@ -221,4 +221,37 @@ test('a namespaced ConfigStore reads/writes under that subdirectory at every sco
     );
     assert.deepEqual(JSON.parse(pluginRaw), { indexBatchSize: 500 });
   });
+});
+
+test('config writes racing reads: every read parses and no temp file is left (the Linux race is checked by the CI smoke test)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-cfg-atomic-'));
+  try {
+    const store = new ConfigStore(undefined, dir);
+    await store.set('global', 'tipCounter', 0);
+    const writes: Promise<void>[] = [];
+    const reads: Promise<Record<string, unknown>>[] = [];
+    for (let i = 1; i <= 40; i++) {
+      // Fire-and-forget, as the startup tip counter does, with reads racing it.
+      writes.push(store.set('global', 'tipCounter', i));
+      reads.push(store.readScope('global'));
+    }
+    await Promise.all(writes);
+    for (const r of await Promise.all(reads)) assert.equal(typeof r.tipCounter, 'number');
+    const left = (await import('node:fs')).readdirSync(dir).filter((f) => f.endsWith('.tmp'));
+    assert.deepEqual(left, [], 'no temp files left behind');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeJsonAtomic replaces an existing file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-cfg-atomic2-'));
+  try {
+    const path = join(dir, 'config.json');
+    await writeFile(path, '{"a":1}', 'utf-8');
+    await writeJsonAtomic(path, { b: 2 });
+    assert.deepEqual(JSON.parse(await readFile(path, 'utf-8')), { b: 2 });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

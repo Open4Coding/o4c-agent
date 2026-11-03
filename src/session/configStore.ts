@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { deepMerge } from './jsonMerge.js';
@@ -41,6 +41,35 @@ async function readJsonIfExists(path: string): Promise<Record<string, unknown>> 
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw err;
+  }
+}
+
+/**
+ * Writes a config file so a reader never sees it half-written: the whole text to a temp file
+ * beside it, then a rename over the old one. Found 2026-11-03 by CI's install smoke test: the
+ * startup tip counter's fire-and-forget `set()` truncated `~/.o4c/config.json` while the one-shot
+ * path was reading it, `JSON.parse('')` threw, and the run ended with no output at all - about
+ * five launches in six on Linux. On Windows a rename can briefly fail while another handle has the
+ * file open, so it is retried, and as a last resort the file is written in place as before.
+ */
+export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  const text = JSON.stringify(value, null, 2);
+  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  await writeFile(tmp, text, 'utf-8');
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(tmp, path);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if ((code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') && attempt < 5) {
+        await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+        continue;
+      }
+      await rm(tmp, { force: true });
+      await writeFile(path, text, 'utf-8');
+      return;
+    }
   }
 }
 
@@ -146,7 +175,7 @@ export class ConfigStore {
     const current = await readJsonIfExists(path);
     current[key] = value;
     await mkdir(dir, { recursive: true });
-    await writeFile(path, JSON.stringify(current, null, 2), 'utf-8');
+    await writeJsonAtomic(path, current);
   }
 }
 
