@@ -78,6 +78,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Like /plan, but researches first (past tasks, the code graph, the files involved) and thinks harder. Usage: /ultraplan <goal>',
   },
   {
+    name: '/session',
+    description: 'Sessions in this window: this one and background ones started with /session new <task> - look in, stop one, or open a finished one here (Ctrl+X). /session help explains.',
+  },
+  {
     name: '/view-plan',
     select: 'run',
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',

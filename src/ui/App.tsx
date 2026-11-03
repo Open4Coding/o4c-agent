@@ -183,6 +183,7 @@ import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../sess
 import { formatStats, taskCounts } from './statsReport.js';
 import { cleanTitle, forkSession, GENERATE_TITLES_KEY, lastErrorReport, recordLastError, titlePrompt } from '../session/sessionExtras.js';
 import { AUTOSUGGEST_KEY, cleanSuggestion, saveSuggestion, suggestionPrompt, takeSuggestion } from './autosuggest.js';
+import { BackgroundSessions, selfCommand } from '../session/backgroundSessions.js';
 import {
   DEFAULT_NOTIFY,
   DEFAULT_NOTIFY_AFTER_SECONDS,
@@ -196,7 +197,7 @@ import {
 import { runShellTool } from '../tools/runShell.js';
 import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
-import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
+import { describeJob, getJob, killJob, listJobs, ownerPid } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
 import { setAskUserHandler } from '../tools/askUser.js';
 import { draftO4cMd, scanProject } from '../session/projectScan.js';
@@ -886,6 +887,8 @@ export function App({
   // see that callback's own comment for why only the "waiting on the model" case gets asked.
   const [isInThinkBlock, setIsInThinkBlock] = useState(false);
   const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
+  // L1: background sessions - only in a trusted project, where sessions are saved.
+  const backgroundSessions = useMemo(() => (projectRoot ? new BackgroundSessions(join(projectRoot, '.o4c', 'sessions-bg')) : undefined), [projectRoot]);
   // L2: the next-message guess shown in the empty input box; carried over a per-turn reload.
   const [suggestion, setSuggestion] = useState<string | undefined>(() => takeSuggestion(initialSession?.id));
   const suggestionRef = useRef<string | undefined>(undefined);
@@ -1616,6 +1619,8 @@ export function App({
           if (ended) pushBlock([{ kind: 'system', text: 'Thinking ended by you (Ctrl+T) - answering now.' }]);
         });
       }
+      // L1: Ctrl+X is /session, when nothing else has the keyboard.
+      if (isAction('sessions', input, key) && !isProcessing && !choicePicker) handleSubmit('/session');
     },
     { isActive: true },
   );
@@ -2297,6 +2302,60 @@ export function App({
           pushBlock([infoLine(`Could not read the trace: ${formatError(err)}`)]);
         } finally {
           db?.close();
+        }
+      } else if (commandName(input) === '/session') {
+        // L1: the sessions in this window - this one and the background ones. No LLM call.
+        pushBlock([userLine(input)]);
+        const [sub, ...rest] = input.slice('/session'.length).trim().split(/\s+/);
+        const bg = backgroundSessions;
+        if (sub === 'help') {
+          pushBlock([infoLine('Sessions - more than one at a time in this window.\n  /session              list them: this one, and every background session with its state\n  /session new <task>   start a background session on a task; it works on its own while you carry on here\n  /session stop <n>     stop background session n\n  Ctrl+X                the same list as /session\nPick a background session to see what it is doing. Once it has finished, open it here and carry on the\nconversation (this session is saved, and /resume brings it back). A background session runs headless in\nthis project with the same tools as a one-shot run, so it can change files: give it work that does not\ntouch what you are changing here. Background sessions stop when you quit o4c.')]);
+        } else if (!bg) {
+          pushBlock([infoLine('Background sessions need a trusted project (they are saved in .o4c/). Trust this folder first - for now there is only this session.')]);
+        } else if (sub === 'new') {
+          const task = rest.join(' ').trim();
+          if (!task) {
+            pushBlock([{ kind: 'error', text: 'Usage: /session new <task> - the task the background session works on, as you would type it here.' }]);
+          } else {
+            const extra = ['--provider', provider, ...(modelProp ? ['--model', modelProp] : []), ...(baseUrl ? ['--base-url', baseUrl] : [])];
+            const started = bg.start(task, selfCommand(), extra, { cwd: process.cwd(), ownerPid: ownerPid() });
+            pushBlock([infoLine(`Background session #${started.n} started: ${task}\nIt works on its own; you are told when it finishes. /session to look in or stop it (Ctrl+X).`)]);
+          }
+        } else if (sub === 'stop') {
+          const target = bg.get(Number(rest[0]));
+          if (!target) pushBlock([{ kind: 'error', text: 'Usage: /session stop <n> - n as /session lists it.' }]);
+          else pushBlock([infoLine(bg.stop(target) ? `Background session #${target.n} stopped.` : `Background session #${target.n} is not running.`)]);
+        } else if (sub) {
+          pushBlock([{ kind: 'error', text: `Unknown: /session ${sub}. /session help explains the commands.` }]);
+        } else {
+          const all = bg.list().reverse();
+          const picked = await pickChoice('Sessions (↑/↓ to choose, Enter to select, Esc to close):', [
+            { key: 'this', label: 'This session - the one on screen' },
+            ...all.map((s) => ({ key: `bg:${s.n}`, label: bg.describe(s) })),
+            { key: 'new', label: '+ Start a background session on a task...' },
+            { key: 'help', label: '? How sessions work' },
+          ]);
+          if (picked === 'new') {
+            setPrefill({ token: nextPrefillToken++, text: '/session new ' });
+          } else if (picked === 'help') {
+            pushBlock([infoLine('Sessions - more than one at a time in this window.\n  /session              list them: this one, and every background session with its state\n  /session new <task>   start a background session on a task; it works on its own while you carry on here\n  /session stop <n>     stop background session n\n  Ctrl+X                the same list as /session\nPick a background session to see what it is doing. Once it has finished, open it here and carry on the\nconversation (this session is saved, and /resume brings it back). A background session runs headless in\nthis project with the same tools as a one-shot run, so it can change files: give it work that does not\ntouch what you are changing here. Background sessions stop when you quit o4c.')]);
+          } else if (picked?.startsWith('bg:')) {
+            const s = bg.get(Number(picked.slice(3)))!;
+            const running = bg.state(s).state === 'running';
+            pushBlock([infoLine(`${bg.describe(s)}\n${bg.tail(s) || '(no output yet)'}`)]);
+            const action = await pickChoice(`Background session #${s.n}:`, [
+              ...(running ? [{ key: 'stop', label: 'Stop it' }] : [{ key: 'open', label: 'Open it here and carry on the conversation (this session stays saved)' }]),
+              { key: 'back', label: 'Leave it' },
+            ]);
+            if (action === 'stop') {
+              pushBlock([infoLine(bg.stop(s) ? `Background session #${s.n} stopped.` : `Background session #${s.n} had already ended.`)]);
+            } else if (action === 'open') {
+              // The same hand-off /resume makes: a fresh process loads that session's history.
+              abortControllerRef.current?.abort();
+              restart(s.sessionId, modeRef.current);
+              setTimeout(() => exit(), 0);
+            }
+          }
         }
       } else if (commandName(input) === '/view-plan') {
         // Local and display-only like /plans: picking and viewing never reach loop.run().
@@ -4118,6 +4177,17 @@ export function App({
   // While the box is open, ask the server every few seconds whether it is up. There is deliberately no time limit:
   // a small box on the back of a laptop can take minutes to boot and load a model. When it answers, read its
   // context size and model name again (they were unknown or stale), let cli.ts apply them, and close the box.
+  useEffect(() => {
+    if (!backgroundSessions) return;
+    const timer = setInterval(() => {
+      for (const s of backgroundSessions.takeFinished()) {
+        const st = backgroundSessions.state(s).state;
+        pushBlock([infoLine(`Background session #${s.n} ${st === 'done' ? 'finished' : st}: ${s.task.length > 80 ? `${s.task.slice(0, 77)}...` : s.task} - /session to open it.`)]);
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [backgroundSessions, pushBlock]);
+
   const waitingForServer = serverWait !== null;
   useEffect(() => {
     if (!waitingForServer || !probeServer) return;

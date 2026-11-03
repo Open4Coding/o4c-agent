@@ -81,6 +81,7 @@ import { loadSkills, setSkills, skillGate, skillListing } from './session/skills
 import { createTaskTool, loadProfiles, setTaskPolicy, setTaskRuntime } from './agent/subAgents.js';
 import { HistoryRecorder } from './session/historyRecorder.js';
 import { TurnTracer } from './agent/tracer.js';
+import { BackgroundSessions } from './session/backgroundSessions.js';
 import type { PolicyAnswer } from './agent/loop.js';
 import type { Tool } from './tools/types.js';
 
@@ -587,6 +588,8 @@ program
       const supervisedRoot = findProjectRootSync(process.cwd());
       setJobsDir(supervisedRoot ? join(supervisedRoot, '.o4c', 'jobs') : join(tmpdir(), 'o4c-jobs'));
       killOwnedJobs(process.pid);
+      // L1: background sessions belong to the process that really quits, like jobs.
+      if (supervisedRoot) new BackgroundSessions(join(supervisedRoot, '.o4c', 'sessions-bg')).stopOwned(process.pid);
       process.exit(supervisorCode);
     }
     const initialMode: Mode | undefined = MODES.some((m) => m.mode === opts.mode) ? (opts.mode as Mode) : undefined;
@@ -979,7 +982,10 @@ program
     // Background jobs (B22): records under .o4c/jobs; this process kills the ones it owns on exit -
     // a reloading worker owns none (the supervisor does), so a reload never stops a dev server.
     setJobsDir(trusted && projectRoot ? join(projectRoot, '.o4c', 'jobs') : join(tmpdir(), 'o4c-jobs'));
-    process.on('exit', () => killOwnedJobs(process.pid));
+    process.on('exit', () => {
+      killOwnedJobs(process.pid);
+      if (trusted && projectRoot && process.env.O4C_BACKGROUND_SESSION === undefined) new BackgroundSessions(join(projectRoot, '.o4c', 'sessions-bg')).stopOwned(process.pid);
+    });
     loop.registerCore({
       name: 'jobs',
       turnNote: () => {

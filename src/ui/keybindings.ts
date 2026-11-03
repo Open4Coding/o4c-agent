@@ -21,6 +21,7 @@ export const KEY_ACTIONS = {
   'history-search': { key: 'r', label: 'Search input history' },
   'stop-thinking': { key: 't', label: 'Stop thinking, answer now' },
   'kill-line': { key: 'u', label: 'Kill to the cursor (Up yanks it back)' },
+  'sessions': { key: 'x', label: 'Sessions: this one and the background ones (/session)' },
 } as const;
 
 export type KeyAction = keyof typeof KEY_ACTIONS;

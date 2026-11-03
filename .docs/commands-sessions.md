@@ -13,6 +13,18 @@ Pick one of the saved sessions (the newest 20 by default - see `/set-sessionsToS
 the conversation, the input history and the session's token totals come back. From the shell,
 `o4c -c` resumes the newest one without the picker.
 
+## `/session`
+
+More than one session at a time in this window. `/session new <task>` starts a background session that
+works on that task on its own while you carry on here; you are told when it finishes. `/session` (or
+Ctrl+X) lists this session and every background one with its state - pick one to see what it is doing,
+stop it, or, once it has finished, open it here and carry on the conversation (the session you leave
+stays saved; `/resume` brings it back). `/session stop <n>` stops one; `/session help` explains it all.
+
+A background session is a headless o4c in this project with the same tools as a one-shot run, so it can
+change files - give it work that does not touch what you are changing in the foreground. It talks to the
+same provider and model. Background sessions need a trusted project, and stop when you quit o4c.
+
 ## `/fork`
 
 Copy the conversation so far into a new session and carry on in the copy. The original stays exactly as
