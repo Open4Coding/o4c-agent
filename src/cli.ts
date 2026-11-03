@@ -43,6 +43,7 @@ import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
+import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
 import { loadCredentials } from './session/credentials.js';
 import { createProvider, parseProviderSpecs } from './providers/factory.js';
 import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
@@ -532,6 +533,11 @@ program
     // config.json quietly wanting `-p local` instead.
     const configStore = new ConfigStore(trusted ? projectRoot : undefined);
     const resolvedConfig = await configStore.resolve();
+    // F3: prune old run logs (newest 50 and the last 7 days are always kept; see logRotation.ts).
+    {
+      const { keep, keepDays } = logRotationSettings(resolvedConfig);
+      pruneRunLogs(logsDirFor(trusted ? projectRoot : undefined), keep, keepDays);
+    }
     function configOr(optName: 'model' | 'provider' | 'baseUrl', cliValue: string): string {
       if (program.getOptionValueSource(optName) !== 'default') return cliValue;
       const configValue = resolvedConfig[optName];
