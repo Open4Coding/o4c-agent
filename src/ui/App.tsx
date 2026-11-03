@@ -154,6 +154,7 @@ import { completeMention, expandMentions, mentionCandidates, mentionPrefix } fro
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
+import { expandCustomCommand, loadCustomCommands } from '../session/customCommands.js';
 import { markIncorrect } from '../session/workedCommand.js';
 import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
 import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
@@ -1177,7 +1178,16 @@ export function App({
   // The one dynamic part of the command registry: an MCP server's prompts, which arrive when its
   // handshake finishes rather than at module load. Empty is both the initial state and the
   // normal one - `grants.slashCommands` is off by default.
-  const [mcpCommands, setMcpCommands] = useState<readonly CommandInfo[]>([]);
+  // The commands beyond the built-in ones: custom markdown commands (G1, read once here) and MCP
+  // prompts (arriving when their servers connect). One list, so the palette, /help and /all treat
+  // both alike; `custom` / `mcpPrompt` on each entry says which it is.
+  const [mcpCommands, setMcpCommands] = useState<readonly CommandInfo[]>(() =>
+    loadCustomCommands(projectRoot, new Set(KNOWN_COMMANDS)).commands.map((c) => ({
+      name: c.name,
+      description: `${c.description}${c.args.length ? ` Usage: ${c.name} ${c.args.map((a) => `<${a}>`).join(' ')}` : ''}`,
+      custom: { body: c.body, args: c.args, file: c.file },
+    })),
+  );
   useEffect(() => {
     if (!mcpPromptCommands) return;
     let live = true;
@@ -1185,7 +1195,12 @@ export function App({
       // Guarded against a resolve landing after unmount, which is the ordinary case rather than
       // the exotic one: o4c hands off to a fresh process after most turns, so a server still
       // inside its connect timeout will resolve into a torn-down tree.
-      if (live && commands.length > 0) setMcpCommands(commands);
+      if (live && commands.length > 0) {
+        setMcpCommands((prev) => {
+          const taken = new Set(prev.filter((c) => c.custom).map((c) => c.name));
+          return [...prev.filter((c) => c.custom), ...commands.filter((c) => !taken.has(c.name))];
+        });
+      }
     });
     return () => {
       live = false;
@@ -3085,6 +3100,15 @@ export function App({
           ),
         ]);
         void runLogger.log({ type: 'system', sub_type: 'info', command: '/mcp' });
+      } else if (mcpCommands.some((c) => c.name === commandName(input) && c.custom)) {
+        // G1: a custom command's body goes into the input box to read and edit - never sent on its own.
+        pushBlock([userLine(input)]);
+        const name = commandName(input);
+        const custom = mcpCommands.find((c) => c.name === name)!.custom!;
+        const text = expandCustomCommand(custom, input.slice(name.length));
+        setInputValue(text);
+        setPrefill({ token: nextPrefillToken++, text });
+        pushBlock([infoLine(`${name} expanded into the input box (from ${custom.file}). Read it, edit it if you like, then press Enter to send it.`)]);
       } else if (mcpCommands.some((c) => c.name === commandName(input))) {
         // An MCP prompt is a template the user asked for by name. It expands into the input box
         // rather than being sent: the spec's own user-interaction model for prompts asks for

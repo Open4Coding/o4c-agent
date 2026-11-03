@@ -45,6 +45,8 @@ export interface CommandInfo {
    * reach the registry readers below as an `extra` argument instead of living in `COMMANDS`.
    */
   mcpPrompt?: McpPromptRef;
+  /** A custom command (plan 0006 G1): a markdown file whose body expands into the input box. */
+  custom?: { readonly body: string; readonly args: readonly string[]; readonly file: string };
 }
 
 // Single source of truth for the front end's own commands, used by both the "/" command palette

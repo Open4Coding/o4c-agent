@@ -4190,3 +4190,16 @@ test('/plans with a project store: imports new plan files first, then lists the 
     }
   });
 });
+
+test('a custom command (G1) from .o4c/commands expands into the input box and is not sent', async () => {
+  await withTempDir(async (dir) => {
+    await mkdir(join(dir, '.o4c', 'commands'), { recursive: true });
+    await writeFile(join(dir, '.o4c', 'commands', 'greet.md'), '---\ndescription: Greet someone\nargs: who\n---\nSay hello to $who, warmly.');
+    const { stdin, frames, lastFrame } = await setup({ dir, projectRoot: dir });
+
+    await submit(stdin, '/greet Ada Lovelace');
+    await waitFor(() => anyFrameIncludes(frames, 'expanded into the input box'));
+    await waitFor(() => (lastFrame() ?? '').includes('Say hello to Ada Lovelace, warmly.'));
+    assert.equal(anyFrameIncludes(frames, 'canned mock response'), false, 'nothing went to the model');
+  });
+});
