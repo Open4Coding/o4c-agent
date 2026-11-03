@@ -43,6 +43,7 @@ import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
+import { PTY_CONFIG_KEY, ptyTool } from './tools/pty.js';
 import { CUSTOM_MODE_KEY, parseCustomModes, setCustomModes } from './ui/customModes.js';
 import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
 import { loadSkills, setSkills, skillGate, skillListing } from './session/skills.js';
@@ -852,9 +853,11 @@ program
     setSkills(skills);
     // G4: sub-agent profiles (built-in explore/verify, then global, then project) and the task tool.
     const taskTool = createTaskTool(loadProfiles(trusted ? projectRoot : undefined));
+    // G11: the pty tool only when config ptyTool is true - off, it is not even in the tool list.
+    const extraTools = [taskTool, ...(resolvedConfig[PTY_CONFIG_KEY] === true ? [ptyTool] : [])];
     const systemPrompt = buildSystemPrompt({
       profile: promptProfileFor(opts.model, resolvedConfig[PROMPT_PROFILE_CONFIG_KEY]),
-      tools: [...defaultTools.map((t) => t.name), taskTool.name, ...(trusted && resolvedConfig.codeGraph !== false ? ['code_graph'] : [])],
+      tools: [...defaultTools.map((t) => t.name), ...extraTools.map((t) => t.name), ...(trusted && resolvedConfig.codeGraph !== false ? ['code_graph'] : [])],
       skills: skillListing(skills),
       environment: [cwdLine, shellPromptLine(currentShell())],
       projectContext,
@@ -878,7 +881,7 @@ program
         });
       }
     }
-    const loop = new AgentLoop(provider, [...defaultTools, taskTool], systemPrompt);
+    const loop = new AgentLoop(provider, [...defaultTools, ...extraTools], systemPrompt);
     setTaskRuntime({ provider, tools: () => loop.getTools(), environment: [cwdLine, shellPromptLine(currentShell())], contextWindow });
     // G3: PostToolUse runs around every tool; PreCompact is told before a compaction.
     loop.registerCore(postToolHooksComponent({ sessionId: opts.resume ?? opts.session, cwd }));
