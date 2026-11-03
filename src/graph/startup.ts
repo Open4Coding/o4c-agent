@@ -52,6 +52,7 @@ export interface CodeGraphSession {
  * window costs the index's freshness and no longer costs the UI its frame rate.
  */
 export function startCodeGraph(options: CodeGraphSessionOptions): CodeGraphSession | undefined {
+  let closed = false;
   const dbDir = dbDirFor(options.projectRoot);
   if (!dbDir || !options.projectRoot) return undefined;
 
@@ -96,6 +97,9 @@ export function startCodeGraph(options: CodeGraphSessionOptions): CodeGraphSessi
     // than in a startup line nobody reads. `component.status()` is there for `/context` to show
     // when there is a place to show it (checklist item 3's territory, with the worker).
     close(): void {
+      // Idempotent: a one-shot run closes it as soon as it has answered, and the exit hook again.
+      if (closed) return;
+      closed = true;
       // The worker first: a pass in flight is writing to the file about to be checkpointed, and
       // the index is derived, so abandoning a half-finished pass costs nothing but the next
       // session's first pass having more to do.

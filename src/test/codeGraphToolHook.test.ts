@@ -604,3 +604,19 @@ test('an edit_file is absorbed: the edited file is re-read and its new lines are
     assert.equal(store.definitionsOf('neverEdited').length, 0);
   });
 });
+
+test('a graph session can be closed mid-pass and closed again - a one-shot run stops its index pass that way', async () => {
+  const { startCodeGraph } = await import('../graph/startup.js');
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-graph-close-'));
+  try {
+    await mkdir(join(dir, '.o4c'), { recursive: true });
+    await mkdir(join(dir, 'src'), { recursive: true });
+    for (let i = 0; i < 200; i++) await writeFile(join(dir, 'src', `f${i}.ts`), `export function f${i}() { return ${i}; }\n`);
+    const graph = startCodeGraph({ projectRoot: dir, addTools: () => {}, removeTools: () => {}, exposed: true });
+    assert.ok(graph);
+    graph.close();
+    assert.doesNotThrow(() => graph.close(), 'the exit hook closes it again');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

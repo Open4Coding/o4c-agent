@@ -1493,6 +1493,10 @@ program
       // own, so without this a spawned server could keep the event loop alive after the answer
       // has already been printed - the same class of hang the explicit exit in runRepl exists for.
       await mcp.shutdown();
+      // The same for the code graph's first index pass: its worker kept a one-shot run alive after
+      // the answer until the whole project was indexed (found 2026-11-03). The index commits per
+      // file, so stopping here keeps what is done and the next run carries on from there.
+      graph?.close();
     }
   });
 
