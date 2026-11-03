@@ -91,6 +91,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Copy this conversation to a new session and carry on in the copy; the original stays as it was (/resume returns to it).',
   },
   {
+    name: '/debug',
+    description: 'o4c debugging itself: the exact last request (system prompt, messages, tools), what went into it and why, and the raw response - opened in your editor. No LLM call.',
+  },
+  {
     name: '/last-error',
     description: 'Show the last failed request in full and the end of crash.log - no LLM call.',
   },

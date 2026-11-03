@@ -51,7 +51,7 @@ import { grammarForPath, highlightCode } from './syntaxHighlight.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
   DEFAULT_THINK_CAPS,
@@ -139,7 +139,7 @@ import type { CodeGraphSession } from '../graph/startup.js';
 import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } from './highlightColor.js';
 import { buildSplashText } from './splash.js';
 import type { Tool } from '../tools/types.js';
-import type { Message } from '../providers/types.js';
+import type { CompletionRequest, CompletionResponse, Message } from '../providers/types.js';
 import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import { contextBreakdown, formatBreakdown } from '../agent/contextBreakdown.js';
@@ -154,6 +154,8 @@ import { completeMention, expandMentions, mentionCandidates, mentionPrefix } fro
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
+import { formatDebugDump, lastRequestFromLogs, type LoggedRequest } from '../session/debugDump.js';
+import { redactSecrets } from '../session/redact.js';
 import { logsDirFor } from '../session/projectContext.js';
 import { defaultLogsDir } from '../session/runLog.js';
 import { MOUSE_CONFIG_KEY } from './mouse.js';
@@ -933,6 +935,8 @@ export function App({
   const resumePickerOpenRef = useRef(false);
   // The full-context log writer; it remembers the previous request so it can write deltas.
   const providerCallLoggerRef = useRef(createProviderCallLogger(fullContextLogger));
+  // L3 /debug: this process's last request and response, exactly as sent and received.
+  const lastCallRef = useRef<{ request: CompletionRequest; response: CompletionResponse } | undefined>(undefined);
 
   /**
    * `full` view only: the piece of the current stream that has arrived with no newline after it
@@ -1788,6 +1792,39 @@ export function App({
           currentSessionIdRef.current = fork.id;
           usageStore?.setSessionId(fork.id);
           pushBlock([infoLine(`Forked: you are now in "${fork.title}". The original is unchanged - /resume to go back to it.`)]);
+        }
+      } else if (commandName(input) === '/debug') {
+        // L3: o4c debugging itself - the exact last request and why, in the editor. No model call.
+        pushBlock([userLine(input)]);
+        const own = lastCallRef.current;
+        const fromLog = own ? undefined : lastRequestFromLogs(logsDirFor(projectRoot));
+        const request: LoggedRequest | undefined = own
+          ? { systemPrompt: own.request.systemPrompt, messages: [...own.request.messages], tools: [...(own.request.tools ?? [])], response: own.response }
+          : fromLog?.request;
+        if (!request) pushBlock([infoLine('No request has been sent yet (none in this process, and no FULLCONTEXT log in this project) - send a message first.')]);
+        else {
+          const lastBreak = loop.getCacheBreaks().at(-1);
+          const rules = await loadRules((sc) => configStore.readScope(sc as ConfigScope));
+          const text = formatDebugDump({
+            request,
+            source: own ? 'this process - the last request, exactly as sent' : `rebuilt from ${fromLog!.file}`,
+            breakdown: formatBreakdown(contextBreakdown({ systemPrompt: request.systemPrompt ?? '', messages: request.messages, tools: request.tools }, builtSystemPrompt()?.sections)),
+            window: (() => {
+              const w = loop.slidingWindowSettings();
+              return w ? describeWindowSetting(w) : 'full history (no sliding window)';
+            })(),
+            historyEntries: loop.getEntries().length,
+            cacheBreak: lastBreak ? describeCacheBreak(lastBreak) : undefined,
+            rules: describeRules(rules),
+            model,
+            thinkLevel: THINK_LEVEL_INFO[thinkLevel].label,
+          });
+          const dir = join(tmpdir(), 'o4c-debug');
+          mkdirSync(dir, { recursive: true });
+          const file = join(dir, `debug-${new Date().toISOString().replace(/[:.]/g, '-')}.md`);
+          writeFileSync(file, redactSecrets(text), 'utf-8');
+          const r = viewInEditor(file);
+          pushBlock([infoLine(r.ok ? `Debug dump (${request.messages.length} messages, ${text.length.toLocaleString()} characters) opened in ${r.editor}: ${file}` : `Wrote ${file}; could not open the editor (${r.editor}): ${r.error ?? ''}`)]);
         }
       } else if (commandName(input) === '/last-error') {
         // E13: the last failed request in full, and the end of crash.log.
@@ -3084,7 +3121,10 @@ export function App({
             // already-derived AgentEvent stream below (which only ever carries the *response*
             // side, split/reshaped for display). Fire-and-forget, same reasoning as runLogger's
             // own calls: a logging failure must never interrupt the turn itself.
-            onProviderCall: (call) => providerCallLoggerRef.current(call),
+            onProviderCall: (call) => {
+              lastCallRef.current = call;
+              providerCallLoggerRef.current(call);
+            },
             onEvent: (event: AgentEvent) => {
               // Raw streamed text - a live-preview-only signal, not logged (the run log already
               // gets the complete, final 'think'/'text' events below once the stream ends) and

@@ -39,7 +39,7 @@ test('commandName extracts just the /word, ignoring anything after whitespace', 
   assert.equal(commandName('/foo bar baz'), '/foo');
 });
 
-test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is real now, /debug still is not', () => {
+test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help and /debug (L3) included', () => {
   assert.deepEqual(KNOWN_COMMANDS, [
     '/clear',
     '/resume',
@@ -51,6 +51,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/commit',
     '/copy',
     '/fork',
+    '/debug',
     '/last-error',
     '/stats',
     '/tips',

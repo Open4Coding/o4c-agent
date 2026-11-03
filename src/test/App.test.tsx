@@ -1287,13 +1287,14 @@ test('Escape dismisses the command palette without submitting, and typing again 
   });
 });
 
-test('/debug no longer exists - treated as an unknown command', async () => {
+test('/debug (L3) before any request says there is nothing to show yet, without a model call', async () => {
   await withTempDir(async (dir) => {
-    const { stdin, frames } = await setup({ dir });
+    // projectRoot = the temp dir, so it reads that empty logs folder - not ~/.o4c/logs, which has real ones.
+    const { stdin, frames } = await setup({ dir, projectRoot: dir });
 
     await submit(stdin, '/debug');
-    await waitFor(() => anyFrameIncludes(frames, 'Unknown command: /debug'));
-    assert.ok(anyFrameIncludes(frames, 'Unknown command: /debug'));
+    await waitFor(() => anyFrameIncludes(frames, 'No request has been sent yet'));
+    assert.equal(anyFrameIncludes(frames, 'Unknown command: /debug'), false);
   });
 });
 
