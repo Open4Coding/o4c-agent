@@ -4265,3 +4265,19 @@ test('/setup (I2) looks for servers, offers them with "another server" and Anthr
     await waitFor(() => anyFrameIncludes(frames, 'Setup cancelled - nothing changed'));
   });
 });
+
+test('after Esc cancels a picker (/setup), the next slash command still runs on Enter (I6 Linux finding)', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir });
+    await submit(stdin, '/setup');
+    await waitFor(() => (lastFrame() ?? '').includes('Which model should o4c use?'), 15000);
+    await tick(150);
+    stdin.write(ESCAPE);
+    await waitFor(() => anyFrameIncludes(frames, 'Setup cancelled - nothing changed'));
+    await tick(150);
+    await type(stdin, '/help');
+    await tick(300);
+    stdin.write(ENTER);
+    await waitFor(() => anyFrameIncludes(frames, 'Available commands'), 8000);
+  });
+});

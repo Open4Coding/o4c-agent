@@ -138,7 +138,9 @@ test('the mount point of a real directory has no trailing separator', async () =
   const root = await tempDir();
   const mount = await readMountPoint(root);
   assert.ok(mount, 'a real directory must resolve to some volume');
-  assert.ok(!mount.endsWith('/'), `${mount} would render as a doubled separator`);
+  // `/` itself is a real POSIX mount point (and projectLabel renders it without doubling); anything
+  // longer must not end in a separator. Found on the first Linux run (plan 0006 I6).
+  assert.ok(mount === '/' || !mount.endsWith('/'), `${mount} would render as a doubled separator`);
   if (process.platform === 'win32') {
     // The drive of the temp dir, whatever it is on this machine - `C:`, not `C:\`.
     assert.equal(mount, parse(root).root.replace(/\\$/, ''));

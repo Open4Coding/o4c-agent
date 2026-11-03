@@ -42,7 +42,8 @@ function make(kind: ShellKind, exe: string): Shell {
 }
 
 function kindOf(exe: string): ShellKind | undefined {
-  const name = basename(exe).toLowerCase().replace(/\.exe$/, '');
+  // Both separators, whatever the host: `basename` on Linux keeps a whole Windows path (I6).
+  const name = (exe.split(/[\\/]/).pop() ?? exe).toLowerCase().replace(/\.exe$/, '');
   return (['cmd', 'powershell', 'pwsh', 'bash', 'sh'] as const).find((k) => k === name);
 }
 
