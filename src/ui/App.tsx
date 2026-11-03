@@ -155,6 +155,8 @@ import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
 import { expandCustomCommand, loadCustomCommands } from '../session/customCommands.js';
+import { describeServer, detectServers, roundTrip, saveSetup, type SetupChoice } from '../session/setup.js';
+import { askUserHandler } from '../tools/askUser.js';
 import { describePresets, MCP_PRESETS, resourceMentions } from '../mcp/presets.js';
 import { mcpConfigStore, MCP_SERVERS_KEY } from '../mcp/registry.js';
 import { describeHooks, hasHooks, hookProblems, hooksConfig, preToolHookVerdict, runHooks, type HookOutcome } from '../session/hooks.js';
@@ -165,7 +167,7 @@ import { markIncorrect } from '../session/workedCommand.js';
 import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
 import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
 import { formatDebugDump, lastRequestFromLogs, type LoggedRequest } from '../session/debugDump.js';
-import { redactSecrets } from '../session/redact.js';
+import { redactSecrets, registerSecret } from '../session/redact.js';
 import { logsDirFor } from '../session/projectContext.js';
 import { defaultLogsDir } from '../session/runLog.js';
 import { MOUSE_CONFIG_KEY } from './mouse.js';
@@ -283,6 +285,8 @@ export interface AppProps {
   tip?: string;
   /** The startup health line (E13): server, model, context, last session. Fresh starts only. */
   startup?: string;
+  /** I2: no global config yet - run /setup straight away. */
+  firstRun?: boolean;
   /** How the local server answered at launch (`up` when unknown/not a local server). When it is `down` or
    * `loading` the app opens the "Server is down: wait or choose another model" box straight away. */
   serverStatus?: ServerStatus;
@@ -744,6 +748,7 @@ export function App({
   showTabHint,
   tip,
   startup,
+  firstRun,
   projectRoot,
   thinkCaps: probedThinkCaps,
   usageStore,
@@ -3134,6 +3139,49 @@ export function App({
           queuedInputsRef.current.unshift(`[Goal] ${goal.text}`);
           setQueuedPreview([...queuedInputsRef.current]);
         }
+      } else if (commandName(input) === '/setup') {
+        // I2: find a model server, key if needed, one real tool-call round trip, save globally.
+        pushBlock([userLine(input)]);
+        pushBlock([infoLine('Looking for a model server (llama.cpp :8080, Ollama :11434, LM Studio :1234, and the configured URL)...')]);
+        const configuredUrl = (await configStore.get('baseUrl').catch(() => undefined)) as string | undefined;
+        const found = await detectServers(configuredUrl ? [configuredUrl] : []);
+        const usable = found.filter((s) => s.state !== 'down');
+        const pick = await pickChoice('Which model should o4c use? (↑/↓, Enter, Esc to cancel)', [
+          ...usable.map((s) => ({ key: `server:${s.url}`, label: describeServer(s) })),
+          { key: 'other', label: 'Another server - type its URL' },
+          { key: 'anthropic', label: 'Anthropic (Claude API) - needs an API key; costs money' },
+        ]);
+        let choice: SetupChoice | undefined;
+        const ask = askUserHandler();
+        if (pick?.startsWith('server:')) {
+          const s = usable.find((x) => `server:${x.url}` === pick)!;
+          choice = { provider: 'local', baseUrl: s.url, model: s.models[0] };
+          if (s.state === 'needs-key') {
+            const key = ask ? await ask(`The server at ${s.url} needs an API key. Paste it (it is saved in your global ~/.o4c/config.json credentials, never in a project):`, []) : undefined;
+            if (!key?.trim()) choice = undefined;
+            else choice.apiKey = key.trim();
+          }
+        } else if (pick === 'other') {
+          const url = ask ? await ask('The server\'s base URL (e.g. http://192.168.1.20:8080):', []) : undefined;
+          if (url?.trim()) choice = { provider: 'local', baseUrl: url.trim().replace(/\/+$/, '') };
+        } else if (pick === 'anthropic') {
+          const key = process.env.ANTHROPIC_API_KEY ?? (ask ? await ask('Your Anthropic API key (saved in your global config credentials):', []) : undefined);
+          if (key?.trim()) choice = { provider: 'anthropic', ...(process.env.ANTHROPIC_API_KEY ? {} : { apiKey: key.trim() }) };
+        }
+        if (!choice) pushBlock([infoLine('Setup cancelled - nothing changed. /setup runs it again.')]);
+        else {
+          if (choice.apiKey) registerSecret(choice.apiKey);
+          pushBlock([infoLine('Checking it with one real tool call...')]);
+          const check = await roundTrip(choice);
+          if (!check.ok) {
+            pushBlock([infoLine(`That did not work: ${check.detail}\nNothing was saved. Fix the server (or the key) and run /setup again.`)]);
+          } else {
+            await saveSetup(configStore, choice);
+            pushBlock([infoLine(`Works (${check.detail}). Saved to your global config - restarting o4c with it now.`)]);
+            await saveSessionNow().catch(() => undefined);
+            restart(currentSessionIdRef.current, modeRef.current);
+          }
+        }
       } else if (commandName(input) === '/hooks') {
         // G3: the configured hooks and any problems in them.
         pushBlock([userLine(input)]);
@@ -3863,6 +3911,17 @@ export function App({
     },
     [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans, pickChoice, checkpoints],
   );
+
+  // I2: the first start ever (no global config) runs /setup by itself, once the app is up.
+  const firstRunDoneRef = useRef(false);
+  useEffect(() => {
+    if (!firstRun || firstRunDoneRef.current) return;
+    firstRunDoneRef.current = true;
+    pushBlock([infoLine('Welcome to o4c. First, a model to work with:')]);
+    void processTurn('/setup');
+    // Once, on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleModePickerSelect = useCallback(
     (m: Mode) => {

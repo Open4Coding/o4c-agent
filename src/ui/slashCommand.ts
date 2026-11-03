@@ -459,6 +459,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose hidden commands to show in the bare / list too (toggle one at a time; Esc when done).',
   },
   {
+    name: '/setup',
+    description: 'Set up the model o4c uses: finds local servers (llama.cpp, Ollama, LM Studio), asks for a key if needed, checks one real tool call, saves it. Runs by itself on first start.',
+  },
+  {
     name: '/goal',
     description: 'Set a goal o4c keeps working toward until it is verified (goalVerifyCommand, or the model replying GOAL MET) or a turn budget is spent. Usage: /goal [budget N] <goal> | /goal | /goal off',
   },

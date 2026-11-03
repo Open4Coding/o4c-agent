@@ -94,7 +94,7 @@ import { createProvider, parseProviderSpecs } from './providers/factory.js';
 import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
 import { EDITOR_CONFIG_KEY } from './ui/externalEditor.js';
 import { setTaskCountSource } from './ui/statsReport.js';
-import { ConfigStore } from './session/configStore.js';
+import { ConfigStore, defaultGlobalConfigDir } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
 import { startMcpSession, type McpSession } from './mcp/startup.js';
 import { startCodeGraph, type CodeGraphSession } from './graph/startup.js';
@@ -155,7 +155,7 @@ import { theme } from './ui/theme.js';
 import { formatEvent } from './ui/formatEvent.js';
 import { formatError } from './ui/formatError.js';
 import { appendFile, mkdir } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { defaultLogsDir } from './session/runLog.js';
 import { detectCurrentOs, platformPromptLine } from './ui/platform.js';
@@ -294,6 +294,7 @@ async function runRepl(
   checkpoints?: CheckpointHooks,
   tip?: string,
   startup?: string,
+  firstRun?: boolean,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -373,6 +374,7 @@ async function runRepl(
       checkpoints,
       tip,
       startup,
+      firstRun,
       restart,
       initialMode,
       sessionView,
@@ -1337,6 +1339,8 @@ program
         checkpointHooks,
         tip,
         startup,
+        // I2: no global config at all yet - the setup runs by itself (fresh start only).
+        !opts.resume && !existsSync(join(defaultGlobalConfigDir(), 'config.json')),
       );
       return;
     }

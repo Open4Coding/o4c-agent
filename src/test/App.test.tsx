@@ -4252,3 +4252,16 @@ test('a custom mode (G10) joins the Tab cycle, shows by name, and its tool list 
     setCustomModes([]);
   }
 });
+
+test('/setup (I2) looks for servers, offers them with "another server" and Anthropic, and Esc cancels without saving', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir });
+    await submit(stdin, '/setup');
+    await waitFor(() => anyFrameIncludes(frames, 'Looking for a model server'));
+    await waitFor(() => (lastFrame() ?? '').includes('Which model should o4c use?'), 15000);
+    assert.ok((lastFrame() ?? '').includes('Another server - type its URL'));
+    await tick(150);
+    stdin.write(ESCAPE);
+    await waitFor(() => anyFrameIncludes(frames, 'Setup cancelled - nothing changed'));
+  });
+});
