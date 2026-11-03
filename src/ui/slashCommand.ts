@@ -182,6 +182,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Open a config file (global, local or personal) in your editor; it is checked when you close the editor.',
   },
   {
+    name: '/mark-incorrect',
+    description: 'The last answer was wrong: rank that task down in history search and keep your reason with it (for search and /reflect). Usage: /mark-incorrect [#task] [reason]',
+  },
+  {
     name: '/database-backup',
     description: 'Back up every o4c database (this project\'s history and code graph, and the global memories) to a dated folder in .o4c/backups.',
   },

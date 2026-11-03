@@ -69,6 +69,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help an
     '/keyboard-linux',
     '/view-log',
     '/edit-config',
+    '/mark-incorrect',
     '/database-backup',
     '/database-restore',
     '/view-model',

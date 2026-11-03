@@ -702,6 +702,15 @@ export class InfiniteContextStore {
       .run(finishedAt, sessionId);
   }
 
+  /** `/mark-incorrect` (plan 0006 E22): marked as not working, with the user's reason kept in the
+   * task's errors - which history search shows and /reflect learns from. */
+  markIncorrect(id: number, reason: string): void {
+    const note = `Marked incorrect by the user${reason ? `: ${reason}` : '.'}`;
+    this.db
+      .prepare(`UPDATE tasks SET worked = 0, errors = CASE WHEN errors = '' THEN ? ELSE errors || char(10) || ? END WHERE id = ?`)
+      .run(note, note, id);
+  }
+
   /** The manual "worked" mark. `null` clears it. */
   markWorked(id: number, worked: boolean | null): void {
     this.db.prepare(`UPDATE tasks SET worked = ? WHERE id = ?`).run(worked === null ? null : worked ? 1 : 0, id);

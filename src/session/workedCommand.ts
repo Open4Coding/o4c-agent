@@ -31,3 +31,33 @@ export function markWorkedCommand(store: InfiniteContextStore, sessionId: string
     ? `Marked ${named} as worked - history search will rank it higher.`
     : `Marked ${named} as did not work - history search will rank it lower.`;
 }
+
+/**
+ * `/mark-incorrect [#task] [reason]` (plan 0006 E22) - the counterpart to `/worked`: the answer was
+ * wrong. Ranks the task down like `/worked no`, and keeps the reason in the task's errors so the
+ * next search that finds it, and `/reflect`, see what was wrong rather than just that it was.
+ */
+export function markIncorrectCommand(store: InfiniteContextStore, sessionId: string, arg: string): string {
+  const words = arg.trim().split(/\s+/).filter(Boolean);
+  const number = words[0] && /^#?\d+(?:\.\d+)?$/.test(words[0]) ? words[0] : undefined;
+  const reason = (number ? words.slice(1) : words).join(' ');
+  const task = number ? store.getTaskByNumber(number) : store.lastTask(sessionId);
+  if (!task) {
+    return number
+      ? `No task ${number} in this project's history.`
+      : 'Nothing to mark yet - /mark-incorrect marks the last task once one has run in this session.';
+  }
+  store.markIncorrect(task.id, reason);
+  return `Marked ${taskNumber(task)} "${task.title}" as incorrect${reason ? ' (reason kept with it)' : ''} - history search will rank it lower${reason ? ' and show why' : ''}. /worked clear undoes the mark.`;
+}
+
+let incorrectMarker: ((arg: string) => string) | undefined;
+
+/** Set by cli.ts when this project has history.db. */
+export function setIncorrectMarker(next: ((arg: string) => string) | undefined): void {
+  incorrectMarker = next;
+}
+
+export function markIncorrect(arg: string): string {
+  return incorrectMarker ? incorrectMarker(arg) : 'No task history here - it needs a trusted project, where o4c keeps .o4c/db/history.db.';
+}

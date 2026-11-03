@@ -70,7 +70,7 @@ import type { PlanHooks } from './session/planAuthoring.js';
 import { gatherUltraplanResearch } from './session/ultraplanResearch.js';
 import { planContextComponent } from './session/planContext.js';
 import { curatedHistory } from './session/curated.js';
-import { markWorkedCommand } from './session/workedCommand.js';
+import { markIncorrectCommand, markWorkedCommand, setIncorrectMarker } from './session/workedCommand.js';
 import { contextWindowTypeFromConfig } from './ui/contextWindowSetting.js';
 import { TAB_HINT_RUNS_KEY, decideTabHint } from './ui/tabHint.js';
 import {
@@ -907,6 +907,7 @@ program
     }
     if (history) setRecentTasksSource(() => history.store.recentFinishedTasks(8));
     if (history) setTaskCountSource(() => history.store.taskCounts());
+    if (history) setIncorrectMarker((arg) => markIncorrectCommand(history.store, sessionId, arg));
     if (memoryStores.project || memoryStores.global) {
       setActiveMemoryStores(memoryStores);
       loop.registerCore(memoriesComponent(memoryStores));

@@ -154,6 +154,7 @@ import { completeMention, expandMentions, mentionCandidates, mentionPrefix } fro
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
+import { markIncorrect } from '../session/workedCommand.js';
 import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
 import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
 import { formatDebugDump, lastRequestFromLogs, type LoggedRequest } from '../session/debugDump.js';
@@ -2345,6 +2346,14 @@ export function App({
             ]);
             void runLogger.log({ type: 'system', sub_type: 'info', command: '/window', setting: typed });
           }
+        }
+      } else if (commandName(input) === '/mark-incorrect') {
+        // E22: the answer was wrong - ranked down, reason kept for search and /reflect.
+        pushBlock([userLine(input)]);
+        try {
+          pushBlock([infoLine(markIncorrect(input.trim().slice('/mark-incorrect'.length)))]);
+        } catch (err) {
+          pushBlock([{ kind: 'error', text: formatError(err) }]);
         }
       } else if (input === '/worked' || input.startsWith('/worked ')) {
         pushBlock([userLine(input)]);
