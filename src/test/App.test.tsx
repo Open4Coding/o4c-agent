@@ -4220,3 +4220,15 @@ test('a UserPromptSubmit hook (G3) that exits 2 blocks the message - nothing rea
     }
   });
 });
+
+test('/goal (G5) starts work, checks after each turn, and stops when its budget is spent', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames } = await setup({ dir, sessionId: 'goal-session', projectRoot: dir });
+    await submit(stdin, '/goal budget 2 tidy up the readme');
+    await waitFor(() => anyFrameIncludes(frames, 'Goal (active, 0/2 turns): tidy up the readme'));
+    // The mock never answers GOAL MET: kickoff, check 1, check 2, then the budget stops it.
+    await waitFor(() => anyFrameIncludes(frames, 'Goal check 1/2'), 20000);
+    await waitFor(() => anyFrameIncludes(frames, 'Goal check 2/2'), 20000);
+    await waitFor(() => anyFrameIncludes(frames, 'budget of 2 turns is spent'), 20000);
+  });
+});

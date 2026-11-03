@@ -158,6 +158,7 @@ import { expandCustomCommand, loadCustomCommands } from '../session/customComman
 import { describeHooks, hasHooks, hookProblems, hooksConfig, preToolHookVerdict, runHooks, type HookOutcome } from '../session/hooks.js';
 import { activateSkill, clearActiveSkill, findSkill, getSkills, skillGate, skillText } from '../session/skills.js';
 import { setTaskPolicy } from '../agent/subAgents.js';
+import { afterTurn, clearGoal, describeGoal, GOAL_VERIFY_KEY, goalsDir, loadGoal, parseGoalCommand, runVerifyCommand, saveGoal } from '../session/goal.js';
 import { markIncorrect } from '../session/workedCommand.js';
 import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
 import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
@@ -3051,6 +3052,23 @@ export function App({
           await configStore.set('global', 'autoAllowReadOnly', arg === 'on').catch(() => undefined);
           pushBlock([infoLine(arg === 'on' ? 'Read-only shell commands now run without asking (see /view-permissions).' : 'Read-only shell commands ask again, like any other command.')]);
         }
+      } else if (commandName(input) === '/goal') {
+        // G5: set, show or clear this session's goal; setting one starts work on it straight away.
+        pushBlock([userLine(input)]);
+        const goalId = currentSessionIdRef.current ?? plannedSessionId ?? 'default';
+        const dir = goalsDir(projectRoot);
+        const cmd = parseGoalCommand(input.trim().slice('/goal'.length));
+        if (cmd.kind === 'show') pushBlock([infoLine(describeGoal(loadGoal(dir, goalId)))]);
+        else if (cmd.kind === 'off') {
+          clearGoal(dir, goalId);
+          pushBlock([infoLine('Goal cleared.')]);
+        } else {
+          const goal = { text: cmd.text, status: 'active' as const, budget: cmd.budget, turnsUsed: 0, setAt: new Date().toISOString() };
+          saveGoal(dir, goalId, goal);
+          pushBlock([infoLine(`${describeGoal(goal)}\nVerifier: ${typeof (await configStore.get(GOAL_VERIFY_KEY).catch(() => undefined)) === 'string' ? 'the goalVerifyCommand in config' : 'the model must reply GOAL MET after checking'}. Starting now.`)]);
+          queuedInputsRef.current.unshift(`[Goal] ${goal.text}`);
+          setQueuedPreview([...queuedInputsRef.current]);
+        }
       } else if (commandName(input) === '/hooks') {
         // G3: the configured hooks and any problems in them.
         pushBlock([userLine(input)]);
@@ -3695,6 +3713,28 @@ export function App({
           } else {
             stopHookActiveRef.current = false;
             stopHookRunsRef.current = 0;
+          }
+        }
+
+        // G5: an active goal is checked after every turn - by the configured verify command, or by
+        // the model's own "GOAL MET"; not met queues the next step, until the budget is spent.
+        if (!turnFailed) {
+          const goalId = currentSessionIdRef.current ?? plannedSessionId ?? 'default';
+          const goal = loadGoal(goalsDir(projectRoot), goalId);
+          if (goal?.status === 'active' && goalId) {
+            const verifyCommand = await configStore.get(GOAL_VERIFY_KEY).catch(() => undefined);
+            let verifier: { ok: boolean; output: string } | undefined;
+            if (typeof verifyCommand === 'string' && verifyCommand.trim()) {
+              pushBlock([infoLine(`Goal: running the verifier - ${verifyCommand}`)]);
+              verifier = await runVerifyCommand(verifyCommand);
+            }
+            const r = afterTurn(goal, replyBack(loop.getMessages()) ?? '', verifier);
+            saveGoal(goalsDir(projectRoot), goalId, r.goal);
+            pushBlock([infoLine(r.note)]);
+            if (r.next) {
+              queuedInputsRef.current.push(r.next);
+              setQueuedPreview([...queuedInputsRef.current]);
+            }
           }
         }
 

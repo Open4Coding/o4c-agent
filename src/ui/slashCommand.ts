@@ -459,6 +459,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose hidden commands to show in the bare / list too (toggle one at a time; Esc when done).',
   },
   {
+    name: '/goal',
+    description: 'Set a goal o4c keeps working toward until it is verified (goalVerifyCommand, or the model replying GOAL MET) or a turn budget is spent. Usage: /goal [budget N] <goal> | /goal | /goal off',
+  },
+  {
     name: '/hooks',
     description: 'The hooks configured in config.json (PreToolUse, PostToolUse, UserPromptSubmit, Stop, SessionStart, PreCompact, Notification) and any problems with them.',
   },
