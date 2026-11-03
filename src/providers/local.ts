@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { parseRetryAfter, ProviderHttpError } from './retry.js';
 import { extname } from 'node:path';
 import { createPrefillEchoFilter } from './prefillEcho.js';
 import {
@@ -612,7 +613,8 @@ export class LocalProvider implements LLMProvider {
       if (response.status === 503 && /loading/i.test(body)) {
         throw new ServerUnavailableError('The local server is still loading the model.', true);
       }
-      throw new Error(`Local server error (status ${response.status}): ${body}`);
+      // F1: typed, so RetryingProvider can tell a 429/5xx (worth another try) from a bad request.
+      throw new ProviderHttpError(`Local server error (status ${response.status}): ${body}`, response.status, parseRetryAfter(response.headers.get('retry-after')));
     }
 
     if (!response.body) {

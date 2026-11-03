@@ -114,7 +114,9 @@ export class AnthropicProvider implements LLMProvider {
         'No Anthropic API key found. Set ANTHROPIC_API_KEY in your environment.',
       );
     }
-    this.client = new Anthropic({ apiKey, timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
+    // maxRetries 0: RetryingProvider (plan 0006 F1) owns retries for every provider, so the SDK's own
+    // two retries would multiply with it.
+    this.client = new Anthropic({ apiKey, timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, maxRetries: 0 });
     this.model = options.model ?? 'claude-opus-5';
     this.thinkingEffort = options.thinkingEffort;
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;

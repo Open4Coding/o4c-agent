@@ -42,6 +42,8 @@ import { recordLifecycle } from './lifecycleLog.js';
 import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
+import { RetryingProvider } from './providers/retry.js';
+import { createProvider, parseProviderSpecs } from './providers/factory.js';
 import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
 import { EDITOR_CONFIG_KEY } from './ui/externalEditor.js';
 import { setTaskCountSource } from './ui/statsReport.js';
@@ -812,11 +814,30 @@ program
       environment: [cwdLine, shellPromptLine(currentShell())],
       projectContext,
     });
+    // F1: retry with backoff (429/5xx/timeouts), then the configured fallbackChain, if any.
+    {
+      const { specs, errors } = parseProviderSpecs(resolvedConfig.fallbackChain);
+      for (const e of errors) console.error(`config.json: ${e}`);
+      const fallbacks: LLMProvider[] = [];
+      for (const spec of specs) {
+        try {
+          fallbacks.push(createProvider(spec, { maxTokens: providerMaxTokens, connectTimeoutMs, idleTimeoutMs }));
+        } catch (err) {
+          console.error(`config.json fallbackChain: ${spec.provider} skipped - ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (opts.provider !== 'mock') {
+        provider = new RetryingProvider([provider, ...fallbacks], {
+          retries: typeof resolvedConfig.providerRetries === 'number' && resolvedConfig.providerRetries >= 0 ? resolvedConfig.providerRetries : undefined,
+          onRetry: (info) => recordLifecycle(lifecycleDir, 'provider', { retry: info }),
+        });
+      }
+    }
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
     loop.textToolCallRecovery = resolvedConfig.textToolCallRecovery !== false;
     loop.loopGuardEnabled = resolvedConfig.loopGuard !== false;
     if (typeof resolvedConfig.deferToolsAbove === 'number') loop.deferToolsAbove = resolvedConfig.deferToolsAbove;
-    if (provider instanceof LocalProvider) provider.repetitionGuard = resolvedConfig.repetitionAbort !== false;
+    if (localProvider) localProvider.repetitionGuard = resolvedConfig.repetitionAbort !== false;
     setSyntaxCheckMode(resolvedConfig.syntaxCheck);
     setShellTimeoutDefault(resolvedConfig.shellTimeoutMs);
     setPassKeysToShell(resolvedConfig.passKeysToShell);
