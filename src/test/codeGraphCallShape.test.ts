@@ -410,3 +410,11 @@ test('a macro invocation reaches a macro definition, never a function of its nam
     assert.deepEqual(calls.map((e) => e.name), ['shout']);
   });
 });
+
+test('an awaited generic call is still a plain call (the grammar nests the name in `await`)', async () => {
+  for (const lang of ['typescript', 'tsx']) {
+    const { tags } = await extractFile("async function f() {\n  const s = await pick<Scope>('x');\n}\n", lang);
+    const ref = tags.find((t) => t.kind === 'ref' && t.name === 'pick');
+    assert.equal(ref?.capture, 'name.reference.call', `${lang}: await pick<T>() should be captured`);
+  }
+});

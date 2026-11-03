@@ -18,6 +18,7 @@
  * language at the call shapes the queries claim, and it says nothing about the other fourteen.
  */
 
+import { receiverKey, receiverTypes, RECEIVER_FIELDS } from './receiverType.js';
 import type { Node as TsNode } from 'web-tree-sitter';
 import { languageForPath } from './languages.js';
 import { loadQuery, loadImportQuery, parserFor, GrammarUnavailableError } from './loadLanguage.js';
@@ -39,6 +40,9 @@ export interface Tag {
   readonly capture: string;
   /** 1-based line, for citation and display only - never for identity. Line numbers drift. */
   readonly line: number;
+  /** K1: a member call's receiver as written (`host`, `this.host`), and its class if the file says. */
+  readonly receiver?: string;
+  readonly receiverType?: string;
   /**
    * Definitions only (plan 0006 B11), from the whole declaration node the query matched along with
    * the name: its last line, its signature (the text before the body, whitespace collapsed) and
@@ -139,6 +143,8 @@ export async function extractFile(source: string, languageId: string): Promise<F
     // declaration node, which is where its span, signature and doc comment come from. Sorted back
     // into document order afterwards, which is the order `captures()` gave and callers rely on.
     const found: Array<{ at: number; seq: number; tag: Tag }> = [];
+    // K1: what this file says each receiver is - computed once, used by every member call below.
+    let types: Map<string, string> | undefined;
     for (const match of query.matches(tree.rootNode)) {
       for (const capture of match.captures) {
         const kind: TagKind | undefined = capture.name.startsWith(DEFINITION_PREFIX)
@@ -148,12 +154,20 @@ export async function extractFile(source: string, languageId: string): Promise<F
             : undefined;
         if (!kind) continue; // Outer `@definition.*`/`@reference.*` captures wrap the whole node.
 
-        let extra: Pick<Tag, 'endLine' | 'signature' | 'doc'> = {};
+        let extra: Pick<Tag, 'endLine' | 'signature' | 'doc' | 'receiver' | 'receiverType'> = {};
         if (kind === 'def') {
           const outer = match.captures.find((c) => c.name === capture.name.slice('name.'.length))?.node;
           if (outer) {
             const doc = docFor(outer);
             extra = { endLine: outer.endPosition.row + 1, signature: signatureFor(outer, source), ...(doc ? { doc } : {}) };
+          }
+        }
+        if (kind === 'ref') {
+          const receiver = receiverOf(capture.node);
+          if (receiver) {
+            types ??= receiverTypes(source, languageId);
+            const receiverType = types.get(receiver);
+            extra = { receiver, ...(receiverType ? { receiverType } : {}) };
           }
         }
         found.push({
@@ -181,6 +195,20 @@ export async function extractFile(source: string, languageId: string): Promise<F
     // runs over every file in a repository.
     tree.delete();
   }
+}
+
+/**
+ * K1: the receiver of a member call whose name `node` is - `host` in `host.status()` - normalised
+ * by `receiverKey`, or undefined for a plain call or a receiver too complex to name.
+ */
+function receiverOf(node: TsNode): string | undefined {
+  const parent = node.parent;
+  if (!parent) return undefined;
+  for (const field of RECEIVER_FIELDS) {
+    const object = parent.childForFieldName(field);
+    if (object && object.startIndex !== node.startIndex) return receiverKey(object.text);
+  }
+  return undefined;
 }
 
 /**

@@ -173,6 +173,11 @@ export function resolveName(
 function noteFor(chosen: ChosenTarget, candidateCount: number): string {
   const others = candidateCount - 1;
   switch (chosen.route) {
+    case 'receiver-type':
+      return (
+        `The receiver's class, as this file declares it, defines it: ${chosen.definition.path}:` +
+        `${chosen.definition.line}. ${others} other definition(s) share the name.`
+      );
     case 'unique':
       return `Defined once, in ${chosen.definition.path}:${chosen.definition.line}.`;
     case 'same-file':
@@ -205,7 +210,10 @@ function noteFor(chosen: ChosenTarget, candidateCount: number): string {
  * Which rule picked a target. Tried in this order, and reported so a measurement can weigh each
  * rule separately rather than crediting the ladder as a whole.
  */
-export type ResolutionRoute = 'callable' | 'call-shape' | 'same-file' | 'import' | 'unique';
+/** K1: definition kinds that hold methods - what `containerOf` looks for around a method. */
+const CONTAINER_KINDS = new Set(['class', 'interface', 'struct', 'trait', 'impl', 'module', 'object', 'enum']);
+
+export type ResolutionRoute = 'callable' | 'call-shape' | 'same-file' | 'import' | 'unique' | 'receiver-type';
 
 /** `f()` versus `o.f()` - only known for a language whose query distinguishes them. */
 export type CallShape = 'bare' | 'member';
@@ -222,6 +230,10 @@ export interface ChosenTarget {
 export interface ChooseOptions {
   /** The referencing file, already normalised. */
   readonly fromPath?: string;
+  /** K1: the member call's receiver class, when the calling file declares it. */
+  readonly receiverType?: string;
+  /** K1: the class-like definition a definition sits inside, by name. */
+  readonly containerOf?: (definition: DefinitionRow) => string | undefined;
   /** The specifier this file imported the name from, if it did and if it did so once. */
   readonly importedModule?: string;
   /** The call site's shape, when the language's query records it. */
@@ -284,6 +296,13 @@ export function chooseTarget(
 
   const callable = options.isCall ? narrowToCallable(candidates) : candidates;
   const shape = options.callShape;
+  // K1: the file says what the receiver is, and exactly one candidate is that class's member. Ahead
+  // of the library-method decline below: `host.get()` with `host: McpHost` and a `get` in McpHost is
+  // McpHost's, whatever else is called `get`. Positive only - with no such member it changes nothing.
+  if (options.receiverType && options.containerOf) {
+    const owned = callable.filter((c) => options.containerOf!(c) === options.receiverType);
+    if (owned.length === 1) return { definition: owned[0]!, route: 'receiver-type' };
+  }
   if (shape === 'member' && options.libraryMethod) {
     const own = callable.filter((c) => c.path === options.fromPath && c.kind !== 'function');
     return own.length === 1 ? { definition: own[0], route: 'same-file' } : undefined;
@@ -509,13 +528,23 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
 
   // One pass over the definition table, so each name is looked up once rather than per call site.
   const definitionsByName = new Map<string, DefinitionRow[]>();
+  // K1: the innermost class-like definition around each definition, for the receiver-type rule.
+  const container = new Map<DefinitionRow, string>();
   for (const file of store.files()) {
-    for (const def of store.definitionsIn(file.path)) {
+    const defs = store.definitionsIn(file.path);
+    const holders = defs.filter((d) => CONTAINER_KINDS.has(d.kind) && (d.endLine ?? 0) > d.line);
+    for (const def of defs) {
       let list = definitionsByName.get(def.name);
       if (!list) definitionsByName.set(def.name, (list = []));
       list.push(def);
+      let best: DefinitionRow | undefined;
+      for (const h of holders) {
+        if (h !== def && h.line <= def.line && (h.endLine ?? 0) >= def.line && (!best || h.line >= best.line)) best = h;
+      }
+      if (best) container.set(def, best.name);
     }
   }
+  const containerOf = (d: DefinitionRow) => container.get(d);
 
   for (const file of store.files()) {
     // One query per file rather than one per call site: a file with 200 calls asks about its own
@@ -543,6 +572,8 @@ export function resolveCallEdges(store: GraphStore): ResolveEdgesResult {
         importedModules,
         libraryMethod: libraryMethods?.has(ref.name),
         macroCall: ref.kind === 'macro',
+        receiverType: ref.receiverType,
+        containerOf,
       });
 
       if (chosen) {

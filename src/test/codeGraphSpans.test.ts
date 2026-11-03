@@ -94,6 +94,6 @@ test('the store keeps them (rows readable like any other), and a v3 database is 
   assert.equal(add!.signature, 'function add(a: number, b: number): number');
   assert.equal(add!.doc, 'Adds two numbers. Used everywhere.');
   assert.equal(store.definitionsIn('src/a.ts').length, tags.filter((t) => t.kind === 'def').length);
-  assert.equal(GRAPH_SCHEMA_VERSION, 4);
+  assert.equal(GRAPH_SCHEMA_VERSION, 5); // 5: refs.receiver / receiver_type (K1), added in place by the same upgrade
   store.close();
 });

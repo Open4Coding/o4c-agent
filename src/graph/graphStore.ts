@@ -80,7 +80,7 @@ export function migrateLegacyIndex(dbDir: string): void {
  * `doc` (plan 0006 B11). No migration is written because none is worth writing: the graph is derived from files on disk and rebuilding it costs seconds, which is
  * also why a bump discards rather than migrates.
  */
-export const GRAPH_SCHEMA_VERSION = 4;
+export const GRAPH_SCHEMA_VERSION = 5;
 
 /**
  * Per-file index state.
@@ -137,6 +137,9 @@ export interface ReferenceRow {
   readonly capture: string;
   readonly edgeKind: EdgeKind;
   readonly line: number;
+  /** K1 (schema 5): the member call's receiver and its inferred class, '' when unknown. */
+  readonly receiver?: string;
+  readonly receiverType?: string;
 }
 
 const SCHEMA = `
@@ -187,7 +190,9 @@ CREATE TABLE IF NOT EXISTS refs (
   kind TEXT NOT NULL,
   capture TEXT NOT NULL,
   edge_kind TEXT NOT NULL,
-  line INTEGER NOT NULL
+  line INTEGER NOT NULL,
+  receiver TEXT NOT NULL DEFAULT '',
+  receiver_type TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name);
@@ -290,6 +295,7 @@ export class GraphStore {
     // A database from before a column existed keeps its old table under CREATE TABLE IF NOT EXISTS;
     // add what is missing, so the version-mismatch rebuild below can write the new rows (B11).
     this.addMissingColumns('defs', { end_line: 'INTEGER NOT NULL DEFAULT 0', signature: "TEXT NOT NULL DEFAULT ''", doc: "TEXT NOT NULL DEFAULT ''" });
+    this.addMissingColumns('refs', { receiver: "TEXT NOT NULL DEFAULT ''", receiver_type: "TEXT NOT NULL DEFAULT ''" });
 
     this.ftsAvailable = this.tryCreateFts();
 
@@ -416,7 +422,7 @@ export class GraphStore {
       }
 
       const insertRef = this.db.prepare(
-        `INSERT INTO refs(file_id, name, kind, capture, edge_kind, line) VALUES(?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO refs(file_id, name, kind, capture, edge_kind, line, receiver, receiver_type) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const tag of refs) {
         insertRef.run(
@@ -426,6 +432,8 @@ export class GraphStore {
           tag.capture,
           edgeKindForCapture(tag.capture),
           tag.line,
+          tag.receiver ?? '',
+          tag.receiverType ?? '',
         );
       }
 
@@ -579,7 +587,7 @@ export class GraphStore {
   referencesIn(path: string): ReferenceRow[] {
     const rows = this.db
       .prepare(
-        `SELECT f.path, r.name, r.kind, r.capture, r.edge_kind, r.line
+        `SELECT f.path, r.name, r.kind, r.capture, r.edge_kind, r.line, r.receiver, r.receiver_type
          FROM refs r JOIN files f ON f.id = r.file_id
          WHERE f.path = ? ORDER BY r.line`,
       )
@@ -750,6 +758,8 @@ function toReference(r: Record<string, unknown>): ReferenceRow {
     kind: String(r.kind),
     capture: String(r.capture),
     edgeKind: String(r.edge_kind) as EdgeKind,
+    ...(r.receiver ? { receiver: String(r.receiver) } : {}),
+    ...(r.receiver_type ? { receiverType: String(r.receiver_type) } : {}),
     line: Number(r.line),
   };
 }

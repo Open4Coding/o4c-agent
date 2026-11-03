@@ -49,6 +49,13 @@
   (#not-match? @name.reference.call "^(require)$")
 )
 
+; `await f<T>(x)` - the grammar parses the generic call as `call(function: await(f))`, so the
+; pattern above never sees an identifier there. Found 2026-11-03 by the acceptance test: all
+; seven `missedByExtraction` sites were `await pickChoice<...>(...)` in src/ui/App.tsx.
+(call_expression
+  function: (await_expression (identifier) @name.reference.call)
+  type_arguments: (_)) @reference.call
+
 ; A member call is captured as `name.reference.method`, not `name.reference.call`, so that
 ; resolution can tell `f()` from `o.f()`. Nothing is invented by this: Java's own tag query
 ; already emits `name.reference.method` for an invocation, which is why `edgeKind.ts` counts
