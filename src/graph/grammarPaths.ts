@@ -15,6 +15,7 @@
  * fetching is egress and secure mode forbids egress.
  */
 
+import { packageRoot } from '../packageRoot.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,7 +26,7 @@ let overrideDir: string | undefined;
 
 /** The bundled `grammars/` directory - two levels up from `src/graph/` or `dist/graph/`. */
 function bundledGrammarDir(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'grammars');
+  return join(packageRoot(), 'grammars');
 }
 
 /**

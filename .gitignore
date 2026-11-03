@@ -10,3 +10,4 @@ dist-eval/
 # inputBoxStacking.test.tsx, the same-tick ordering tests).
 .tmp-repro/
 tmp.tmp/
+dist-sea/

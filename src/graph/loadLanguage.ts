@@ -16,6 +16,8 @@
  * what repomix depends on.
  */
 
+import { isUnpackedRuntime, packageRoot } from '../packageRoot.js';
+import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { Parser, Language, Query } from 'web-tree-sitter';
 import { languageById } from './languages.js';
@@ -49,7 +51,8 @@ const parsers = new Map<string, Parser>();
 
 /** Initialises the WASM runtime. Idempotent, and safe to call concurrently. */
 export async function initParser(): Promise<void> {
-  initPromise ??= Parser.init();
+  // I1: bundled into one file the runtime cannot find its own .wasm next to itself; point it there.
+  initPromise ??= isUnpackedRuntime() ? Parser.init({ locateFile: (file: string) => join(packageRoot(), file) }) : Parser.init();
   return initPromise;
 }
 

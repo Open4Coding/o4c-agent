@@ -9,6 +9,9 @@
  * where workers do not work is the session o4c shipped last week - slower at startup, not broken.
  */
 
+import { isUnpackedRuntime, packageRoot } from '../packageRoot.js';
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
 import type { GraphStore } from './graphStore.js';
@@ -38,6 +41,8 @@ export interface WorkerPassOptions {
  * solves for the `.wasm` and `.scm` assets.
  */
 function defaultEntry(): URL {
+  // I1: the single-executable build unpacks a bundled worker next to its other files.
+  if (isUnpackedRuntime()) return pathToFileURL(join(packageRoot(), 'indexWorker.mjs'));
   const here = import.meta.url;
   return new URL(here.endsWith('.ts') ? './indexWorker.ts' : './indexWorker.js', here);
 }

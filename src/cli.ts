@@ -44,6 +44,7 @@ import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
 import { runAcp } from './acp/agent.js';
+import { prepareSea } from './sea.js';
 import { classifyToolAccess } from './ui/modePolicy.js';
 import { combinePrompt, eventLine, EXIT, exitCodeFor, parseAllowedTools, parseOutputFormat, parsePermissionMode, readStdin, resultObject, schemaPrompt, type PermissionMode, type RunFacts } from './headless.js';
 
@@ -1465,6 +1466,8 @@ program
 
 // `o4c eval run|diff|list` (plan 0006 J1). Checked by hand rather than as a commander subcommand,
 // so only those exact forms are taken and a prompt that merely starts with "eval" still is one.
+// I1: in the single-executable build, unpack o4c's own files before anything looks for them.
+await prepareSea();
 // `o4c acp` (plan 0006 H2) is the --acp flag, so it shares every startup step with the other modes.
 if (process.argv[2] === 'acp') process.argv.splice(2, 1, '--acp');
 if (process.argv[2] === 'eval' && ['run', 'diff', 'list'].includes(process.argv[3] ?? '')) {

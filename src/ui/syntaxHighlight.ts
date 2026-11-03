@@ -1,3 +1,5 @@
+import { packageRoot } from '../packageRoot.js';
+import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { basename, extname } from 'node:path';
 import type { HLJSApi, LanguageFn } from 'highlight.js';
@@ -70,7 +72,10 @@ const GRAMMARS: Readonly<Record<string, string>> = {
   diff: 'diff', patch: 'diff',
 };
 
-const require = createRequire(import.meta.url);
+// I1: resolved from the package root, so the single-executable build finds the unpacked copy - and
+// made on first use, because module code runs before cli.ts has unpacked anything.
+let requireFn: NodeJS.Require | undefined;
+const require = ((id: string) => (requireFn ??= createRequire(join(packageRoot(), 'package.json')))(id)) as NodeJS.Require;
 let core: HLJSApi | undefined;
 const loaded = new Set<string>();
 

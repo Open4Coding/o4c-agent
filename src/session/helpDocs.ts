@@ -1,3 +1,4 @@
+import { packageRoot } from '../packageRoot.js';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,10 +15,6 @@ export interface DocSection {
   body: string;
 }
 
-/** The package root - two levels up from src/session or dist/session. */
-function packageRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-}
 
 export function docFiles(root = packageRoot()): string[] {
   const out: string[] = [];

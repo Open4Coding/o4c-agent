@@ -1,3 +1,4 @@
+import { packageRoot } from '../packageRoot.js';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -33,8 +34,7 @@ export const MAX_LISTED_SKILLS = 30;
 const MAX_DESCRIPTION = 160;
 
 export function bundledSkillsDir(): string {
-  // src/session or dist/session -> the package root's skills/.
-  return fileURLToPath(new URL('../../skills', import.meta.url));
+  return join(packageRoot(), 'skills');
 }
 
 export function parseSkillFile(text: string): { name?: string; description?: string; allowedTools?: string[]; body: string } {
