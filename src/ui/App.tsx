@@ -152,6 +152,16 @@ import { editText } from './externalEditor.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
 import { formatStats, taskCounts } from './statsReport.js';
+import {
+  DEFAULT_NOTIFY,
+  DEFAULT_NOTIFY_AFTER_SECONDS,
+  NOTIFY_AFTER_CONFIG_KEY,
+  NOTIFY_CONFIG_KEY,
+  notifyUser,
+  parseNotifyMode,
+  shouldNotifyTurn,
+  type NotifyMode,
+} from './notify.js';
 import { runShellTool } from '../tools/runShell.js';
 import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
@@ -1180,6 +1190,16 @@ export function App({
     resolve: (answer: ConfirmAnswer) => void;
   } | null>(null);
 
+  // E12: bell / OS toast when a long turn ends or an approval waits. Read once; /set-notify updates it.
+  const notifyRef = useRef<{ mode: NotifyMode; after: number }>({ mode: DEFAULT_NOTIFY, after: DEFAULT_NOTIFY_AFTER_SECONDS });
+  useEffect(() => {
+    void Promise.all([configStore.get(NOTIFY_CONFIG_KEY), configStore.get(NOTIFY_AFTER_CONFIG_KEY)])
+      .then(([mode, after]) => {
+        notifyRef.current = { mode: parseNotifyMode(mode), after: typeof after === 'number' && after >= 0 ? after : DEFAULT_NOTIFY_AFTER_SECONDS };
+      })
+      .catch(() => undefined);
+  }, [configStore]);
+
   const askConfirm = useCallback(
     (
       message: string,
@@ -1188,6 +1208,7 @@ export function App({
       diff?: readonly StyledDiffLine[],
       alwaysLabel?: string,
     ): Promise<ConfirmAnswer> => {
+      notifyUser(notifyRef.current.mode, `Approval needed: ${message.split('\n')[0]}`);
       return new Promise((resolve) => {
         setConfirmDialog({ id: nextDialogId++, message, diff, tool, input, alwaysLabel, resolve });
       });
@@ -1519,6 +1540,12 @@ export function App({
 
   const processTurn = useCallback(
     async (input: string) => {
+      const turnStartedAt = Date.now();
+      const notifyTurnEnd = () => {
+        if (shouldNotifyTurn(notifyRef.current.mode, Date.now() - turnStartedAt, notifyRef.current.after)) {
+          notifyUser(notifyRef.current.mode, 'Done - o4c is waiting for your next message.');
+        }
+      };
       // /exit, /quit, and /clear are intercepted earlier, in handleSubmit, before they can ever
       // be queued behind a busy turn - they never reach here.
       if (input === '/context' || input === '/ctx') {
@@ -2692,6 +2719,21 @@ export function App({
           await configStore.set('global', 'autoAllowReadOnly', arg === 'on').catch(() => undefined);
           pushBlock([infoLine(arg === 'on' ? 'Read-only shell commands now run without asking (see /view-permissions).' : 'Read-only shell commands ask again, like any other command.')]);
         }
+      } else if (commandName(input) === '/set-notify') {
+        // E12: how o4c gets your attention when a long turn ends or an approval waits.
+        pushBlock([userLine(input)]);
+        const choice = await pickChoice('Notify when a long turn ends or an approval waits (↑/↓, Enter, Esc to cancel):', [
+          { key: 'bell', label: 'bell - the terminal bell (default)' },
+          { key: 'toast', label: 'toast - an OS notification' },
+          { key: 'both', label: 'both - bell and OS notification' },
+          { key: 'off', label: 'off - never' },
+        ]);
+        if (!choice) pushBlock([infoLine('Notifications unchanged.')]);
+        else {
+          await configStore.set('global', NOTIFY_CONFIG_KEY, choice).catch(() => undefined);
+          notifyRef.current = { ...notifyRef.current, mode: choice };
+          pushBlock([infoLine(`Notifications: ${choice}. A turn counts as long after ${notifyRef.current.after} s (config key ${NOTIFY_AFTER_CONFIG_KEY}); approvals always notify.`)]);
+        }
       } else if (commandName(input) === '/set-shell') {
         // B24: which shell run_shell uses. Saved to config; the next message's process picks it up
         // (the system prompt names the shell, so changing it costs one full re-read of the context).
@@ -3234,6 +3276,7 @@ export function App({
           inputValueRef.current.trim() === '' &&
           currentSessionIdRef.current
         ) {
+          notifyTurnEnd();
           restart(currentSessionIdRef.current, modeRef.current);
           setTimeout(() => exit(), 0);
           return;
@@ -3250,6 +3293,7 @@ export function App({
         setQueuedPreview([...queuedInputsRef.current]);
         await processTurn(next);
       } else {
+        notifyTurnEnd();
         setIsProcessing(false);
       }
     },

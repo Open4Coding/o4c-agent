@@ -323,6 +323,12 @@ export const COMMANDS: CommandInfo[] = [
   // action of its own - listing every configured server and what state it is in - and that
   // listing is the whole answer when no server offers prompts, which is the default.
   {
+    name: '/set-notify',
+    hidden: true,
+    select: 'run',
+    description: 'How o4c gets your attention when a long turn ends or an approval waits: bell, OS toast, both or off - saved to config.',
+  },
+  {
     name: '/set-shell',
     // Hidden like the other /set-* commands: reached through the /set family dropdown.
     hidden: true,

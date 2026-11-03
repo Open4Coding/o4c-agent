@@ -91,6 +91,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/config-highlightcolor',
     '/config-local-highlightcolor',
     '/config-global-highlightcolor',
+    '/set-notify',
     '/set-shell',
     '/memory',
     '/config-contextwindow-modelinitiatedsearches',
