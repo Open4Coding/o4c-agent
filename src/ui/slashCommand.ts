@@ -169,6 +169,12 @@ export const COMMANDS: CommandInfo[] = [
     select: 'run',
   },
   {
+    name: '/keyboard-bindings',
+    description: 'Your Ctrl+letter key bindings and how to remap them in ~/.o4c/keybindings.json.',
+    hidden: true,
+    select: 'run',
+  },
+  {
     name: '/mode',
     description: 'Switch between Manual, Auto, Accept Edits, Plan, and Plan-Write mode.',
   },

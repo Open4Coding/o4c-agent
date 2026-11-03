@@ -136,6 +136,7 @@ function expandPastes(text: string, pastes: ReadonlyMap<string, string>): string
 }
 
 import { theme } from './theme.js';
+import { isAction } from './keybindings.js';
 import { ASK_CURSOR, isLeftClick, MOUSE_OFF, MOUSE_ON, parseCursorReport, parseSgrMouse, tapStdin } from './mouse.js';
 
 export interface InputBoxProps {
@@ -485,7 +486,7 @@ export function InputBox({
         else if (key.return) {
           if (match) edit(() => ({ value: match.text, cursor: match.text.length }));
           setSearch(undefined);
-        } else if (key.ctrl && input === 'r') {
+        } else if (isAction('history-search', input, key)) {
           if (match) setSearch({ query: search.query, from: match.index });
         } else if (key.backspace || key.delete) {
           setSearch({ query: search.query.slice(0, -1), from: historyRef.current.length });
@@ -494,7 +495,7 @@ export function InputBox({
         }
         return;
       }
-      if (key.ctrl && input === 'r') {
+      if (isAction('history-search', input, key)) {
         setSearch({ query: '', from: historyRef.current.length });
         return;
       }
@@ -571,11 +572,11 @@ export function InputBox({
         }));
         return;
       }
-      if ((key.ctrl && input === 'p') || (key.ctrl && key.upArrow)) {
+      if (isAction('prev-paragraph', input, key) || (key.ctrl && key.upArrow)) {
         edit((b) => ({ ...b, cursor: moveParagraph(b.value, b.cursor, 'up') }));
         return;
       }
-      if ((key.ctrl && input === 'n') || (key.ctrl && key.downArrow)) {
+      if (isAction('next-paragraph', input, key) || (key.ctrl && key.downArrow)) {
         edit((b) => ({ ...b, cursor: moveParagraph(b.value, b.cursor, 'down') }));
         return;
       }
@@ -691,7 +692,7 @@ export function InputBox({
       // convention), distinct from Home/End's per-row behavior above - not asked for
       // explicitly, but a natural, useful complement (same relationship as an editor's
       // Home vs. Ctrl+Home).
-      if (key.ctrl && input === 'q') {
+      if (isAction('queue', input, key)) {
         if (onQueue && value.trim()) {
           const queued = expandPastes(value, pasteStore);
           pasteStore.clear();
@@ -705,15 +706,15 @@ export function InputBox({
         }
         return;
       }
-      if (key.ctrl && input === 'a') {
+      if (isAction('line-start', input, key)) {
         edit((b) => ({ ...b, cursor: 0 }));
         return;
       }
-      if (key.ctrl && input === 'e') {
+      if (isAction('line-end', input, key)) {
         edit((b) => ({ ...b, cursor: b.value.length }));
         return;
       }
-      if (key.ctrl && input === 'o') {
+      if (isAction('expand-pastes', input, key)) {
         // Expand every collapsed paste in the box, in the order they appear, replacing each
         // placeholder with the text it stands for - and grow the box to its expanded height so
         // there is somewhere to put it. The text becomes ordinary editable content; the box is a
@@ -731,7 +732,7 @@ export function InputBox({
         edit(() => ({ value: expandedValue, cursor: expandedValue.length }));
         return;
       }
-      if (key.ctrl && input === 'u') {
+      if (isAction('kill-line', input, key)) {
         // Bash convention: kill from line-start to the cursor only, leaving anything after
         // the cursor untouched - and stash what was killed so the next up-arrow can yank it
         // back in (see killedRef above), instead of an accidental Ctrl-U losing it for good.

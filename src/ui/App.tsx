@@ -154,6 +154,7 @@ import { completeMention, expandMentions, mentionCandidates, mentionPrefix } fro
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { editText } from './externalEditor.js';
 import { MOUSE_CONFIG_KEY } from './mouse.js';
+import { describeKeybindings, isAction } from './keybindings.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
 import { formatStats, taskCounts } from './statsReport.js';
@@ -1493,7 +1494,7 @@ export function App({
       }
       // Ctrl+T: stop thinking and answer now (plan 0006 A17). The turn goes on - only the
       // reasoning is cut short - unlike Escape, which cancels the turn.
-      if (key.ctrl && input === 't' && isProcessing) {
+      if (isAction('stop-thinking', input, key) && isProcessing) {
         void loop.endReasoning().then((ended) => {
           if (ended) pushBlock([{ kind: 'system', text: 'Thinking ended by you (Ctrl+T) - answering now.' }]);
         });
@@ -1519,7 +1520,7 @@ export function App({
   useInput(
     (_input, key) => {
       // Ctrl+G (E8): compose the message in your own editor; the result comes back into the box.
-      if (key.ctrl && _input === 'g' && !confirmDialog && !choicePicker) {
+      if (isAction('editor', _input, key) && !confirmDialog && !choicePicker) {
         const r = editText(inputValueRef.current);
         if (r.text !== undefined) setPrefill({ token: nextPrefillToken++, text: r.text });
         else pushBlock([infoLine(`Could not open the editor (${r.editor}): ${r.error ?? 'unknown error'}. Set VISUAL or EDITOR - a GUI editor needs its wait flag, e.g. "code --wait".`)]);
@@ -1656,6 +1657,10 @@ export function App({
         } else {
           pushBlock([infoLine(renderKeyboardCommandsHelp(undefined, wanted))]);
         }
+      } else if (commandName(input) === '/keyboard-bindings') {
+        // E17: the remappable Ctrl+letter actions as bound now, and any problem in the file.
+        pushBlock([userLine(input)]);
+        pushBlock([infoLine(describeKeybindings().join('\n'))]);
       } else if (commandName(input) === '/keyboard') {
         // Local, display-only, exactly like /context above - never calls loop.run(), so this
         // table is never sent to the model or added to conversation history (see the module's

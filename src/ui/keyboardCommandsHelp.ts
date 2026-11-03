@@ -57,6 +57,7 @@ const ROWS: KeyboardCommandRow[] = [
   { keys: 'Ctrl+P / Ctrl+N', action: 'Jump to previous/next paragraph (also Ctrl+↑/↓ where supported)', availability: 'All terminals' },
   { keys: 'Ctrl+R', action: 'Search input history (type to filter, Ctrl+R older, Enter take, Esc cancel)', availability: 'All terminals' },
   { keys: 'Ctrl+G', action: 'Compose the message in your editor (VISUAL or EDITOR, else Notepad or vi)', availability: 'All terminals' },
+  { keys: '/keyboard-bindings', action: 'Remap the Ctrl+letter keys above (~/.o4c/keybindings.json)', availability: 'All terminals' },
   { keys: 'Tab', action: 'Cycle input mode', availability: 'All terminals' },
   { keys: '/', action: 'Open command palette', availability: 'All terminals' },
 ];
