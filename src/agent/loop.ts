@@ -449,6 +449,11 @@ export class AgentLoop {
    * a turn, since that turn's request has already told the model which tools exist; hence
    * `registerPendingTools` below, which makes the first turn wait instead.
    */
+  /** The tools this loop offers right now (G4: a sub-agent picks its subset from these). */
+  getTools(): readonly Tool[] {
+    return this.tools;
+  }
+
   addTools(tools: readonly Tool[]): void {
     this.tools.push(...tools);
   }

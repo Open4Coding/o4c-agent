@@ -157,6 +157,7 @@ import { logToView } from '../session/logView.js';
 import { expandCustomCommand, loadCustomCommands } from '../session/customCommands.js';
 import { describeHooks, hasHooks, hookProblems, hooksConfig, preToolHookVerdict, runHooks, type HookOutcome } from '../session/hooks.js';
 import { activateSkill, clearActiveSkill, findSkill, getSkills, skillGate, skillText } from '../session/skills.js';
+import { setTaskPolicy } from '../agent/subAgents.js';
 import { markIncorrect } from '../session/workedCommand.js';
 import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
 import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
@@ -1637,6 +1638,8 @@ export function App({
       const turnStartedAt = Date.now();
       // G2: a skill is active for the turn that loaded it; every new message starts without one.
       clearActiveSkill();
+      // G4: sub-agents run under this turn's policy (mode, rules, hooks), exactly like the parent.
+      setTaskPolicy(toolPolicy);
       const notifyTurnEnd = () => {
         if (shouldNotifyTurn(notifyRef.current.mode, Date.now() - turnStartedAt, notifyRef.current.after)) {
           notifyUser(notifyRef.current.mode, 'Done - o4c is waiting for your next message.');

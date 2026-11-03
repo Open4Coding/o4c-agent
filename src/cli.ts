@@ -45,6 +45,16 @@ import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
 import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
 import { loadSkills, setSkills, skillGate, skillListing } from './session/skills.js';
+import { createTaskTool, loadProfiles, setTaskPolicy, setTaskRuntime } from './agent/subAgents.js';
+import { HistoryRecorder } from './session/historyRecorder.js';
+import type { PolicyAnswer } from './agent/loop.js';
+import type { Tool } from './tools/types.js';
+
+/** Sets the sub-agents' policy (G4) to the one this run uses, and returns it unchanged. */
+function withTaskPolicy(policy: (tool: Tool, input: Record<string, unknown>) => Promise<PolicyAnswer>) {
+  setTaskPolicy(policy);
+  return policy;
+}
 import { hasHooks, hookProblems, hooksConfig, parseHooks, postToolHooksComponent, preToolHookVerdict, runHooks, setHooks } from './session/hooks.js';
 import { loadCredentials } from './session/credentials.js';
 import { createProvider, parseProviderSpecs } from './providers/factory.js';
@@ -827,9 +837,11 @@ program
     // G2: skills (project > global > bundled), listed in the prompt and loadable with the skill tool.
     const skills = loadSkills(trusted ? projectRoot : undefined);
     setSkills(skills);
+    // G4: sub-agent profiles (built-in explore/verify, then global, then project) and the task tool.
+    const taskTool = createTaskTool(loadProfiles(trusted ? projectRoot : undefined));
     const systemPrompt = buildSystemPrompt({
       profile: promptProfileFor(opts.model, resolvedConfig[PROMPT_PROFILE_CONFIG_KEY]),
-      tools: [...defaultTools.map((t) => t.name), ...(trusted && resolvedConfig.codeGraph !== false ? ['code_graph'] : [])],
+      tools: [...defaultTools.map((t) => t.name), taskTool.name, ...(trusted && resolvedConfig.codeGraph !== false ? ['code_graph'] : [])],
       skills: skillListing(skills),
       environment: [cwdLine, shellPromptLine(currentShell())],
       projectContext,
@@ -853,7 +865,8 @@ program
         });
       }
     }
-    const loop = new AgentLoop(provider, defaultTools, systemPrompt);
+    const loop = new AgentLoop(provider, [...defaultTools, taskTool], systemPrompt);
+    setTaskRuntime({ provider, tools: () => loop.getTools(), environment: [cwdLine, shellPromptLine(currentShell())], contextWindow });
     // G3: PostToolUse runs around every tool; PreCompact is told before a compaction.
     loop.registerCore(postToolHooksComponent({ sessionId: opts.resume ?? opts.session, cwd }));
     loop.onBeforeCompact = (trigger) => {
@@ -930,6 +943,23 @@ program
     });
     if (history) {
       loop.registerCore(history.recorder);
+      // G4: each sub-agent run filed as its own finished task, in a side session of this one.
+      setTaskRuntime({
+        provider,
+        tools: () => loop.getTools(),
+        environment: [cwdLine, shellPromptLine(currentShell())],
+        contextWindow,
+        record: () => {
+          const recorder = new HistoryRecorder({ store: history.store, sessionId: `${sessionId}:agents`, projectRoot: projectRoot!, enabled: () => true });
+          return {
+            onEntry: (e) => recorder.onEntry(e),
+            finish: () => {
+              const id = recorder.currentTask();
+              if (id !== undefined) history.store.finishTask(id);
+            },
+          };
+        },
+      });
       process.on('exit', () => history.close());
     }
     recordLifecycle(lifecycleDir, 'history', { opened: history !== undefined });
@@ -1223,7 +1253,8 @@ program
         // Nobody to ask in one-shot mode (B18): summarize, so a script gets an answer, not a throw.
         onStepLimit: async () => 'summarize',
         // Permission rules apply headless too (C3): deny holds, and ask is a deny - nobody can answer.
-        toolPolicy: headlessRules
+        // G4: whatever policy this run uses is also the one its sub-agents use.
+        toolPolicy: withTaskPolicy(headlessRules
           ? async (tool, input) => {
               const skillDenied = skillGate(tool.name);
               if (skillDenied) return { verdict: 'deny', reason: skillDenied };
@@ -1245,7 +1276,7 @@ program
               const hooked = await preToolHookVerdict(tool.name, input, cwd);
               if (hooked === 'ask') return { verdict: 'deny', reason: 'a PreToolUse hook asks for approval, which a headless run cannot give' };
               return hooked ?? 'allow';
-            },
+            }),
         // One-shot is autonomous like Auto mode: ask once to verify edits nobody checked (B19).
         verifyOnStop: resolvedConfig.verifyOnStop !== false,
         // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which
