@@ -100,6 +100,36 @@ export function parseStats(stderr: string): RunStats {
   }
 }
 
+/**
+ * The same numbers counted from the run's FULLCONTEXT log, for a run killed at the timeout: it never
+ * printed its stats line, and recording it as 0 tokens made a run whose model looped for 15 minutes
+ * look cheaper than one that finished (k4b-on-r1, 22-big-file, 2026-11-03). Every request row
+ * carries the provider's usage, so the log is a full account of what was spent.
+ */
+export function statsFromRunLog(workDir: string): RunStats | undefined {
+  const dir = join(workDir, '.o4c', 'logs');
+  if (!existsSync(dir)) return undefined;
+  const stats: RunStats = { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, toolCalls: 0 };
+  for (const name of readdirSync(dir).filter((f) => f.endsWith('.FULLCONTEXT.jsonl'))) {
+    for (const line of readFileSync(join(dir, name), 'utf-8').split('\n')) {
+      if (!line.trim()) continue;
+      let row: { type?: string; response?: { usage?: Partial<RunStats>; toolCalls?: unknown[] } };
+      try {
+        row = JSON.parse(line) as typeof row;
+      } catch {
+        continue; // the last line of a killed run can be cut short
+      }
+      if (row.type !== 'provider_call' && row.type !== 'provider_call_delta') continue;
+      stats.requests++;
+      stats.inputTokens += row.response?.usage?.inputTokens ?? 0;
+      stats.outputTokens += row.response?.usage?.outputTokens ?? 0;
+      stats.cachedTokens += row.response?.usage?.cachedTokens ?? 0;
+      stats.toolCalls += row.response?.toolCalls?.length ?? 0;
+    }
+  }
+  return stats.requests > 0 ? stats : undefined;
+}
+
 /** Results recorded so far for a run - lets an interrupted run continue where it stopped. */
 export function readResults(file: string): EvalResult[] {
   if (!existsSync(file)) return [];
@@ -165,7 +195,8 @@ export async function runTask(task: EvalTask, options: RunTaskOptions): Promise<
   const [command, ...args] = options.agent;
   const agent = await runProcess(command, [...args, task.prompt], options.workDir, options.timeoutS ?? task.timeoutS);
   const wallS = Math.round((Date.now() - started) / 100) / 10;
-  const stats = parseStats(agent.stderr);
+  const printed = parseStats(agent.stderr);
+  const stats = printed.requests === 0 ? (statsFromRunLog(options.workDir) ?? printed) : printed;
   const check = await runProcess(process.execPath, [join(task.dir, 'check.mjs')], options.workDir, 300);
 
   return {

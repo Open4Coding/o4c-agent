@@ -10,6 +10,7 @@ import {
   parseStats,
   runEvalCli,
   runTask,
+  statsFromRunLog,
   STATS_MARK,
   summarize,
   type EvalResult,
@@ -124,4 +125,15 @@ test('o4c eval run --help prints usage and runs nothing', async () => {
   assert.ok(lines.some((l) => l.includes('o4c eval run')));
   assert.equal(existsSync(join(dir, 'results')), false);
   assert.equal(await runEvalCli(['diff', '-h'], () => {}), 0);
+});
+
+test('a run killed at the timeout is counted from its FULLCONTEXT log, not as 0 tokens', () => {
+  const work = mkdtempSync(join(tmpdir(), 'o4c-eval-log-'));
+  assert.equal(statsFromRunLog(work), undefined);
+  mkdirSync(join(work, '.o4c', 'logs'), { recursive: true });
+  const row = (type: string, input: number, calls: number) =>
+    JSON.stringify({ type, response: { usage: { inputTokens: input, outputTokens: 10, cachedTokens: input - 5 }, toolCalls: Array(calls).fill({}) } });
+  const lines = [row('provider_call', 100, 1), row('provider_call_delta', 200, 2), JSON.stringify({ type: 'note' }), '{"type":"provider_ca'];
+  writeFileSync(join(work, '.o4c', 'logs', 'x.FULLCONTEXT.jsonl'), lines.join(String.fromCharCode(10)));
+  assert.deepEqual(statsFromRunLog(work), { requests: 2, inputTokens: 300, outputTokens: 20, cachedTokens: 290, toolCalls: 3 });
 });
