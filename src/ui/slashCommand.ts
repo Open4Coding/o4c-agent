@@ -331,6 +331,12 @@ export const COMMANDS: CommandInfo[] = [
   // action of its own - listing every configured server and what state it is in - and that
   // listing is the whole answer when no server offers prompts, which is the default.
   {
+    name: '/set-mouse',
+    hidden: true,
+    select: 'run',
+    description: 'Click in the input box to place the cursor - off by default, because while on the wheel no longer scrolls back and selecting text needs Shift+drag.',
+  },
+  {
     name: '/set-notify',
     hidden: true,
     select: 'run',

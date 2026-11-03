@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, measureElement, useCursor, useInput, usePaste, useWindowSize } from 'ink';
+import { Box, Text, measureElement, useCursor, useInput, usePaste, useStdin, useStdout, useWindowSize } from 'ink';
 import type { DOMElement } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -8,6 +8,8 @@ import {
   movePageVisualRows,
   moveParagraph,
   moveVisualRow,
+  cursorAtVisualRow,
+  cursorInVisualRows,
   rowStart,
   rowEnd,
 } from './inputBoxLayout.js';
@@ -134,6 +136,7 @@ function expandPastes(text: string, pastes: ReadonlyMap<string, string>): string
 }
 
 import { theme } from './theme.js';
+import { ASK_CURSOR, isLeftClick, MOUSE_OFF, MOUSE_ON, parseCursorReport, parseSgrMouse, tapStdin } from './mouse.js';
 
 export interface InputBoxProps {
   prompt?: string;
@@ -144,6 +147,8 @@ export interface InputBoxProps {
   /** When true, Enter/↑/↓ are left alone here (a live overlay like CommandPalette owns them
    * instead) while normal typing, backspace, and cursor movement keep working. Default false. */
   suppressNav?: boolean;
+  /** E16: a left click in the box moves the cursor there (terminal mouse reporting while active). */
+  mouse?: boolean;
   /** Fires with the current text on every edit - lets a parent drive something off the live
    * value (e.g. deciding whether to show the command palette) without owning the text itself. */
   onChange?: (value: string) => void;
@@ -225,6 +230,7 @@ export function InputBox({
   disabled = false,
   active = true,
   suppressNav = false,
+  mouse = false,
   onChange,
   resetToken,
   prefill,
@@ -387,6 +393,43 @@ export function InputBox({
   const historyRef = useRef<string[]>(initialHistory ?? []);
   const historyIndexRef = useRef<number>(-1); // -1 = not currently browsing history
   const draftRef = useRef<string>(''); // what was being typed before browsing started
+  // E16: the layout a click is measured against (set each render), and a click awaiting the
+  // terminal's cursor-position reply.
+  const clickLayoutRef = useRef<{ value: string; width: number; caretRow: number; caretCol: number; top: number; rows: number } | undefined>(undefined);
+  const pendingClickRef = useRef<{ x: number; y: number } | undefined>(undefined);
+  // The streams Ink itself reads and writes - the real terminal in the app, fakes under test.
+  const { stdin: inkStdin } = useStdin();
+  const { stdout: inkStdout } = useStdout();
+  useEffect(() => {
+    if (!mouse || !active) return;
+    const off = () => inkStdout.write(MOUSE_OFF);
+    inkStdout.write(MOUSE_ON);
+    process.on('exit', off);
+    const untap = tapStdin(inkStdin, (chunk) => {
+      for (const e of parseSgrMouse(chunk)) {
+        if (!isLeftClick(e)) continue;
+        pendingClickRef.current = { x: e.x, y: e.y };
+        inkStdout.write(ASK_CURSOR);
+      }
+      const at = parseCursorReport(chunk);
+      const click = pendingClickRef.current;
+      const layout = clickLayoutRef.current;
+      if (!at || !click || !layout) return;
+      pendingClickRef.current = undefined;
+      const row = layout.caretRow + (click.y - at.row);
+      const col = layout.caretCol + (click.x - at.col);
+      if (row < layout.top || row >= layout.top + layout.rows || col < 0) return; // outside the box
+      const target = cursorAtVisualRow(layout.value, layout.width, prompt, row, col);
+      edit((b) => ({ ...b, cursor: Math.min(target, b.value.length) }));
+    });
+    return () => {
+      untap();
+      off();
+      process.off('exit', off);
+    };
+    // `edit` writes through bufferRef, so the closure never goes stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mouse, active, prompt, inkStdin, inkStdout]);
   // Whether that draft was expanded (Ctrl+O) - it comes back expanded; recalled entries do not
   // (plan 0006 E15, 0002 item 18).
   const draftExpandedRef = useRef(false);
@@ -765,6 +808,10 @@ export function InputBox({
   const width = contentWidth(columns);
   const capRows = expanded ? expandedInputBoxCapRows(rows) : inputBoxCapRows(rows);
   const view = inputWindow(valueWithCursor, cursorInValue, width, prompt, capRows);
+  // E16: where the caret is in the whole text's rows, and which of them the window shows - what a
+  // click (an offset from the caret on screen) is measured against.
+  const caretAbs = cursorInVisualRows(valueWithCursor, cursorInValue, width, prompt);
+  clickLayoutRef.current = { value: valueWithCursor, width, caretRow: caretAbs.row, caretCol: caretAbs.col, top: caretAbs.row - view.cursorRow, rows: view.rows.length };
   // The windowed rows are already wrapped to `width`, so `wrap="wrap"` has nothing left to do and
   // the rendered height is exactly what was budgeted - no surprise extra row.
   const body = view.rows.join('\n');

@@ -415,3 +415,22 @@ export function cursorRenderTarget(value: string, cursor: number): CursorRenderT
   if (isRealChar) return { text: value, index: cursor, inserted: false };
   return { text: `${value.slice(0, cursor)} ${value.slice(cursor)}`, index: cursor, inserted: true };
 }
+
+/**
+ * The cursor index at absolute visual row `row` (counting every wrapped row of the whole value
+ * from 0) and column `col` within that row - the inverse of `cursorInVisualRows`, clamped into
+ * range. Mouse clicks (plan 0006 E16) land here.
+ */
+export function cursorAtVisualRow(value: string, width: number, prompt: string, row: number, col: number): number {
+  const lines = value.split('\n');
+  let remaining = Math.max(0, row);
+  for (let i = 0; i < lines.length; i++) {
+    const rows = wrapLine(unitTextFor(i, lines[i], prompt), width);
+    if (remaining < rows.length || i === lines.length - 1) {
+      const unitPos = positionFromRows(rows, Math.min(remaining, rows.length - 1), col);
+      return toCursor(value, { line: i, col: unitPosToCol(i, unitPos, prompt) });
+    }
+    remaining -= rows.length;
+  }
+  return value.length;
+}

@@ -153,6 +153,7 @@ import { SHOW_TIPS_KEY, TIPS } from './tips.js';
 import { completeMention, expandMentions, mentionCandidates, mentionPrefix } from './mentions.js';
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { editText } from './externalEditor.js';
+import { MOUSE_CONFIG_KEY } from './mouse.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
 import { formatStats, taskCounts } from './statsReport.js';
@@ -1202,6 +1203,14 @@ export function App({
     resolve: (answer: ConfirmAnswer) => void;
   } | null>(null);
 
+  // E16: click-to-place-cursor, opt-in (it takes the wheel away from scrollback while on).
+  const [mouseOn, setMouseOn] = useState(false);
+  useEffect(() => {
+    void configStore
+      .get(MOUSE_CONFIG_KEY)
+      .then((v) => setMouseOn(v === true))
+      .catch(() => undefined);
+  }, [configStore]);
   // E12: bell / OS toast when a long turn ends or an approval waits. Read once; /set-notify updates it.
   const notifyRef = useRef<{ mode: NotifyMode; after: number }>({ mode: DEFAULT_NOTIFY, after: DEFAULT_NOTIFY_AFTER_SECONDS });
   useEffect(() => {
@@ -2783,6 +2792,19 @@ export function App({
           await configStore.set('global', 'autoAllowReadOnly', arg === 'on').catch(() => undefined);
           pushBlock([infoLine(arg === 'on' ? 'Read-only shell commands now run without asking (see /view-permissions).' : 'Read-only shell commands ask again, like any other command.')]);
         }
+      } else if (commandName(input) === '/set-mouse') {
+        // E16: opt-in, with the trade-off said up front.
+        pushBlock([userLine(input)]);
+        const choice = await pickChoice('Mouse click places the cursor in the input box (↑/↓, Enter, Esc to cancel):', [
+          { key: 'off', label: 'off - the wheel scrolls back through the conversation and drag selects text (default)' },
+          { key: 'on', label: 'on - click to place the cursor; the wheel stops scrolling back, and selecting text needs Shift+drag' },
+        ]);
+        if (!choice) pushBlock([infoLine('Mouse unchanged.')]);
+        else {
+          await configStore.set('global', MOUSE_CONFIG_KEY, choice === 'on').catch(() => undefined);
+          setMouseOn(choice === 'on');
+          pushBlock([infoLine(choice === 'on' ? 'Mouse on: click in the input box to move the cursor. Shift+drag selects text; /set-mouse to turn it off.' : 'Mouse off.')]);
+        }
       } else if (commandName(input) === '/set-notify') {
         // E12: how o4c gets your attention when a long turn ends or an approval waits.
         pushBlock([userLine(input)]);
@@ -3930,6 +3952,7 @@ export function App({
         onQueue={handleQueue}
         active={!confirmDialog && !stopConfirm && !clearConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker && !choicePicker}
         suppressNav={paletteOpen || familyOpen}
+        mouse={mouseOn}
         onChange={handleInputChange}
         resetToken={inputResetToken}
         prefill={prefill}

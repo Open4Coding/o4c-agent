@@ -93,6 +93,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/config-highlightcolor',
     '/config-local-highlightcolor',
     '/config-global-highlightcolor',
+    '/set-mouse',
     '/set-notify',
     '/set-shell',
     '/memory',
