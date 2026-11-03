@@ -43,6 +43,8 @@ import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
+import { runAcp } from './acp/agent.js';
+import { classifyToolAccess } from './ui/modePolicy.js';
 import { combinePrompt, eventLine, EXIT, exitCodeFor, parseAllowedTools, parseOutputFormat, parsePermissionMode, readStdin, resultObject, schemaPrompt, type PermissionMode, type RunFacts } from './headless.js';
 
 /**
@@ -500,11 +502,13 @@ program
   .option('--allowed-tools <list>', 'one-shot: the only tools the model may use, comma-separated (e.g. read_file,grep_files)')
   .option('--json-schema <file>', 'one-shot: reshape the final answer into JSON matching this JSON schema (constrained decoding)')
   .option('--stdin', 'one-shot: read stdin and add it after the prompt (with no prompt, piped stdin is the prompt anyway)')
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; continue?: boolean; session?: string; profile?: string; mode?: string; window?: string; outputFormat?: string; maxTurns?: string; permissionMode?: string; allowedTools?: string; jsonSchema?: string; stdin?: boolean }) => {
+  .option('--acp', 'speak the Agent Client Protocol on stdio, for editors (also: o4c acp)')
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; continue?: boolean; session?: string; profile?: string; mode?: string; window?: string; acp?: boolean; outputFormat?: string; maxTurns?: string; permissionMode?: string; allowedTools?: string; jsonSchema?: string; stdin?: boolean }) => {
     let prompt = promptParts.join(' ');
     // H1: stdin is read only when it can be meant - no prompt with a pipe, or --stdin - so a caller
     // that leaves stdin open cannot hang o4c.
-    if ((!prompt && !process.stdin.isTTY) || opts.stdin) prompt = combinePrompt(prompt, await readStdin());
+    // H2: in ACP mode stdin is the protocol, never a prompt.
+    if (!opts.acp && ((!prompt && !process.stdin.isTTY) || opts.stdin)) prompt = combinePrompt(prompt, await readStdin());
     const outputFormat = parseOutputFormat(opts.outputFormat);
     const permissionMode = parsePermissionMode(opts.permissionMode);
     const allowedTools = parseAllowedTools(opts.allowedTools);
@@ -1192,6 +1196,45 @@ program
       installGcWatchdog(gcThresholdMB, (message) => console.error(`\n${message}\n`));
     }
 
+    // H2: o4c acp - an editor drives sessions over stdio; same provider, tools, prompt and policy layers.
+    if (opts.acp) {
+      const acpRules = await loadRules((s) => configStore.readScope(s as 'global' | 'local' | 'personal'));
+      let firstRunner = true;
+      await runAcp({
+        newRunner: (sessionCwd) => {
+          if (sessionCwd && sessionCwd !== process.cwd()) {
+            try {
+              process.chdir(sessionCwd);
+            } catch {
+              // Stay where o4c started.
+            }
+          }
+          if (firstRunner) {
+            firstRunner = false;
+            return loop;
+          }
+          return new AgentLoop(provider, [...defaultTools, ...extraTools], systemPrompt);
+        },
+        decide: async (tool, input) => {
+          const skillDenied = skillGate(tool.name);
+          if (skillDenied) return { verdict: 'deny', reason: skillDenied };
+          const hooked = await preToolHookVerdict(tool.name, input, process.cwd());
+          if (typeof hooked === 'object') return hooked;
+          if (hooked === 'allow') return 'allow';
+          const ruled = evaluateRules(acpRules, tool, input, splitShellSegments);
+          if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
+          if (hooked === 'ask' || ruled?.decision === 'ask') return 'ask';
+          if (ruled?.decision === 'allow') return 'allow';
+          // Manual-mode rules: reading is free, anything that changes things asks the editor.
+          const access = classifyToolAccess('manual', tool, input, undefined);
+          return access === 'allow' ? 'allow' : access === 'deny' ? { verdict: 'deny', reason: 'not allowed' } : 'ask';
+        },
+        runOptions: () => ({ contextWindow, toolOutputDir: toolOutputDirFor(projectRoot), thinkLevel: oneShotThinkLevel(resolvedConfig, opts.model), maxIterations }),
+      });
+      await mcp.shutdown();
+      return;
+    }
+
     if (!prompt) {
       const sessionStore = new SessionStore(sessionsDirFor(projectRoot), sessionsToSave);
       // The project's lifetime token count, for the footer's token line. Loaded with the session
@@ -1419,6 +1462,8 @@ program
 
 // `o4c eval run|diff|list` (plan 0006 J1). Checked by hand rather than as a commander subcommand,
 // so only those exact forms are taken and a prompt that merely starts with "eval" still is one.
+// `o4c acp` (plan 0006 H2) is the --acp flag, so it shares every startup step with the other modes.
+if (process.argv[2] === 'acp') process.argv.splice(2, 1, '--acp');
 if (process.argv[2] === 'eval' && ['run', 'diff', 'list'].includes(process.argv[3] ?? '')) {
   process.exitCode = await runEvalCli(process.argv.slice(3));
 } else {
