@@ -44,6 +44,8 @@ import { SelectList } from './SelectList.js';
 import { TAB_USED_KEY } from './tabHint.js';
 import { dbDirFor, plansDirFor, toolOutputDirFor } from '../session/projectContext.js';
 import { listDatabases, openReadOnly, recordDetail, recordRows, rowsTitle, schemaDetail, tableRows } from './dbBrowser.js';
+import { formatTrace, recentTurns, turnSpans, turnSummary } from '../session/spans.js';
+import { INFINITE_CONTEXT_DB_FILENAME } from '../session/infiniteContextStore.js';
 import { listPlans, plansReport } from '../session/plansStore.js';
 import { clipDiff, diffLines, diffStats, formatDiffStats } from './lineDiff.js';
 import { styleCodePreview, styleDiff, type StyledDiffLine } from './diffStyle.js';
@@ -2262,6 +2264,35 @@ export function App({
           } finally {
             db?.close();
           }
+        }
+      } else if (commandName(input) === '/trace' || commandName(input) === '/view-trace') {
+        // K3: where a turn's time went, from history.db's spans table - read-only, no LLM call.
+        // /trace is the newest traced turn; /view-trace picks one from the recent ones.
+        pushBlock([userLine(input)]);
+        const dbDir = dbDirFor(projectRoot);
+        let db: ReturnType<typeof openReadOnly> | undefined;
+        try {
+          db = dbDir && listDatabases(dbDir).includes(INFINITE_CONTEXT_DB_FILENAME) ? openReadOnly(dbDir, INFINITE_CONTEXT_DB_FILENAME) : undefined;
+          const hasSpans = db?.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spans'`).get() !== undefined;
+          const turns = db && hasSpans ? recentTurns(db) : [];
+          if (!db || turns.length === 0) {
+            pushBlock([infoLine('No traced turns yet - each turn is traced into .o4c/db/history.db once the project is trusted.')]);
+          } else {
+            const traceDb = db;
+            const picked =
+              commandName(input) === '/trace'
+                ? String(turns[0]!.id)
+                : await pickChoice(
+                    'Traced turns, newest first (↑/↓ to choose, Enter to view, Esc to cancel):',
+                    turns.map((t) => ({ key: String(t.id), label: turnSummary(traceDb, t) })),
+                  );
+            if (!picked) pushBlock([infoLine('Nothing chosen.')]);
+            else pushBlock([infoLine(formatTrace(turnSpans(traceDb, Number(picked))).join('\n'))]);
+          }
+        } catch (err) {
+          pushBlock([infoLine(`Could not read the trace: ${formatError(err)}`)]);
+        } finally {
+          db?.close();
         }
       } else if (commandName(input) === '/view-plan') {
         // Local and display-only like /plans: picking and viewing never reach loop.run().

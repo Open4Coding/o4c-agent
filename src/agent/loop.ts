@@ -55,6 +55,7 @@ import {
 } from './compaction.js';
 import { createThinkTagStripper } from './streamFilter.js';
 import type { ThinkLevel } from './thinkLevel.js';
+import { NO_SPAN, type SpanHandle, type SpanKind, type TurnTracer } from './tracer.js';
 import {
   OVERSIZED_TOOL_RESULT_MULTIPLE,
   maxToolOutputChars,
@@ -324,6 +325,9 @@ export class AgentLoop {
     | { readonly version: number; readonly entries: readonly ContextEntry[]; readonly estimate: number }
     | undefined;
   private usage: CumulativeUsage = emptyUsage();
+  /** K3: span tracing, when the caller set a tracer (`setTracer`); the open turn's span while one runs. */
+  private tracer: TurnTracer | undefined;
+  private turnSpan: SpanHandle | undefined;
   /** The last main request and its prompt size, to tell the next one's cache miss apart from
    * normal reuse (plan 0006 A2). Per process: the first request after a per-turn reload has
    * nothing to compare against. */
@@ -1153,7 +1157,21 @@ export class AgentLoop {
    * before compaction existed, not a new regression. Nothing is mutated unless the summarization
    * call actually succeeds, so a failure never leaves history in a half-compacted state.
    */
-  private async maybeCompact(
+  /** K3: `compactIfNeeded`, traced as a span only when it actually compacted. */
+  private async maybeCompact(...args: Parameters<AgentLoop['compactIfNeeded']>): Promise<void> {
+    if (!this.turnSpan) return this.compactIfNeeded(...args);
+    const count = () => this.entries.reduce((n, e) => n + (e.sub_type === 'compaction' ? 1 : 0), 0);
+    const before = count();
+    const span = this.span('compaction', args[8] ? 'manual' : 'auto');
+    try {
+      await this.compactIfNeeded(...args);
+    } finally {
+      if (count() === before) span.discard();
+      else span.end();
+    }
+  }
+
+  private async compactIfNeeded(
     contextWindow: number,
     settings: CompactionSettings,
     onEvent: (event: AgentEvent) => void,
@@ -1427,7 +1445,41 @@ export class AgentLoop {
     return { ok: false, detail: `no structured tool call came back (reply: ${JSON.stringify(response.content.slice(0, 120))})` };
   }
 
+  /** K3: trace every turn from now on into `tracer` (spans written when each turn ends). */
+  setTracer(tracer: TurnTracer | undefined): void {
+    this.tracer = tracer;
+  }
+
+  /** A span under the open turn, or the shared no-op when nothing is being traced. */
+  private span(kind: SpanKind, name: string): SpanHandle {
+    return this.tracer && this.turnSpan ? this.tracer.start(kind, name, this.turnSpan) : NO_SPAN;
+  }
+
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
+    const tracer = this.tracer;
+    // A nested run (a sub-agent on this loop) is traced inside the outer turn, not as its own.
+    if (!tracer || this.turnSpan) return this.runTurn(userMessage, options);
+    const firstLine = userMessage.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+    const turn = tracer.start('turn', firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine);
+    this.turnSpan = turn;
+    let error: string | undefined;
+    try {
+      return await this.runTurn(userMessage, options);
+    } catch (err) {
+      error = err instanceof Error ? err.name : 'error';
+      throw err;
+    } finally {
+      this.turnSpan = undefined;
+      turn.end(error ? { error } : {});
+      try {
+        tracer.flush();
+      } catch {
+        // A trace that cannot be written costs the trace, never the turn.
+      }
+    }
+  }
+
+  private async runTurn(userMessage: string, options: RunOptions = {}): Promise<string> {
     const configuredMaxIterations = options.maxIterations ?? 25;
     const maxIterations = configuredMaxIterations > 0 ? configuredMaxIterations : Infinity;
     const onEvent = options.onEvent ?? (() => {});
@@ -1819,8 +1871,18 @@ export class AgentLoop {
         onPrefillProgress: (prefill) => onEvent({ type: 'prefill_progress', prefill }),
         onServerBusy: () => onEvent({ type: 'server_busy' }),
       };
+      const modelSpan = this.span('model', request.purpose ?? 'main');
       try {
         response = await this.provider.complete(request);
+        modelSpan.end({
+          prompt_tokens: response.usage?.inputTokens,
+          cached_tokens: response.usage?.cachedTokens,
+          processed_tokens: response.usage?.processedPromptTokens,
+          gen_tokens: response.usage?.outputTokens,
+          tok_s: response.usage?.tokensPerSecond,
+          stop: response.stopReason,
+          tool_calls: response.toolCalls.length,
+        });
         onProviderCall({ request, response });
         const cacheBreak = diagnoseCacheBreak(this.lastMainRequest, this.lastMainPromptTokens, request, response.usage);
         if (cacheBreak) {
@@ -1851,6 +1913,7 @@ export class AgentLoop {
         // or rename the underlying abort error (e.g. LocalProvider merges this signal with its
         // own request timeout via AbortSignal.any, so a plain `err.name` check can't tell "the
         // user cancelled" apart from "the provider's own timeout fired" the way this can).
+        modelSpan.end({ error: options.signal?.aborted ? 'aborted' : err instanceof Error ? err.name : 'error' });
         if (options.signal?.aborted) {
           this.rollbackTo(lengthBeforeTurn);
           throw new AbortedError(userMessage);
@@ -2134,13 +2197,20 @@ export class AgentLoop {
           // can never become a route around the approval gate. This is where the Code Graph
           // answers a `grep` from its index instead of reading files; `runTool` with nothing
           // registered is a direct call to `execute`, no wrapper allocated.
-          output = await this.core.runTool({ tool, input }, () =>
-            tool.execute(input, {
-              signal: options.signal,
-              // Live status only, like 'delta': the UI shows the latest line, nothing is logged (B24).
-              onOutput: (text) => onEvent({ type: 'tool_output', toolName: tool.name, text }),
-            }),
-          );
+          const toolSpan = this.span('tool', tool.name);
+          try {
+            output = await this.core.runTool({ tool, input }, () =>
+              tool.execute(input, {
+                signal: options.signal,
+                // Live status only, like 'delta': the UI shows the latest line, nothing is logged (B24).
+                onOutput: (text) => onEvent({ type: 'tool_output', toolName: tool.name, text }),
+              }),
+            );
+          } catch (err) {
+            toolSpan.end({ error: true });
+            throw err;
+          }
+          toolSpan.end({ bytes: output.length, ...(output.startsWith('Error') ? { error: true } : {}) });
         }
         output = await this.boundToolOutput(output, call.name, options);
         // After bounding, so a truncation can never cut the note off.

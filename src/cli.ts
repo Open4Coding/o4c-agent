@@ -80,6 +80,7 @@ import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
 import { loadSkills, setSkills, skillGate, skillListing } from './session/skills.js';
 import { createTaskTool, loadProfiles, setTaskPolicy, setTaskRuntime } from './agent/subAgents.js';
 import { HistoryRecorder } from './session/historyRecorder.js';
+import { TurnTracer } from './agent/tracer.js';
 import type { PolicyAnswer } from './agent/loop.js';
 import type { Tool } from './tools/types.js';
 
@@ -1038,6 +1039,14 @@ program
     });
     if (history) {
       loop.registerCore(history.recorder);
+      // K3: every turn's spans (model calls, tool calls, compaction) into history.db, written once
+      // when the turn ends; two weeks kept. A trace that cannot be written costs the trace only.
+      try {
+        history.store.spans().prune();
+      } catch {
+        // An old or locked database: tracing still works, pruning waits for the next start.
+      }
+      loop.setTracer(new TurnTracer((spans) => history.store.spans().writeTurn(sessionId, spans)));
       // G4: each sub-agent run filed as its own finished task, in a side session of this one.
       setTaskRuntime({
         provider,

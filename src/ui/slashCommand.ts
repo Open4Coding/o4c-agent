@@ -177,6 +177,16 @@ export const COMMANDS: CommandInfo[] = [
     select: 'run',
   },
   {
+    name: '/trace',
+    select: 'run',
+    description: 'Where the last turn\'s time went: each model call (prompt, cached and generated tokens, rate) and tool call as a timeline, then the split - prefill, generation, tools, compaction. No LLM call.',
+  },
+  {
+    name: '/view-trace',
+    select: 'run',
+    description: 'Pick one of the recent traced turns from a list and see its timeline, as /trace shows the last one. Traces are kept two weeks, in .o4c/db/history.db.',
+  },
+  {
     name: '/view-log',
     description: 'Open a log in your editor: run (default - the newest run log, readable, think blocks included), full (FULLCONTEXT), lifecycle or crash. Usage: /view-log [run|full|lifecycle|crash]',
   },

@@ -41,6 +41,20 @@ it (config `promptProfile`: `default`, `qwen` or `small`).
 Look into this project's databases (`.o4c/db`) and the global ones: pick a database, a table, then a row
 to see it in full. Read-only.
 
+## `/trace`
+
+Where the last turn's time went. Each model call is listed with its prompt tokens (and how many came
+from the server's cache), the tokens it generated and the decode rate; each tool call with its time and
+output size; any compaction. The last line splits the turn: model prefill, generation, tools,
+compaction and the rest. Prefill and generation are told apart by the generated tokens over the rate
+the server reports, so a provider that reports no rate shows its model time unsplit.
+
+## `/view-trace`
+
+Pick one of the recent traced turns - when, how long, how many model and tool calls, what was asked -
+and see its timeline as `/trace` shows the last one. Traces live in the `spans` table of
+`.o4c/db/history.db` (so `/view-db` shows them too), are kept for two weeks, and never leave the machine.
+
 ## `/database-backup`
 
 Back up every o4c database - this project's history, code graph and session list, and the global

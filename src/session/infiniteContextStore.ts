@@ -5,6 +5,7 @@ import type { ContextEntry } from '../agent/contextEntry.js';
 import { PLANS_SCHEMA, PlanStore } from './planStore.js';
 import { CHECKPOINTS_SCHEMA, CheckpointStore } from './checkpoints.js';
 import { MEMORIES_SCHEMA, MemoryStore } from './memories.js';
+import { SPANS_SCHEMA, SpanStore } from './spans.js';
 import { redactSecrets } from './redact.js';
 
 /** `history.db` itself - the WAL sidecars (`-wal`/`-shm`) appear alongside it during normal use
@@ -296,8 +297,9 @@ CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_tag_id);
  * 2 (2026-11-01): `tasks.notes`, also searched - see `migrate`.
  * 3 (2026-11-01): plans and their checklists (`planStore.ts`) - new tables only, so no migration.
  * 4 (2026-11-02): `checkpoints` (plan 0006 C1, `checkpoints.ts`) - a new table only, no migration.
- * 5 (2026-11-02): `memories` (plan 0006 D3, `memories.ts`) - a new table only, no migration. */
-export const HISTORY_SCHEMA_VERSION = 5;
+ * 5 (2026-11-02): `memories` (plan 0006 D3, `memories.ts`) - a new table only, no migration.
+ * 6 (2026-11-03): `spans` (plan 0006 K3, `spans.ts`) - a new table only, no migration. */
+export const HISTORY_SCHEMA_VERSION = 6;
 
 /** How much of a task's notes is kept - the newest, since later findings build on earlier ones. */
 export const TASK_NOTES_CHARS = 6000;
@@ -341,6 +343,7 @@ export class InfiniteContextStore {
   private planStore: PlanStore | undefined;
   private checkpointStore: CheckpointStore | undefined;
   private memoryStore: MemoryStore | undefined;
+  private spanStore: SpanStore | undefined;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -352,6 +355,7 @@ export class InfiniteContextStore {
     this.db.exec(PLANS_SCHEMA);
     this.db.exec(CHECKPOINTS_SCHEMA);
     this.db.exec(MEMORIES_SCHEMA);
+    this.db.exec(SPANS_SCHEMA);
     if (rebuildTaskIndex) this.db.exec(`INSERT INTO tasks_fts(tasks_fts) VALUES ('rebuild');`);
     this.db
       .prepare(
@@ -789,6 +793,12 @@ export class InfiniteContextStore {
   memories(): MemoryStore {
     this.memoryStore ??= new MemoryStore(this.db);
     return this.memoryStore;
+  }
+
+  /** Turn traces (K3), on this same connection. */
+  spans(): SpanStore {
+    this.spanStore ??= new SpanStore(this.db);
+    return this.spanStore;
   }
 
   /** Checkpoint records (C1), on this same connection like the plans. */
