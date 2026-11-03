@@ -151,6 +151,7 @@ import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { editText } from './externalEditor.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
+import { formatStats, taskCounts } from './statsReport.js';
 import { runShellTool } from '../tools/runShell.js';
 import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
@@ -561,6 +562,12 @@ function UsageBar({
         <Text>
           <Text color={theme.border}>t-tks: </Text>
           {pair(totals.project)}
+          {totals.machine && (
+            <Text>
+              <Text color={theme.border}> all: </Text>
+              {pair(totals.machine)}
+            </Text>
+          )}
           <Text color={theme.border}> | </Text>
         </Text>
       )}
@@ -1653,6 +1660,34 @@ export function App({
           shellNotesRef.current.push(note);
           pushBlock([infoLine(`${output}\n(the model sees this with your next message)`)]);
         }
+      } else if (commandName(input) === '/stats') {
+        // E11: session, project and machine totals - no model call.
+        pushBlock([userLine(input)]);
+        const used = loop.getUsage();
+        const totals = usageStore?.totals();
+        const messages = loop.getMessages();
+        pushBlock([
+          infoLine(
+            formatStats({
+              session: totals?.session ?? {
+                input: used.inputTokens,
+                output: used.outputTokens,
+                requests: used.requestCount,
+                cached: used.cachedTokens,
+                processed: used.processedPromptTokens,
+                prefillMs: used.prefillMs,
+                draftN: used.draftTokens,
+                draftAccepted: used.draftAccepted,
+                activeMs: 0,
+              },
+              project: totals?.project,
+              machine: totals?.machine,
+              turns: messages.filter((m) => m.role === 'user').length,
+              toolCalls: messages.filter((m) => m.role === 'tool').length,
+              tasks: taskCounts(),
+            }).join('\n'),
+          ),
+        ]);
       } else if (commandName(input) === '/commit') {
         // E10: a generated commit message, shown for approval; no trailer unless commitTrailer is set.
         pushBlock([userLine(input)]);

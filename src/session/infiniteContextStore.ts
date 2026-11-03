@@ -625,6 +625,14 @@ export class InfiniteContextStore {
       .all(limit) as unknown as TaskRow[];
   }
 
+  /** Top-level task totals for /stats (plan 0006 E11): all, finished, and marked as worked. */
+  taskCounts(): { total: number; done: number; worked: number } {
+    const r = this.db
+      .prepare(`SELECT COUNT(*) AS total, SUM(outcome = 'done') AS done, SUM(worked = 1) AS worked FROM tasks WHERE parent_task_id IS NULL`)
+      .get() as { total: number; done: number | null; worked: number | null };
+    return { total: Number(r.total) || 0, done: Number(r.done) || 0, worked: Number(r.worked) || 0 };
+  }
+
   /** A top-level task's follow-ups, in order. */
   followUps(rootId: number): TaskRow[] {
     return this.db

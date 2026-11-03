@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 /**
  * This project's lifetime token count, and the current session's share of it, for the footer's
@@ -86,6 +87,22 @@ export interface UsageTotals {
   project: TokenSpend;
   /** The session on screen, which survives the per-turn reload and `/resume`. */
   session: SessionSpend;
+  /** Every project on this machine (plan 0006 E11) - only when the store was given a global file. */
+  machine?: TokenSpend;
+}
+
+/** The machine-wide counter (E11): one small file in the user's home, beside the global memories. */
+export function globalUsageFile(): string {
+  return join(homedir(), '.o4c', 'usage-global.json');
+}
+
+function readMachine(file: string): TokenSpend {
+  try {
+    const v = JSON.parse(readFileSync(file, 'utf-8')) as Partial<TokenSpend>;
+    return { input: Number(v.input) || 0, output: Number(v.output) || 0 };
+  } catch {
+    return zero();
+  }
 }
 
 interface StoredUsage {
@@ -170,6 +187,7 @@ function parseUsage(text: string): StoredUsage {
 export class UsageStore {
   /** What was on disk at startup - the display baseline this process adds its own spend to. */
   private projectBaseline = zero();
+  private machineBaseline: TokenSpend | undefined;
   private sessionBaseline = zeroSession();
   private sessionId: string | undefined;
   /** When this process started counting time. Taken at construction rather than in `load()` so the
@@ -190,6 +208,7 @@ export class UsageStore {
     private readonly file: string,
     private readonly spentThisProcess: () => ProcessSpend,
     private readonly now: () => number = Date.now,
+    private readonly globalFile?: string,
   ) {
     this.startedAt = now();
   }
@@ -199,6 +218,7 @@ export class UsageStore {
    * that is not in the file (a brand new session) correctly starts at zero. */
   load(sessionId: string | undefined): void {
     this.sessionId = sessionId;
+    if (this.globalFile) this.machineBaseline = readMachine(this.globalFile);
     let stored: StoredUsage;
     try {
       stored = parseUsage(readFileSync(this.file, 'utf-8'));
@@ -244,6 +264,7 @@ export class UsageStore {
         activeMs: this.sessionBaseline.activeMs + this.elapsed(),
         ...addCache(this.sessionBaseline, spent),
       },
+      ...(this.machineBaseline ? { machine: { input: this.machineBaseline.input + input, output: this.machineBaseline.output + output } } : {}),
     };
   }
 
@@ -269,6 +290,16 @@ export class UsageStore {
     // that bails out of the REPL, say - has nowhere to put its seconds and should not create a
     // usage file just to say so.
     if (input === 0 && output === 0 && !this.sessionId) return;
+    if (this.globalFile && (input > 0 || output > 0)) {
+      try {
+        // Re-read, like the project file below, so concurrent sessions anywhere on the machine add up.
+        const now = readMachine(this.globalFile);
+        mkdirSync(dirname(this.globalFile), { recursive: true });
+        writeFileSync(this.globalFile, `${JSON.stringify({ input: now.input + input, output: now.output + output })}\n`, 'utf-8');
+      } catch {
+        // Same as below - never worth failing an exit over.
+      }
+    }
     try {
       let current: StoredUsage;
       try {

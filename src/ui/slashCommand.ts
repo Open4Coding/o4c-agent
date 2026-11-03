@@ -87,6 +87,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Copy the last reply to the clipboard - /copy 2 for the one before. Works over SSH in terminals that support OSC 52.',
   },
   {
+    name: '/stats',
+    description: 'What this session, this project and this computer have used: tokens, cache share, active time, requests, tasks and tool calls - no LLM call.',
+  },
+  {
     name: '/tips',
     description: 'Turn the start-of-session tip on or off, or list all the tips. Usage: /tips [on|off]',
   },

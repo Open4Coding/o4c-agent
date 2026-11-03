@@ -50,6 +50,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help is
     '/view-plan',
     '/commit',
     '/copy',
+    '/stats',
     '/tips',
     '/doctor',
     '/status',

@@ -39,7 +39,8 @@ import { createRememberTool, memoriesComponent, openGlobalMemories, setActiveMem
 import { setRecentTasksSource } from './session/reflect.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
-import { UsageStore } from './session/usageStore.js';
+import { globalUsageFile, UsageStore } from './session/usageStore.js';
+import { setTaskCountSource } from './ui/statsReport.js';
 import { ConfigStore } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
 import { startMcpSession, type McpSession } from './mcp/startup.js';
@@ -861,6 +862,7 @@ program
       // no global store: project memories still work
     }
     if (history) setRecentTasksSource(() => history.store.recentFinishedTasks(8));
+    if (history) setTaskCountSource(() => history.store.taskCounts());
     if (memoryStores.project || memoryStores.global) {
       setActiveMemoryStores(memoryStores);
       loop.registerCore(memoriesComponent(memoryStores));
@@ -1017,7 +1019,7 @@ program
               draftN: used.draftTokens,
               draftAccepted: used.draftAccepted,
             };
-          })
+          }, Date.now, globalUsageFile())
         : undefined;
       usageStore?.load(opts.resume);
       let initialSession: { id: string; title: string; messages: Message[]; entries?: ContextEntry[]; inputHistory?: string[] } | undefined;
