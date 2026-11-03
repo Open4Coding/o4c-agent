@@ -8,7 +8,8 @@ import { grepTool } from './grep.js';
 import { jobOutputTool } from './jobs.js';
 import { askUserTool } from './askUser.js';
 import { skillTool } from '../session/skills.js';
+import { webFetchTool, webSearchTool } from './web.js';
 
-export const defaultTools: Tool[] = [readFileTool, writeFileTool, editFileTool, runShellTool, globTool, grepTool, jobOutputTool, askUserTool, skillTool];
+export const defaultTools: Tool[] = [readFileTool, writeFileTool, editFileTool, runShellTool, globTool, grepTool, jobOutputTool, askUserTool, skillTool, webFetchTool, webSearchTool];
 
 export type { Tool } from './types.js';

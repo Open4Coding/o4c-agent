@@ -26,8 +26,10 @@ import { estimateTextTokens } from '../agent/contextEntry.js';
  * once instead of guessing or stopping the turn.
  * Tools re-pinned 2026-11-02 for G2, 1242 -> 1309: the skill tool, so the model can load a listed
  * skill (review, security-review, commit, and the user's own) instead of improvising the job.
+ * Tools re-pinned 2026-11-03 for G9, 1309 -> 1470: web_fetch and web_search, the one permitted
+ * egress (refused in secure mode), so a model can read docs instead of guessing an API.
  */
-const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 1309 };
+const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 1470 };
 const TOLERANCE = 0.05;
 const ALL_TOOLS = [...defaultTools.map((t) => t.name), 'code_graph'];
 

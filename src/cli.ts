@@ -57,6 +57,7 @@ function withTaskPolicy(policy: (tool: Tool, input: Record<string, unknown>) => 
 }
 import { hasHooks, hookProblems, hooksConfig, parseHooks, postToolHooksComponent, preToolHookVerdict, runHooks, setHooks } from './session/hooks.js';
 import { loadCredentials } from './session/credentials.js';
+import { parseSearchConfig, setWebOptions } from './tools/web.js';
 import { createProvider, parseProviderSpecs } from './providers/factory.js';
 import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
 import { EDITOR_CONFIG_KEY } from './ui/externalEditor.js';
@@ -597,6 +598,8 @@ program
     // else: the mode's entire content is "nothing leaves this network", so quietly continuing on a
     // different provider is the one unacceptable outcome. stderr because Ink does not own the
     // screen yet.
+    // G9: the web tools - refused in secure mode; the search provider from config.
+    setWebOptions({ secureMode, search: parseSearchConfig(resolvedConfig.webSearch, credentials.values) });
     if (secureMode) {
       const refusal = secureModeProviderRefusal(opts.provider, opts.baseUrl);
       if (refusal) {
