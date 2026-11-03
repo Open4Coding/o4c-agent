@@ -135,6 +135,21 @@ Same as `/config-highlightcolor`, for this project.
 
 The highlight colour as this machine's default.
 
+## `/config-autosuggest`
+
+After each turn, o4c guesses your next message and shows it in the empty input box as
+`› run the tests  (→ accept)`. Right-arrow takes it into the box to edit or send; typing anything
+hides it. `/config-autosuggest on|off` (project). Off by default: it costs one small extra request per
+turn - no thinking, only the last exchange - counted in `/stats` like any other.
+
+## `/config-local-autosuggest`
+
+The same as `/config-autosuggest`, for the same project-shared file.
+
+## `/config-global-autosuggest`
+
+Autosuggest on or off as this machine's default (`~/.o4c/config.json`); a project setting overrides it.
+
 ## `/config-editor`
 
 The editor o4c opens for Ctrl+G, `/view-log`, `/edit-config` and `/debug`: `/config-editor code --wait`

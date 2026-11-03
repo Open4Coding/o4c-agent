@@ -377,6 +377,21 @@ export const COMMANDS: CommandInfo[] = [
     description: "Set the palette highlight color for this machine's global default (~/.o4c/config.json).",
     hidden: true,
   },
+  {
+    name: '/config-autosuggest',
+    description: 'After each turn, show a guess at your next message in the input box; right-arrow takes it. Off by default - one small extra request per turn. Usage: /config-autosuggest on|off',
+    hidden: true,
+  },
+  {
+    name: '/config-local-autosuggest',
+    description: 'Same as /config-autosuggest - explicit alias for the same project-shared tier.',
+    hidden: true,
+  },
+  {
+    name: '/config-global-autosuggest',
+    description: "Autosuggest on or off as this machine's default (~/.o4c/config.json). Usage: /config-global-autosuggest on|off",
+    hidden: true,
+  },
   // Heads the MCP family. Runs on Enter rather than only opening its list, because it has a real
   // action of its own - listing every configured server and what state it is in - and that
   // listing is the whole answer when no server offers prompts, which is the default.

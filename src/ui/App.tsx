@@ -182,6 +182,7 @@ import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
 import { formatStats, taskCounts } from './statsReport.js';
 import { cleanTitle, forkSession, GENERATE_TITLES_KEY, lastErrorReport, recordLastError, titlePrompt } from '../session/sessionExtras.js';
+import { AUTOSUGGEST_KEY, cleanSuggestion, saveSuggestion, suggestionPrompt, takeSuggestion } from './autosuggest.js';
 import {
   DEFAULT_NOTIFY,
   DEFAULT_NOTIFY_AFTER_SECONDS,
@@ -885,6 +886,9 @@ export function App({
   // see that callback's own comment for why only the "waiting on the model" case gets asked.
   const [isInThinkBlock, setIsInThinkBlock] = useState(false);
   const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
+  // L2: the next-message guess shown in the empty input box; carried over a per-turn reload.
+  const [suggestion, setSuggestion] = useState<string | undefined>(() => takeSuggestion(initialSession?.id));
+  const suggestionRef = useRef<string | undefined>(undefined);
 
   // Drives the "/" command palette - mirrors InputBox's own text (InputBox owns the actual
   // value/cursor state; this is just what App needs to decide whether the palette should be
@@ -2605,6 +2609,33 @@ export function App({
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
         }
+      } else if (
+        commandName(input) === '/config-autosuggest' ||
+        commandName(input) === '/config-local-autosuggest' ||
+        commandName(input) === '/config-global-autosuggest'
+      ) {
+        // L2: on|off, the highlight colour's three tiers. Off by default - one extra request a turn.
+        pushBlock([userLine(input)]);
+        const name = commandName(input);
+        const scope: ConfigScope = name === '/config-global-autosuggest' ? 'global' : 'local';
+        const arg = input.slice(name.length).trim().toLowerCase();
+        if (arg !== 'on' && arg !== 'off') {
+          const now = (await configStore.get(AUTOSUGGEST_KEY)) === true ? 'on' : 'off';
+          pushBlock([{ kind: 'error', text: `Usage: ${name} on|off (now ${now}). On, each turn ends with a guess at your next message - right-arrow takes it; it costs one small extra request per turn.` }]);
+        } else if (scope === 'local' && !configStore.hasScope('local')) {
+          pushBlock([{ kind: 'error', text: 'No trusted project in this directory - nothing to set a local value into. Trust this project first, or use /config-global-autosuggest instead.' }]);
+        } else {
+          try {
+            await configStore.set(scope, AUTOSUGGEST_KEY, arg === 'on');
+            if (arg === 'off') {
+              setSuggestion(undefined);
+              suggestionRef.current = undefined;
+            }
+            pushBlock([infoLine(`Autosuggest ${arg} (${scope}).${arg === 'on' ? ' After each turn, a guess at your next message shows in the input box; right-arrow takes it.' : ''}`)]);
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
+        }
       } else if (commandName(input) === '/set-sessionname') {
         pushBlock([userLine(input)]);
         const newName = input.slice(commandName(input).length).trim();
@@ -3476,6 +3507,7 @@ export function App({
         // delta or a tool_call shows the model isn't (or is no longer) reasoning.
         setIsInThinkBlock(true);
         let toolEventCount = 0;
+        let lastAnswerForSuggestion = '';
         let summaryLine: Line | undefined;
         // Turn outcome flags for the end-of-turn reload decision below.
         let turnFailed = false;
@@ -3758,6 +3790,7 @@ export function App({
           if (finalAnswer && !(sessionViewRef.current === 'full' && streamCommittedRef.current.text)) {
             responseLines.push({ kind: 'final', text: labelled(RESPONSE_TAG, finalAnswer) });
           }
+          lastAnswerForSuggestion = finalAnswer ?? '';
           if (planCommand && plans) {
             // Before the autosave below, so the notice is saved with the turn and survives the
             // per-turn reload's repaint.
@@ -3866,6 +3899,20 @@ export function App({
             }
           }
 
+          // L2: a guess at the next message, when autosuggest is on - one small request from the
+          // last exchange only. Awaited like the title, so the reload below can carry it over.
+          if (!turnFailed && !stale && lastAnswerForSuggestion) {
+            try {
+              if ((await configStore.get(AUTOSUGGEST_KEY)) === true) {
+                const next = cleanSuggestion(await loop.sideRequest(suggestionPrompt(input, lastAnswerForSuggestion), { maxTokens: 80 }));
+                suggestionRef.current = next;
+                setSuggestion(next);
+              }
+            } catch {
+              // No suggestion this time.
+            }
+          }
+
           if (stale) return;
         }
 
@@ -3930,6 +3977,7 @@ export function App({
           currentSessionIdRef.current
         ) {
           notifyTurnEnd();
+          if (suggestionRef.current) saveSuggestion(currentSessionIdRef.current, suggestionRef.current);
           restart(currentSessionIdRef.current, modeRef.current);
           setTimeout(() => exit(), 0);
           return;
@@ -4240,6 +4288,8 @@ export function App({
     (raw: string) => {
       const input = raw.trim();
       if (!input) return;
+      setSuggestion(undefined);
+      suggestionRef.current = undefined;
 
       // /exit and /quit must never sit behind the FIFO queue - a turn stuck mid-processing
       // (a hung or very long local-model response, say) would otherwise leave the user with
@@ -4525,6 +4575,7 @@ export function App({
         initialHistory={initialSession?.inputHistory}
         historyAppend={historyAppend}
         onHistoryChange={handleInputHistoryChange}
+        suggestion={suggestion}
       />
       {/* E6: files matching the @mention being typed; Tab takes the first. */}
       {mentionChoices.length > 0 ? (

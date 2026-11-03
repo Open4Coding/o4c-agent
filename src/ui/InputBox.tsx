@@ -193,6 +193,9 @@ export interface InputBoxProps {
    * conversation, without lifting the array itself into React state here (it only needs to be
    * read at save time, not drive a render). */
   onHistoryChange?: (history: string[]) => void;
+  /** L2 autosuggest: a guess at the next message, shown only while the box is empty; right-arrow
+   * takes it into the box. */
+  suggestion?: string;
 }
 
 /** Terminal columns actually usable for text inside the bordered, padded box - border
@@ -242,6 +245,7 @@ export function InputBox({
   initialHistory,
   historyAppend,
   onHistoryChange,
+  suggestion,
 }: InputBoxProps) {
   // The text and the caret are ONE piece of state, mutated only through `edit` below.
   //
@@ -666,6 +670,12 @@ export function InputBox({
         return;
       }
       if (key.rightArrow) {
+        // L2: on an empty box right-arrow has nothing to move over - it takes the suggestion instead,
+        // as fish and zsh-autosuggestions do. Tab stays the mode switch.
+        if (suggestion && value === '') {
+          edit(() => ({ value: suggestion, cursor: suggestion.length }));
+          return;
+        }
         edit((b) => ({ ...b, cursor: Math.min(b.value.length, b.cursor + 1) }));
         return;
       }
@@ -863,6 +873,13 @@ export function InputBox({
           {body}
         </Text>
       </Box>
+      {suggestion && value === '' && !search ? (
+        // A marker and a hint as well as dim text: a terminal without SGR 2 shows dim at full
+        // brightness, and the row must still read as a suggestion, not as typed input.
+        <Text wrap="truncate-end" dimColor>
+          {`› ${suggestion}  (→ accept)`}
+        </Text>
+      ) : null}
       {search ? (
         <Text wrap="truncate-end" color={theme.border}>
           {`(history search, Ctrl+R older, Enter take, Esc cancel) "${search.query}": ${findHistoryMatch(historyRef.current, search.query, search.from)?.text.split('\n')[0] ?? 'no match'}`}
