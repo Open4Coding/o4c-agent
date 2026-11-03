@@ -147,6 +147,8 @@ import { probeLocalServer } from '../providers/local.js';
 import { commandSection, formatSection, searchDocs } from '../session/helpDocs.js';
 import { SHOW_TIPS_KEY, TIPS } from './tips.js';
 import { completeMention, expandMentions, mentionCandidates, mentionPrefix } from './mentions.js';
+import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
+import { runShellTool } from '../tools/runShell.js';
 import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
@@ -836,6 +838,8 @@ export function App({
   // Messages typed while a turn runs, for the model's next step (C6). Plain Enter steers; Ctrl+Q
   // queues for after the turn; anything the turn did not pick up joins the queue at its end.
   const steeringRef = useRef<string[]>([]);
+  // `!command` outputs waiting to go in front of the next message (E7) - append-only, cache-safe.
+  const shellNotesRef = useRef<string[]>([]);
   // ask_user (C7): while the model waits for a typed answer, the next Enter answers it.
   const askUserPendingRef = useRef<((answer: string | undefined) => void) | undefined>(undefined);
 
@@ -1626,6 +1630,18 @@ export function App({
           } catch (err) {
             pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
           }
+        }
+      } else if (bangCommand(input) !== undefined) {
+        // E7: the user's own shell command - no model call; permission deny rules still apply.
+        const command = bangCommand(input)!;
+        pushBlock([userLine(input)]);
+        const ruled = evaluateRules(await loadRules((sc) => configStore.readScope(sc as ConfigScope)), runShellTool, { command }, splitShellSegments);
+        if (ruled?.decision === 'deny') {
+          pushBlock([infoLine(`Not run: the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies it.`)]);
+        } else {
+          const { output, note } = await runBang(command, runShellTool);
+          shellNotesRef.current.push(note);
+          pushBlock([infoLine(`${output}\n(the model sees this with your next message)`)]);
         }
       } else if (commandName(input) === '/tips') {
         // E5: the start-of-session tip, on or off.
@@ -2716,7 +2732,8 @@ export function App({
           : reviewCommand
             ? reviewPrompt(reviewDiff, input.trim().slice('/review'.length).trim())
             : // E6: @file and @file:10-40 attach those contents; the typed text stays as typed.
-              expandMentions(input);
+              // E7: any `!command` outputs since the last message go in front of it.
+              withShellNotes(shellNotesRef.current.splice(0), expandMentions(input));
         turnModeRef.current = planCommand || reviewCommand ? 'plan' : undefined;
 
         const responseLines: Line[] = [];
@@ -3473,7 +3490,7 @@ export function App({
 
       if (isProcessing) {
         // A command waits for the turn to end; a message steers the turn now (C6).
-        if (input.startsWith('/')) {
+        if (input.startsWith('/') || input.trimStart().startsWith('!')) {
           queuedInputsRef.current.push(input);
           setQueuedPreview([...queuedInputsRef.current]);
         } else {
