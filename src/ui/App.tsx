@@ -139,6 +139,8 @@ import type { Message } from '../providers/types.js';
 import { estimateTextTokens, withoutUnansweredToolCalls, type ContextEntry } from '../agent/contextEntry.js';
 import { builtSystemPrompt } from '../agent/systemPrompt.js';
 import { contextBreakdown, formatBreakdown } from '../agent/contextBreakdown.js';
+import { formatStatus } from './statusReport.js';
+import { describeSampling, samplingFor } from '../agent/sampling.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
 import { setAskUserHandler } from '../tools/askUser.js';
@@ -1596,6 +1598,42 @@ export function App({
             pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
           }
         }
+      } else if (commandName(input) === '/status') {
+        // E2: setup and health at a glance - all local.
+        pushBlock([userLine(input)]);
+        const usageNow = loop.getUsage();
+        const session = usageStore?.totals().session;
+        const prompt = builtSystemPrompt();
+        const projectSection = prompt?.sections.find((sec) => sec.name === 'project')?.text ?? '';
+        const instructionFiles = [...projectSection.matchAll(/^--- (\S+) \(/gm)].map((m) => m[1]!);
+        const memoryStores = activeMemoryStores();
+        const rules = await loadRules((sc) => configStore.readScope(sc as ConfigScope));
+        const lastBreak = loop.getCacheBreaks().at(-1);
+        const last = usageNow.last;
+        const sampling = describeSampling(samplingFor(model, shownThinkLevel, await configStore.get('localSampling')));
+        pushBlock([
+          infoLine(
+            formatStatus({
+              model,
+              provider,
+              contextWindow,
+              contextUsed: loop.getVisibleTokenEstimate(),
+              cachePercent: session ? cacheSharePercent(session.cached, session.processed) : cacheSharePercent(usageNow.cachedTokens, usageNow.processedPromptTokens),
+              lastPrefillMs: last?.prefillMs,
+              draftAcceptPercent: usageNow.draftTokens > 0 ? Math.round((usageNow.draftAccepted / usageNow.draftTokens) * 100) : undefined,
+              lastCacheBreak: lastBreak ? describeCacheBreak(lastBreak) : undefined,
+              instructionFiles,
+              promptProfile: prompt?.profile,
+              thinkLevel: shownThinkLevel,
+              sampling,
+              shell: `${currentShell().kind} (${currentShell().exe})`,
+              mcp: [...(mcpStatusReport?.() ?? [])].filter((l) => l.trim()).slice(0, 4),
+              checkpoints: !!checkpoints,
+              memories: (memoryStores.project?.list().length ?? 0) + (memoryStores.global?.list().length ?? 0),
+              permissionRules: rules.allow.length + rules.ask.length + rules.deny.length,
+            }).join('\n'),
+          ),
+        ]);
       } else if (commandName(input) === '/all') {
         // E1: everything, hidden commands included; Enter runs it or fills it in, like the palette.
         pushBlock([userLine(input)]);

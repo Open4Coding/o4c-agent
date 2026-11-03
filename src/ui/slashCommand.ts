@@ -79,6 +79,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/status',
+    select: 'run',
+    description: 'Setup and health at a glance: model, context, cache, drafting, instruction files, prompt profile, thinking, shell, MCP, checkpoints, memory, permissions - no LLM call.',
+  },
+  {
     name: '/all',
     select: 'run',
     description: 'Every command, hidden ones included, in one list - pick one to run it (or to fill it in when it needs an argument).',
