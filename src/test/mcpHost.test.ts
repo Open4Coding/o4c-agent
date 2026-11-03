@@ -40,6 +40,9 @@ function fakeConnection(
     close: async () => {
       opts.closed?.push(config.id);
     },
+    resources: [],
+    readResource: async () => '',
+    capabilities: {},
     killNow: () => {
       opts.killed?.push(config.id);
     },

@@ -19,6 +19,7 @@
 //   silent   - connects at the transport level but never answers, to exercise the timeout
 //   promptfail - lists tools fine, then throws on prompts/list, to prove prompts failing does
 //              not cost the server its tools
+//   resources - declares resources and serves two of them (G8)
 //   elicit   - adds a `greet` tool that asks the user for a name through elicitation (G7)
 //   progress - adds a `slow` tool that sends progress notifications (plan 0006 G6) and, when the
 //              client cancels it, writes O4C_FIXTURE_CANCELFILE so a test can see the server heard
@@ -37,6 +38,8 @@ import {
   GetPromptRequestSchema,
   ListPromptsRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
 const MODE = process.env.O4C_FIXTURE_MODE ?? 'ok';
@@ -65,8 +68,20 @@ if (MODE === 'silent') {
     { name: 'o4c-fixture', version: '1.0.0' },
     // `prompts` is declared unconditionally, which is what makes the default-off claim testable
     // with a real server: o4c must still ask for none of them until grants.slashCommands is set.
-    { capabilities: { tools: {}, prompts: {} } },
+    { capabilities: { tools: {}, prompts: {}, ...(MODE === 'resources' ? { resources: {} } : {}) } },
   );
+
+  if (MODE === 'resources') {
+    const docs = { 'docs://readme': ['readme', 'Read me first.'], 'docs://changelog': ['changelog', 'v1: first release.'] };
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: Object.entries(docs).map(([uri, [name]]) => ({ uri, name, mimeType: 'text/plain' })),
+    }));
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const doc = docs[request.params.uri];
+      if (!doc) throw new Error(`no such resource: ${request.params.uri}`);
+      return { contents: [{ uri: request.params.uri, mimeType: 'text/plain', text: doc[1] }] };
+    });
+  }
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [

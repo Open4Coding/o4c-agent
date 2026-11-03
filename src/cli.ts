@@ -364,6 +364,12 @@ async function runRepl(
       // synchronously. The other two are plain calls - `/mcp`'s listing and one prompt expansion.
       mcpPromptCommands: mcp && mcp.ready.then(() => mcp.promptCommands()),
       mcpStatusReport: mcp?.statusReport,
+      mcpExtra: mcp && {
+        inspect: (id: string) => mcp.inspect(id),
+        resources: () => mcp.resources(),
+        readResource: (id: string, ref: string) => mcp.readResource(id, ref),
+        serverIds: () => mcp.status().map((s) => s.id),
+      },
       expandMcpPrompt: mcp?.expandPrompt,
       codeGraph: graph,
     }),

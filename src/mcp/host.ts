@@ -1,3 +1,4 @@
+import { toolAllowed } from './serverConfig.js';
 import type { Tool } from '../tools/types.js';
 import { lifecycleOf, reachOf, type McpReach, type McpServerConfig } from './serverConfig.js';
 import { allowedInSecureMode, egressClassOfUrl } from '../session/secureMode.js';
@@ -91,7 +92,9 @@ export class McpHost {
 
         try {
           const connection = await connect(server);
-          const tools = proxyTools(server, connection.tools, (toolName, input, options) => connection.callTool(toolName, input, options));
+          // G8: the per-server allow/deny filter decides which tools o4c offers at all.
+          const offered = connection.tools.filter((t) => toolAllowed(server.toolFilter, t.name));
+          const tools = proxyTools(server, offered, (toolName, input, options) => connection.callTool(toolName, input, options));
           return { status: { ...base, state: 'ready', toolCount: tools.length }, connection, tools };
         } catch (error) {
           // The whole point of this class. A server that will not start, or starts and never
@@ -118,6 +121,43 @@ export class McpHost {
   /** One row per configured server, including the ones that are not running and why. */
   status(): readonly McpServerStatus[] {
     return this.statuses;
+  }
+
+  /** G8: every ready server's resources. */
+  resources(): { serverId: string; uri: string; name: string; description?: string }[] {
+    return this.connections.flatMap((c) => (c.resources ?? []).map((r) => ({ serverId: c.config.id, uri: r.uri, name: r.name, description: r.description })));
+  }
+
+  /** G8: one resource's text, by server and URI (or the resource's name). */
+  async readResource(serverId: string, uriOrName: string): Promise<string> {
+    const c = this.connections.find((x) => x.config.id === serverId);
+    if (!c) throw new Error(`No MCP server "${serverId}" is connected.`);
+    const r = (c.resources ?? []).find((x) => x.uri === uriOrName || x.name === uriOrName);
+    return c.readResource(r?.uri ?? uriOrName);
+  }
+
+  /** G8: /mcp inspect - everything this server told o4c about itself. */
+  inspect(serverId: string): string[] {
+    const status = this.statuses.find((s) => s.id === serverId);
+    if (!status) return [`No MCP server "${serverId}" in config. Configured: ${this.statuses.map((s) => s.id).join(', ') || 'none'}.`];
+    const c = this.connections.find((x) => x.config.id === serverId);
+    const lines = [`MCP server "${serverId}": ${status.state}${status.detail ? ` - ${status.detail}` : ''}`];
+    if (!c) return lines;
+    const offered = new Set(this.proxied.filter((t) => t.mcp?.serverId === serverId).map((t) => t.mcp!.serverToolName));
+    lines.push(`  capabilities: ${Object.keys(c.capabilities ?? {}).join(', ') || 'none declared'}`);
+    lines.push(`  tools (${c.tools.length}${offered.size !== c.tools.length ? `, ${offered.size} offered after the tools filter` : ''}):`);
+    for (const t of c.tools) lines.push(`    ${offered.has(t.name) ? ' ' : 'x'} ${t.name}${t.description ? ` - ${t.description.split('\n')[0]!.slice(0, 100)}` : ''}`);
+    if (c.prompts.length) {
+      lines.push(`  prompts (${c.prompts.length}):`);
+      for (const p of c.prompts) lines.push(`    ${p.name}${p.description ? ` - ${p.description.slice(0, 100)}` : ''}`);
+    }
+    if ((c.resources ?? []).length) {
+      lines.push(`  resources (${c.resources.length}) - attach one with @${serverId}:<uri or name>:`);
+      for (const r of c.resources.slice(0, 50)) lines.push(`    ${r.uri}${r.name && r.name !== r.uri ? ` (${r.name})` : ''}`);
+    }
+    const err = c.stderrTail().trim();
+    if (err) lines.push('  stderr (last lines):', ...err.split('\n').slice(-5).map((l) => `    ${l}`));
+    return lines;
   }
 
   /** Whatever a spawned server wrote to stderr, for diagnostics. */

@@ -61,6 +61,10 @@ export interface McpSession {
   expandPrompt(ref: McpPromptRef, args: Record<string, string>): Promise<FlattenedPrompt>;
   /** What `/mcp` prints: every configured server and its state, then the prompt commands. */
   statusReport(): readonly string[];
+  /** G8. */
+  resources(): { serverId: string; uri: string; name: string; description?: string }[];
+  readResource(serverId: string, uriOrName: string): Promise<string>;
+  inspect(serverId: string): string[];
   /** Bounded, and safe to call more than once. */
   shutdown(): Promise<void>;
   /** Synchronous kill, for `process.on('exit')`. */
@@ -195,6 +199,12 @@ export function startMcpSession(options: McpSessionOptions): McpSession {
       return flattenPromptMessages(await host.getPrompt(ref.serverId, ref.promptName, args));
     },
     statusReport: () => statusReport(statuses, promptCommands, options.secureMode ?? false),
+    resources: () => host?.resources() ?? [],
+    readResource: async (serverId, uriOrName) => {
+      if (!host) throw new Error('No MCP server is running.');
+      return host.readResource(serverId, uriOrName);
+    },
+    inspect: (serverId) => host?.inspect(serverId) ?? ['MCP is still starting, or no server is configured.'],
     shutdown: async () => {
       // Waited on, so a shutdown racing a still-connecting server does not leave the host - and
       // its subprocesses - created a moment after we stopped looking. Bounded, because on this

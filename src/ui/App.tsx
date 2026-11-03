@@ -155,6 +155,8 @@ import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
 import { expandCustomCommand, loadCustomCommands } from '../session/customCommands.js';
+import { describePresets, MCP_PRESETS, resourceMentions } from '../mcp/presets.js';
+import { mcpConfigStore, MCP_SERVERS_KEY } from '../mcp/registry.js';
 import { describeHooks, hasHooks, hookProblems, hooksConfig, preToolHookVerdict, runHooks, type HookOutcome } from '../session/hooks.js';
 import { activateSkill, clearActiveSkill, findSkill, getSkills, skillGate, skillText } from '../session/skills.js';
 import { setTaskPolicy } from '../agent/subAgents.js';
@@ -312,6 +314,13 @@ export interface AppProps {
   mcpPromptCommands?: Promise<readonly CommandInfo[]>;
   /** The lines `/mcp` prints. Undefined when this session has no MCP layer at all. */
   mcpStatusReport?: () => readonly string[];
+  /** G8: /mcp inspect, and @server:resource mentions. */
+  mcpExtra?: {
+    inspect(serverId: string): string[];
+    resources(): { serverId: string; uri: string; name: string }[];
+    readResource(serverId: string, uriOrName: string): Promise<string>;
+    serverIds(): string[];
+  };
   /**
    * Expands one prompt into text for the input box. Pre-flattened by `startMcpSession`, so this
    * file needs no MCP types - a `McpPromptRef` and strings are all that cross the boundary.
@@ -747,6 +756,7 @@ export function App({
   configGlobalDir,
   mcpPromptCommands,
   mcpStatusReport,
+  mcpExtra,
   expandMcpPrompt,
   codeGraph,
 }: AppProps) {
@@ -1633,6 +1643,26 @@ export function App({
       .catch(() => setProjectFiles([]));
   }, [typingMention, projectFiles]);
   const mentionChoices = typingMention !== undefined && projectFiles ? mentionCandidates(typingMention, projectFiles) : [];
+
+  // G8: @server:resource in a message attaches that resource's text, like @file does for files.
+  const withMcpResources = useCallback(
+    async (text: string): Promise<string> => {
+      if (!mcpExtra) return text;
+      const found = resourceMentions(text, new Set(mcpExtra.serverIds()));
+      if (found.length === 0) return text;
+      const blocks: string[] = [];
+      for (const m of found) {
+        try {
+          const body = await mcpExtra.readResource(m.serverId, m.ref);
+          blocks.push(`[MCP resource ${m.token}]\n${body.length > 20_000 ? `${body.slice(0, 20_000)}\n... (cut at 20,000 characters)` : body}`);
+        } catch (err) {
+          blocks.push(`[MCP resource ${m.token} could not be read: ${err instanceof Error ? err.message : String(err)}]`);
+        }
+      }
+      return `${text}\n\n${blocks.join('\n\n')}`;
+    },
+    [mcpExtra],
+  );
 
   const processTurn = useCallback(
     async (input: string) => {
@@ -3154,6 +3184,28 @@ export function App({
         const job = id ? getJob(id) : undefined;
         if (!job) pushBlock([infoLine(id ? `No background job "${id}" - see /ps.` : 'Usage: /kill <id> - see /ps for the ids.')]);
         else pushBlock([infoLine(killJob(job) ? `Stopped ${job.id}: ${job.command}` : `${job.id} is not running.`)]);
+      } else if (commandName(input) === '/mcp' && /^\/mcp\s+(inspect|add)\b/i.test(input.trim())) {
+        // G8: /mcp inspect <server> and /mcp add [preset].
+        pushBlock([userLine(input)]);
+        const [, sub, arg] = /^\/mcp\s+(\w+)\s*(.*)$/i.exec(input.trim())!;
+        if (sub!.toLowerCase() === 'inspect') {
+          pushBlock([infoLine(arg ? (mcpExtra?.inspect(arg.trim()) ?? ['MCP is not running in this session.']).join('\n') : `Usage: /mcp inspect <server>. Servers: ${mcpExtra?.serverIds().join(', ') || 'none'}.`)]);
+        } else {
+          const preset = MCP_PRESETS.find((p) => p.name === arg.trim().toLowerCase());
+          if (!preset) pushBlock([infoLine(describePresets().join('\n'))]);
+          else {
+            const store = mcpConfigStore(projectRoot);
+            const scope: ConfigScope = projectRoot ? 'local' : 'global';
+            const current = (await store.readScope(scope))[MCP_SERVERS_KEY];
+            const servers = { ...(current && typeof current === 'object' ? (current as Record<string, unknown>) : {}) };
+            if (servers[preset.name]) pushBlock([infoLine(`An MCP server named "${preset.name}" is already in the ${scope} config - nothing changed.`)]);
+            else {
+              servers[preset.name] = preset.entry(projectRoot ?? process.cwd());
+              await store.set(scope, MCP_SERVERS_KEY, servers);
+              pushBlock([infoLine(`Added the "${preset.name}" MCP server to the ${scope} MCP config (${store.configPath(scope) ?? ''}). It starts with o4c's next process - after your next message, or now with /exit and o4c -c.`)]);
+            }
+          }
+        }
       } else if (commandName(input) === '/mcp') {
         pushBlock([userLine(input)]);
         // `mcpStatusReport` is undefined only for a session with no MCP layer at all (tests, and
@@ -3285,7 +3337,7 @@ export function App({
             ? reviewPrompt(reviewDiff, input.trim().slice('/review'.length).trim())
             : // E6: @file and @file:10-40 attach those contents; the typed text stays as typed.
               // E7: any `!command` outputs since the last message go in front of it.
-              withShellNotes(shellNotesRef.current.splice(0), expandMentions(input));
+              withShellNotes(shellNotesRef.current.splice(0), await withMcpResources(expandMentions(input)));
         const sent = promptHook?.additionalContext.length ? `${sentText}\n\n[UserPromptSubmit hook]\n${promptHook.additionalContext.join('\n')}` : sentText;
         turnModeRef.current = planCommand || reviewCommand ? 'plan' : undefined;
 

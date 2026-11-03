@@ -65,6 +65,11 @@ export interface ConnectedServer {
   /** Why `prompts` is empty when it should not have been. */
   readonly promptProblem?: string;
   callTool(toolName: string, input: Record<string, unknown>, options?: McpCallOptions): Promise<McpCallResult>;
+  /** G8: the server's resources (empty when it has none), and reading one as text. */
+  readonly resources: readonly { uri: string; name: string; description?: string; mimeType?: string }[];
+  readResource(uri: string): Promise<string>;
+  /** G8: what the server said it supports, for /mcp inspect. */
+  readonly capabilities: Record<string, unknown>;
   /** Expands one prompt. Arguments are strings per the spec's own `GetPromptRequest`. */
   getPrompt(promptName: string, args: Record<string, string>): Promise<McpPromptResult>;
   /** Whatever the server wrote to stderr, newest last, capped. Empty for an http server. */
@@ -214,11 +219,30 @@ export async function connectServer(server: McpServerConfig): Promise<ConnectedS
       }
     }
 
+    // G8: resources, when the server has any - for @server:resource mentions and /mcp inspect.
+    let resources: { uri: string; name: string; description?: string; mimeType?: string }[] = [];
+    if (client.getServerCapabilities()?.resources) {
+      try {
+        const listedResources = await client.listResources(undefined, { timeout: MCP_CONNECT_TIMEOUT_MS });
+        resources = listedResources.resources.map((r) => ({ uri: r.uri, name: r.name, description: r.description, mimeType: r.mimeType }));
+      } catch {
+        resources = [];
+      }
+    }
+
     return {
       config: server,
       tools,
       prompts,
       promptProblem,
+      resources,
+      capabilities: (client.getServerCapabilities() ?? {}) as Record<string, unknown>,
+      readResource: async (uri) => {
+        const r = await client.readResource({ uri }, { timeout: MCP_CONNECT_TIMEOUT_MS });
+        return r.contents
+          .map((c) => ('text' in c && typeof c.text === 'string' ? c.text : `[binary ${c.mimeType ?? 'content'}, ${String((c as { blob?: string }).blob?.length ?? 0)} base64 chars - not shown]`))
+          .join('\n');
+      },
       // G6: progress notifications are asked for, and keep a long call alive past the SDK's 60 s
       // default; the signal cancels the request on the server, not just locally.
       callTool: (toolName, input, options) =>

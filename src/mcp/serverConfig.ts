@@ -123,6 +123,25 @@ export interface McpServerConfig {
   readonly headers?: Readonly<Record<string, string>>;
   /** http only (G7): sign in with OAuth in the browser; tokens kept in ~/.o4c/mcp-oauth. */
   readonly oauth?: boolean;
+  /** G8: which of the server's tools o4c offers - names, `*` wildcards; deny wins. */
+  readonly toolFilter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] };
+}
+
+/** G8: does the per-server filter let this tool through? */
+export function toolAllowed(filter: McpServerConfig['toolFilter'], name: string): boolean {
+  const hit = (patterns: readonly string[] | undefined) =>
+    (patterns ?? []).some((p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(name));
+  if (hit(filter?.deny)) return false;
+  return !filter?.allow || filter.allow.length === 0 || hit(filter.allow);
+}
+
+function parseToolFilter(raw: unknown): McpServerConfig['toolFilter'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as { allow?: unknown; deny?: unknown };
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0) : undefined);
+  const allow = list(r.allow);
+  const deny = list(r.deny);
+  return allow || deny ? { ...(allow ? { allow } : {}), ...(deny ? { deny } : {}) } : undefined;
 }
 
 export interface ParsedServers {
@@ -259,6 +278,7 @@ function parseOne(id: string, raw: unknown, problems: string[]): McpServerConfig
       args,
       env: parseStringRecord(raw.env, id, 'env', problems),
       cwd,
+      ...(parseToolFilter(raw.tools) ? { toolFilter: parseToolFilter(raw.tools) } : {}),
     };
   }
 
@@ -278,7 +298,8 @@ function parseOne(id: string, raw: unknown, problems: string[]): McpServerConfig
     return undefined;
   }
   const headers = parseStringRecord(raw.headers, id, 'headers', problems);
-  return { id, transport, enabled, grants, url: raw.url, ...(headers && Object.keys(headers).length ? { headers } : {}), ...(raw.oauth === true ? { oauth: true } : {}) };
+  const toolFilter = parseToolFilter(raw.tools);
+  return { id, transport, enabled, grants, url: raw.url, ...(headers && Object.keys(headers).length ? { headers } : {}), ...(raw.oauth === true ? { oauth: true } : {}), ...(toolFilter ? { toolFilter } : {}) };
 }
 
 /**
