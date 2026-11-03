@@ -459,6 +459,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose hidden commands to show in the bare / list too (toggle one at a time; Esc when done).',
   },
   {
+    name: '/update',
+    description: 'Is there a newer o4c? Asks npm and GitHub (only when you run this - never on its own) and says how to update. Installs nothing.',
+  },
+  {
     name: '/setup',
     description: 'Set up the model o4c uses: finds local servers (llama.cpp, Ollama, LM Studio), asks for a key if needed, checks one real tool call, saves it. Runs by itself on first start.',
   },

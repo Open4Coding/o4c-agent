@@ -45,6 +45,8 @@ import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
 import { runAcp } from './acp/agent.js';
 import { prepareSea } from './sea.js';
+import { checkForUpdate, describeUpdate, SECURE_UPDATE_REFUSAL } from './session/update.js';
+import { setUpdateSecureMode } from './session/updateState.js';
 import { classifyToolAccess } from './ui/modePolicy.js';
 import { combinePrompt, eventLine, EXIT, exitCodeFor, parseAllowedTools, parseOutputFormat, parsePermissionMode, readStdin, resultObject, schemaPrompt, type PermissionMode, type RunFacts } from './headless.js';
 
@@ -507,7 +509,8 @@ program
   .option('--json-schema <file>', 'one-shot: reshape the final answer into JSON matching this JSON schema (constrained decoding)')
   .option('--stdin', 'one-shot: read stdin and add it after the prompt (with no prompt, piped stdin is the prompt anyway)')
   .option('--acp', 'speak the Agent Client Protocol on stdio, for editors (also: o4c acp)')
-  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; continue?: boolean; session?: string; profile?: string; mode?: string; window?: string; acp?: boolean; outputFormat?: string; maxTurns?: string; permissionMode?: string; allowedTools?: string; jsonSchema?: string; stdin?: boolean }) => {
+  .option('--check-update', 'say whether a newer o4c is out (asks npm and GitHub; never automatic) and exit')
+  .action(async (promptParts: string[], opts: RestartableOpts & { resume?: string; continue?: boolean; session?: string; profile?: string; mode?: string; window?: string; acp?: boolean; checkUpdate?: boolean; outputFormat?: string; maxTurns?: string; permissionMode?: string; allowedTools?: string; jsonSchema?: string; stdin?: boolean }) => {
     let prompt = promptParts.join(' ');
     // H1: stdin is read only when it can be meant - no prompt with a pipe, or --stdin - so a caller
     // that leaves stdin open cannot hang o4c.
@@ -669,6 +672,12 @@ program
     // screen yet.
     // G9: the web tools - refused in secure mode; the search provider from config.
     setWebOptions({ secureMode, search: parseSearchConfig(resolvedConfig.webSearch, credentials.values) });
+    // I3: manual update check, then exit.
+    if (opts.checkUpdate) {
+      console.log(secureMode ? SECURE_UPDATE_REFUSAL : describeUpdate(await checkForUpdate()).join('\n'));
+      return;
+    }
+    setUpdateSecureMode(secureMode);
     // H3: phone notifications through ntfy, when configured.
     setNtfy({ url: typeof resolvedConfig[NTFY_URL_KEY] === 'string' ? (resolvedConfig[NTFY_URL_KEY] as string) : undefined, secureMode });
     if (secureMode) {

@@ -156,6 +156,8 @@ import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEdi
 import { logToView } from '../session/logView.js';
 import { expandCustomCommand, loadCustomCommands } from '../session/customCommands.js';
 import { describeServer, detectServers, roundTrip, saveSetup, type SetupChoice } from '../session/setup.js';
+import { checkForUpdate, describeUpdate, SECURE_UPDATE_REFUSAL } from '../session/update.js';
+import { updateRefusedBySecureMode } from '../session/updateState.js';
 import { askUserHandler } from '../tools/askUser.js';
 import { describePresets, MCP_PRESETS, resourceMentions } from '../mcp/presets.js';
 import { mcpConfigStore, MCP_SERVERS_KEY } from '../mcp/registry.js';
@@ -3138,6 +3140,14 @@ export function App({
           pushBlock([infoLine(`${describeGoal(goal)}\nVerifier: ${typeof (await configStore.get(GOAL_VERIFY_KEY).catch(() => undefined)) === 'string' ? 'the goalVerifyCommand in config' : 'the model must reply GOAL MET after checking'}. Starting now.`)]);
           queuedInputsRef.current.unshift(`[Goal] ${goal.text}`);
           setQueuedPreview([...queuedInputsRef.current]);
+        }
+      } else if (commandName(input) === '/update') {
+        // I3: manual check only; installs nothing.
+        pushBlock([userLine(input)]);
+        if (updateRefusedBySecureMode()) pushBlock([infoLine(SECURE_UPDATE_REFUSAL)]);
+        else {
+          pushBlock([infoLine('Asking npm and GitHub for the latest o4c...')]);
+          pushBlock([infoLine(describeUpdate(await checkForUpdate()).join('\n'))]);
         }
       } else if (commandName(input) === '/setup') {
         // I2: find a model server, key if needed, one real tool-call round trip, save globally.
