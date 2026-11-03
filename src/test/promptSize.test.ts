@@ -24,8 +24,10 @@ import { estimateTextTokens } from '../agent/contextEntry.js';
  * job_output tool - without them a dev server or a build longer than a minute cannot be run at all.
  * Tools re-pinned 2026-11-02 for C7, 1122 -> 1242: ask_user, so a model that needs a decision asks
  * once instead of guessing or stopping the turn.
+ * Tools re-pinned 2026-11-02 for G2, 1242 -> 1309: the skill tool, so the model can load a listed
+ * skill (review, security-review, commit, and the user's own) instead of improvising the job.
  */
-const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 1242 };
+const PINNED = { system: { default: 519, qwen: 756, small: 119 } as Record<PromptProfile, number>, tools: 1309 };
 const TOLERANCE = 0.05;
 const ALL_TOOLS = [...defaultTools.map((t) => t.name), 'code_graph'];
 

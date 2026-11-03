@@ -44,6 +44,7 @@ import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
 import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
+import { loadSkills, setSkills, skillGate, skillListing } from './session/skills.js';
 import { loadCredentials } from './session/credentials.js';
 import { createProvider, parseProviderSpecs } from './providers/factory.js';
 import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
@@ -819,9 +820,13 @@ program
     // will expose it - fixed for the session, like everything else in the system prompt.
     // The shell run_shell uses (B24) - set before the prompt, which names it.
     setShell(resolvedConfig[SHELL_CONFIG_KEY]);
+    // G2: skills (project > global > bundled), listed in the prompt and loadable with the skill tool.
+    const skills = loadSkills(trusted ? projectRoot : undefined);
+    setSkills(skills);
     const systemPrompt = buildSystemPrompt({
       profile: promptProfileFor(opts.model, resolvedConfig[PROMPT_PROFILE_CONFIG_KEY]),
       tools: [...defaultTools.map((t) => t.name), ...(trusted && resolvedConfig.codeGraph !== false ? ['code_graph'] : [])],
+      skills: skillListing(skills),
       environment: [cwdLine, shellPromptLine(currentShell())],
       projectContext,
     });
@@ -1211,6 +1216,8 @@ program
         // Permission rules apply headless too (C3): deny holds, and ask is a deny - nobody can answer.
         toolPolicy: headlessRules
           ? async (tool, input) => {
+              const skillDenied = skillGate(tool.name);
+              if (skillDenied) return { verdict: 'deny', reason: skillDenied };
               const ruled = evaluateRules(headlessRules, tool, input, splitShellSegments);
               if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
               if (ruled?.decision === 'ask') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} asks for approval, which a headless run cannot give` };
@@ -1218,7 +1225,11 @@ program
               if (destructive) return { verdict: 'deny', reason: `confirmDestructive is on and ${destructive} needs approval, which a headless run cannot give` };
               return 'allow';
             }
-          : undefined,
+          : // G2: with no rules, the only headless restriction is an active skill's allowed-tools.
+            async (tool) => {
+              const skillDenied = skillGate(tool.name);
+              return skillDenied ? { verdict: 'deny', reason: skillDenied } : 'allow';
+            },
         // One-shot is autonomous like Auto mode: ask once to verify edits nobody checked (B19).
         verifyOnStop: resolvedConfig.verifyOnStop !== false,
         // The model's real window, exactly as the TUI passes it. Missing until 2026-11-01, which

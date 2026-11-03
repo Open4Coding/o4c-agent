@@ -155,6 +155,7 @@ import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
 import { expandCustomCommand, loadCustomCommands } from '../session/customCommands.js';
+import { activateSkill, clearActiveSkill, findSkill, getSkills, skillGate, skillText } from '../session/skills.js';
 import { markIncorrect } from '../session/workedCommand.js';
 import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
 import { costOf, describeModel, modelEntry, parseModelArgs, setModelFields } from '../session/modelRegistry.js';
@@ -1181,13 +1182,21 @@ export function App({
   // The commands beyond the built-in ones: custom markdown commands (G1, read once here) and MCP
   // prompts (arriving when their servers connect). One list, so the palette, /help and /all treat
   // both alike; `custom` / `mcpPrompt` on each entry says which it is.
-  const [mcpCommands, setMcpCommands] = useState<readonly CommandInfo[]>(() =>
-    loadCustomCommands(projectRoot, new Set(KNOWN_COMMANDS)).commands.map((c) => ({
+  const [mcpCommands, setMcpCommands] = useState<readonly CommandInfo[]>(() => {
+    const custom: CommandInfo[] = loadCustomCommands(projectRoot, new Set(KNOWN_COMMANDS)).commands.map((c) => ({
       name: c.name,
       description: `${c.description}${c.args.length ? ` Usage: ${c.name} ${c.args.map((a) => `<${a}>`).join(' ')}` : ''}`,
       custom: { body: c.body, args: c.args, file: c.file },
-    })),
-  );
+    }));
+    // G2: each skill is also a command - /<name>, or /skill-<name> when that name is taken.
+    const taken = new Set([...KNOWN_COMMANDS, ...custom.map((c) => c.name)]);
+    const skillCommands: CommandInfo[] = getSkills().map((s) => ({
+      name: taken.has(`/${s.name}`) ? `/skill-${s.name}` : `/${s.name}`,
+      description: `Skill: ${s.description} Usage: /${taken.has(`/${s.name}`) ? `skill-${s.name}` : s.name} [request]`,
+      skill: s.name,
+    }));
+    return [...custom, ...skillCommands];
+  });
   useEffect(() => {
     if (!mcpPromptCommands) return;
     let live = true;
@@ -1197,8 +1206,9 @@ export function App({
       // inside its connect timeout will resolve into a torn-down tree.
       if (live && commands.length > 0) {
         setMcpCommands((prev) => {
-          const taken = new Set(prev.filter((c) => c.custom).map((c) => c.name));
-          return [...prev.filter((c) => c.custom), ...commands.filter((c) => !taken.has(c.name))];
+          const own = prev.filter((c) => c.custom || c.skill);
+          const taken = new Set(own.map((c) => c.name));
+          return [...own, ...commands.filter((c) => !taken.has(c.name))];
         });
       }
     });
@@ -1373,6 +1383,9 @@ export function App({
   // even mid-turn - see the comment on those refs above for why that distinction matters.
   const toolPolicy = useCallback(
     async (tool: Tool, input: Record<string, unknown>): Promise<PolicyAnswer> => {
+      // G2: an active skill's allowed-tools come first - a skill that says read-only means it.
+      const skillDenied = skillGate(tool.name);
+      if (skillDenied) return { verdict: 'deny', reason: skillDenied };
       const access = classifyToolAccess(turnModeRef.current ?? modeRef.current, tool, input, plansDirRef.current);
       // A mode's own refusal is absolute (Plan mode stays read-only whatever the rules say).
       if (access === 'deny') return 'deny';
@@ -1598,6 +1611,8 @@ export function App({
   const processTurn = useCallback(
     async (input: string) => {
       const turnStartedAt = Date.now();
+      // G2: a skill is active for the turn that loaded it; every new message starts without one.
+      clearActiveSkill();
       const notifyTurnEnd = () => {
         if (shouldNotifyTurn(notifyRef.current.mode, Date.now() - turnStartedAt, notifyRef.current.after)) {
           notifyUser(notifyRef.current.mode, 'Done - o4c is waiting for your next message.');
@@ -3109,7 +3124,7 @@ export function App({
         setInputValue(text);
         setPrefill({ token: nextPrefillToken++, text });
         pushBlock([infoLine(`${name} expanded into the input box (from ${custom.file}). Read it, edit it if you like, then press Enter to send it.`)]);
-      } else if (mcpCommands.some((c) => c.name === commandName(input))) {
+      } else if (mcpCommands.some((c) => c.name === commandName(input) && c.mcpPrompt)) {
         // An MCP prompt is a template the user asked for by name. It expands into the input box
         // rather than being sent: the spec's own user-interaction model for prompts asks for
         // "transparent display of the prompt's underlying template", and more concretely, text
@@ -3196,7 +3211,13 @@ export function App({
             }
           }
         }
-        const sent = planCommand
+        // G2: /<skill> [request] - the skill is loaded and active for this turn, its text sent with the request.
+        const skillCommand = mcpCommands.find((c) => c.name === commandName(input) && c.skill);
+        const invokedSkill = skillCommand ? findSkill(skillCommand.skill!) : undefined;
+        if (invokedSkill) activateSkill(invokedSkill);
+        const sent = invokedSkill
+          ? `${skillText(invokedSkill)}\n\nThe user's request: ${input.trim().slice(skillCommand!.name.length).trim() || '(none given - apply the skill to the current work)'}`
+          : planCommand
           ? planPrompt(planCommand, ultra ? plans?.research?.(planCommand.goal) : undefined)
           : reviewCommand
             ? reviewPrompt(reviewDiff, input.trim().slice('/review'.length).trim())

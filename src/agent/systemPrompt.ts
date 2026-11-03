@@ -31,6 +31,8 @@ export interface PromptInput {
   environment: readonly string[];
   /** The O4C.md cascade, already resolved (empty when the project is untrusted or has none). */
   projectContext?: string;
+  /** G2: the skills listing (one line per skill), fixed for the session. */
+  skills?: string;
 }
 
 export interface PromptSection {
@@ -124,6 +126,7 @@ export function promptSections(input: PromptInput): PromptSection[] {
     if (example) sections.push({ name: 'example', text: example });
   }
   if (input.environment.length > 0) sections.push({ name: 'environment', text: `# Environment\n${input.environment.join('\n')}` });
+  if (input.skills?.trim()) sections.push({ name: 'skills', text: input.skills });
   if (input.projectContext?.trim()) sections.push({ name: 'project', text: input.projectContext });
   return sections;
 }

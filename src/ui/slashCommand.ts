@@ -47,6 +47,8 @@ export interface CommandInfo {
   mcpPrompt?: McpPromptRef;
   /** A custom command (plan 0006 G1): a markdown file whose body expands into the input box. */
   custom?: { readonly body: string; readonly args: readonly string[]; readonly file: string };
+  /** A skill (G2): running the command loads that skill and sends the rest of the line with it. */
+  skill?: string;
 }
 
 // Single source of truth for the front end's own commands, used by both the "/" command palette
