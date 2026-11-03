@@ -837,6 +837,9 @@ test('/clear mid-turn, confirmed: aborts the turn, saves the session once, then 
 
     // The unfinished turn was saved before the restart - and only once, although the aborted
     // turn's own autosave and /clear's save both ran on a session that had no id yet.
+    // Wait for the first save to land (a fixed 100ms raced it under load - plan 0006 F5), then give a
+    // duplicate the same 100ms to show up before checking there is exactly one.
+    await waitFor(async () => (await store.readManifest()).length > 0);
     await tick(100);
     const sessions = await store.readManifest();
     assert.equal(sessions.length, 1);
@@ -1074,8 +1077,15 @@ test('a real turn writes a separate <timestamp>.FULLCONTEXT.jsonl with the full 
     assert.notEqual(fullPath, plainPath);
     assert.ok((fullPath as string).endsWith('.FULLCONTEXT.jsonl'));
 
-    const parsed = await waitForLogRows(fullPath as string, (rows) =>
-      rows.some((row) => row.type === 'provider_call'),
+    // Wait for every kind of row asserted below, not just the first: the logger drains on a timer,
+    // so the tool_result can land in a later batch than the provider_call (plan 0006 F5 - this was
+    // the "reads the run log mid-append" flake, R12 a1).
+    const parsed = await waitForLogRows(
+      fullPath as string,
+      (rows) =>
+        rows.some((row) => row.type === 'provider_call') &&
+        rows.some((row) => row.event?.type === 'tool_call') &&
+        rows.some((row) => row.event?.type === 'tool_result'),
     );
 
     const providerCalls = parsed.filter((e) => e.type === 'provider_call');
@@ -3262,12 +3272,16 @@ test('Escape on a write_file confirmation stops the whole turn, not just that on
 test('Manual Mode: confirming yes actually runs write_file', async () => {
   await withTempDir(async (dir) => {
     const targetPath = join(dir, 'manual-yes.txt');
-    const { stdin } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
+    const { stdin, lastFrame } = await setup({ dir, provider: new WriteFileProvider(targetPath) });
 
     await submit(stdin, 'please write the file');
-    await tick(100);
+    // Plan 0006 F5: a fixed 100ms here raced the dialog under full-suite load - DOWN and ENTER
+    // reached nothing, "Yes" was never chosen, and the waitFor below timed out. Wait for the dialog,
+    // give its useInput the same settle time the palette tests use, and only then answer it.
+    await waitFor(() => (lastFrame() ?? '').includes('Allow write_file'));
+    await tick(150);
     stdin.write(DOWN); // move from "No" to "Yes"
-    await tick(100);
+    await tick(150);
     stdin.write(ENTER);
 
     // The real fs write happens after the confirm dialog resolves, through toolPolicy ->
