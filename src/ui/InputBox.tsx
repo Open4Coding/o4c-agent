@@ -261,6 +261,8 @@ export function InputBox({
   // (submit, clear, history recall, prefill): the expanded height belongs to the text that was
   // expanded, and leaving it set would hold a tall box open over unrelated, short content.
   const [expanded, setExpanded] = useState(false);
+  // Ctrl+R (plan 0006 E8): reverse search through the input history. `from` = search older than this index.
+  const [search, setSearch] = useState<{ query: string; from: number } | undefined>(undefined);
   // A terminal delivers one paste as several input chunks. They are buffered and inserted together, so one paste
   // becomes one placeholder instead of one per chunk. Any other key flushes the buffer first, so Enter can't outrun it.
   const pendingPasteRef = useRef('');
@@ -431,6 +433,25 @@ export function InputBox({
   useInput(
     (input, key) => {
       if (pendingPasteRef.current && !(input && input.length > 1)) flushPaste();
+      if (search) {
+        const match = findHistoryMatch(historyRef.current, search.query, search.from);
+        if (key.escape) setSearch(undefined);
+        else if (key.return) {
+          if (match) edit(() => ({ value: match.text, cursor: match.text.length }));
+          setSearch(undefined);
+        } else if (key.ctrl && input === 'r') {
+          if (match) setSearch({ query: search.query, from: match.index });
+        } else if (key.backspace || key.delete) {
+          setSearch({ query: search.query.slice(0, -1), from: historyRef.current.length });
+        } else if (input && !key.ctrl && !key.meta) {
+          setSearch({ query: search.query + input, from: historyRef.current.length });
+        }
+        return;
+      }
+      if (key.ctrl && input === 'r') {
+        setSearch({ query: '', from: historyRef.current.length });
+        return;
+      }
       // Editing always works, even while `disabled` (busy) - that's what lets you type
       // ahead and queue up the next message instead of being locked out until the
       // current turn finishes. `onSubmit` always fires on Enter too; it's up to the
@@ -786,6 +807,11 @@ export function InputBox({
           {body}
         </Text>
       </Box>
+      {search ? (
+        <Text wrap="truncate-end" color={theme.border}>
+          {`(history search, Ctrl+R older, Enter take, Esc cancel) "${search.query}": ${findHistoryMatch(historyRef.current, search.query, search.from)?.text.split('\n')[0] ?? 'no match'}`}
+        </Text>
+      ) : null}
       {notices[1] !== undefined && (
         <Text wrap="truncate-end" color={theme.border}>
           {notices[1]}
@@ -793,4 +819,13 @@ export function InputBox({
       )}
     </Box>
   );
+}
+
+/** The newest history entry older than `from` that contains `query` (case-insensitive) - Ctrl+R (E8). */
+export function findHistoryMatch(history: readonly string[], query: string, from: number): { index: number; text: string } | undefined {
+  const q = query.toLowerCase();
+  for (let i = Math.min(from, history.length) - 1; i >= 0; i--) {
+    if (history[i]!.toLowerCase().includes(q)) return { index: i, text: history[i]! };
+  }
+  return undefined;
 }

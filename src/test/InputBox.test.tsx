@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import stringWidth from 'string-width';
-import { InputBox, resetPasteStoreForTests, sanitizeInputText } from '../ui/InputBox.js';
+import { findHistoryMatch, InputBox, resetPasteStoreForTests, sanitizeInputText } from '../ui/InputBox.js';
 
 // The collapsed-paste store is module scope (see resetPasteStoreForTests' own comment), so without
 // this one test's submit empties it out from under the next one.
@@ -1275,3 +1275,48 @@ test('a chunk and a keystroke in one tick keep their order', async () => {
   assert.deepEqual(submitted, ['helloX'], 'the later keystroke must land after the chunk');
 });
 
+
+// E8: Ctrl+R reverse history search.
+const CTRL_R = String.fromCharCode(18);
+
+test('Ctrl+R searches history newest first, Ctrl+R again goes older, Enter takes the match', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, {
+      onSubmit: (v) => submitted.push(v),
+      initialHistory: ['run the tests', 'fix the parser', 'run the build'],
+    }),
+  );
+  await tick();
+  await press(stdin, CTRL_R);
+  for (const ch of 'run') await press(stdin, ch);
+  assert.match(lastFrame() ?? '', /history search.*"run": run the build/);
+  await press(stdin, CTRL_R);
+  assert.match(lastFrame() ?? '', /"run": run the tests/);
+  await press(stdin, ENTER);
+  assert.doesNotMatch(lastFrame() ?? '', /history search/);
+  await press(stdin, ENTER);
+  assert.deepEqual(submitted, ['run the tests']);
+});
+
+test('Esc cancels a Ctrl+R search and leaves the draft alone', async () => {
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    React.createElement(InputBox, { onSubmit: (v) => submitted.push(v), initialHistory: ['older'] }),
+  );
+  await tick();
+  await press(stdin, 'x');
+  await press(stdin, CTRL_R);
+  await press(stdin, 'o');
+  await press(stdin, ESC);
+  assert.doesNotMatch(lastFrame() ?? '', /history search/);
+  await press(stdin, ENTER);
+  assert.deepEqual(submitted, ['x']);
+});
+
+test('findHistoryMatch is case-insensitive and respects the from index', () => {
+  const h = ['Alpha', 'beta', 'ALPHABET'];
+  assert.deepEqual(findHistoryMatch(h, 'alpha', 3), { index: 2, text: 'ALPHABET' });
+  assert.deepEqual(findHistoryMatch(h, 'alpha', 2), { index: 0, text: 'Alpha' });
+  assert.equal(findHistoryMatch(h, 'gamma', 3), undefined);
+});

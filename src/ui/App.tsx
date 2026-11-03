@@ -148,6 +148,7 @@ import { commandSection, formatSection, searchDocs } from '../session/helpDocs.j
 import { SHOW_TIPS_KEY, TIPS } from './tips.js';
 import { completeMention, expandMentions, mentionCandidates, mentionPrefix } from './mentions.js';
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
+import { editText } from './externalEditor.js';
 import { runShellTool } from '../tools/runShell.js';
 import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
@@ -1466,6 +1467,13 @@ export function App({
   // elsewhere.
   useInput(
     (_input, key) => {
+      // Ctrl+G (E8): compose the message in your own editor; the result comes back into the box.
+      if (key.ctrl && _input === 'g' && !confirmDialog && !choicePicker) {
+        const r = editText(inputValueRef.current);
+        if (r.text !== undefined) setPrefill({ token: nextPrefillToken++, text: r.text });
+        else pushBlock([infoLine(`Could not open the editor (${r.editor}): ${r.error ?? 'unknown error'}. Set VISUAL or EDITOR - a GUI editor needs its wait flag, e.g. "code --wait".`)]);
+        return;
+      }
       if (key.tab) {
         // E6: while an @mention is being typed, Tab completes it instead of cycling modes.
         if (mentionChoices.length > 0) {
