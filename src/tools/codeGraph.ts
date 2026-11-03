@@ -22,17 +22,15 @@ import type { CodeGraphLookup } from '../graph/toolHook.js';
 export function createCodeGraphTool(lookup: CodeGraphLookup): Tool {
   return {
     name: 'code_graph',
+    // Kept short on purpose (K4b): this text rides on every request, and the eval A/B (K4) measured
+    // ~400 tokens a request for the old version against 13 calls in 60 tasks. What the verdicts and
+    // the +N markers mean needs no saying here: every answer carries its verdict's own note, and the
+    // call-site line opens with its total ("12 call sites: ..."), which is where it gets read.
     description:
-      'Ask the code index about a symbol or a file. With "name": where that name is defined, ' +
-      'what kind of thing it is, and every call site, with a verdict saying how much the answer ' +
-      'is worth (ok / low_confidence / absent / degraded); add "source": true to get the definition\'s code. ' +
-      'With "path": the file\'s skeleton - every definition with its lines, signature and doc - and how many other files reference it. ' +
-      'Resolution is by name, not by type, so overloads ' +
-      'and interface dispatch are not followed, and only languages with a bundled grammar are ' +
-      'covered - an empty answer is reported as such, never as silence. An "ok" answer already ' +
-      'lists the call sites grouped by file: "+N" after line numbers means N more lines in that ' +
-      'file, "+N more files" means files not shown. Use it directly; grep only for the files it ' +
-      'says it did not show, or for mentions that are not calls (strings, comments).',
+      'Look up the code index. "name": where a symbol is defined and its call sites by file, with a ' +
+      'verdict (ok / low_confidence / absent / degraded). "path": a file skeleton - definitions with ' +
+      'lines and signatures - and how many files reference it. Prefer it to grep for definitions and ' +
+      'callers; grep for text that is not a call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -46,14 +44,11 @@ export function createCodeGraphTool(lookup: CodeGraphLookup): Tool {
         },
         source: {
           type: 'boolean',
-          description: 'With "name": also return the definition\'s source lines (read by symbol instead of reading the whole file).',
+          description: 'With "name": also return the definition code (instead of reading the whole file).',
         },
         from: {
           type: 'string',
-          description:
-            'Optional: the file the question comes from. When several files define the name, ' +
-            'the one in this file is preferred, because lexical scope means that is what the ' +
-            'language itself would pick.',
+          description: 'Optional: the file asking; its own definition wins when several files define the name.',
         },
       },
     },
