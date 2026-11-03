@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,8 +11,11 @@ import { join } from 'node:path';
  */
 const TERMINAL_EDITORS = new Set(['vi', 'vim', 'nvim', 'nano', 'pico', 'micro', 'hx', 'helix', 'kak', 'joe', 'ne', 'mcedit', 'emacs']);
 
+/** `/config-editor` (E18) saves an editor for o4c alone; cli.ts puts it in O4C_EDITOR, which wins. */
+export const EDITOR_CONFIG_KEY = 'editor';
+
 export function editorCommand(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
-  return (env.VISUAL || env.EDITOR || (platform === 'win32' ? 'notepad' : 'vi')).trim();
+  return (env.O4C_EDITOR || env.VISUAL || env.EDITOR || (platform === 'win32' ? 'notepad' : 'vi')).trim();
 }
 
 export function isTerminalEditor(command: string): boolean {
@@ -35,6 +38,23 @@ export function openInEditor(path: string, env: NodeJS.ProcessEnv = process.env)
     return { ok: true, editor };
   } finally {
     if (terminal && wasRaw) stdin.setRawMode?.(true);
+  }
+}
+
+/**
+ * Opens `path` to look at (E18 `/view-log`): a GUI editor is started and left running so o4c carries
+ * on; a terminal editor has to take the terminal over, so it is waited for like `openInEditor`.
+ */
+export function viewInEditor(path: string, env: NodeJS.ProcessEnv = process.env): { ok: boolean; editor: string; error?: string } {
+  const editor = editorCommand(env);
+  if (isTerminalEditor(editor)) return openInEditor(path, env);
+  try {
+    const child = spawn(`${editor} "${path}"`, { shell: true, detached: true, stdio: 'ignore', windowsHide: false });
+    child.on('error', () => undefined);
+    child.unref();
+    return { ok: true, editor };
+  } catch (err) {
+    return { ok: false, editor, error: err instanceof Error ? err.message : String(err) };
   }
 }
 

@@ -41,6 +41,7 @@ import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsD
 import { recordLifecycle } from './lifecycleLog.js';
 import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
+import { EDITOR_CONFIG_KEY } from './ui/externalEditor.js';
 import { setTaskCountSource } from './ui/statsReport.js';
 import { ConfigStore } from './session/configStore.js';
 import { secureModeFromScopes, secureModeProviderRefusal } from './session/secureMode.js';
@@ -713,6 +714,10 @@ program
       configuredContextWindow ??
       autoContextWindow ??
       (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : undefined);
+    // E18: /config-editor's choice, unless O4C_EDITOR is already set in the environment.
+    if (!process.env.O4C_EDITOR && typeof resolvedConfig[EDITOR_CONFIG_KEY] === 'string' && resolvedConfig[EDITOR_CONFIG_KEY]) {
+      process.env.O4C_EDITOR = resolvedConfig[EDITOR_CONFIG_KEY] as string;
+    }
     // E14: a numeric /think budget saved for this model replaces the level's own budget.
     setThinkBudgetOverride(savedThinkBudget(resolvedConfig, opts.model));
     // E13: one health line under the banner on a fresh start (not on the per-turn reload).

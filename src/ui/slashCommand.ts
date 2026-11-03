@@ -169,6 +169,15 @@ export const COMMANDS: CommandInfo[] = [
     select: 'run',
   },
   {
+    name: '/view-log',
+    description: 'Open a log in your editor: run (default - the newest run log, readable, think blocks included), full (FULLCONTEXT), lifecycle or crash. Usage: /view-log [run|full|lifecycle|crash]',
+  },
+  {
+    name: '/edit-config',
+    select: 'run',
+    description: 'Open a config file (global, local or personal) in your editor; it is checked when you close the editor.',
+  },
+  {
     name: '/keyboard-bindings',
     description: 'Your Ctrl+letter key bindings and how to remap them in ~/.o4c/keybindings.json.',
     hidden: true,
@@ -364,6 +373,12 @@ export const COMMANDS: CommandInfo[] = [
     name: '/config-contextwindow-modelinitiatedsearches',
     hidden: true,
     description: 'Whether the model may search past tasks on its own (search_history): on, off, or auto (only with the pointer and curated context window types - the default).',
+  },
+  {
+    name: '/config-editor',
+    // Hidden like the other /config-* commands: reached through the /config family dropdown.
+    hidden: true,
+    description: 'Choose the editor o4c opens (Ctrl+G, /view-log, /edit-config). Usage: /config-editor <command>|default',
   },
   {
     name: '/review',

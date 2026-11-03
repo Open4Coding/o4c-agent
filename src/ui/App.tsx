@@ -49,8 +49,8 @@ import { clipDiff, diffLines, diffStats, formatDiffStats } from './lineDiff.js';
 import { styleCodePreview, styleDiff, type StyledDiffLine } from './diffStyle.js';
 import { grammarForPath, highlightCode } from './syntaxHighlight.js';
 import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { projectLabel, readGitBranch, readGitDirty, readMountPoint } from '../session/gitInfo.js';
 import {
@@ -152,7 +152,10 @@ import { commandSection, formatSection, searchDocs } from '../session/helpDocs.j
 import { SHOW_TIPS_KEY, TIPS } from './tips.js';
 import { completeMention, expandMentions, mentionCandidates, mentionPrefix } from './mentions.js';
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
-import { editText } from './externalEditor.js';
+import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
+import { logToView } from '../session/logView.js';
+import { logsDirFor } from '../session/projectContext.js';
+import { defaultLogsDir } from '../session/runLog.js';
 import { MOUSE_CONFIG_KEY } from './mouse.js';
 import { describeKeybindings, isAction } from './keybindings.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
@@ -1656,6 +1659,65 @@ export function App({
           pushBlock([{ kind: 'error', text: 'Usage: /keyboard-windows, /keyboard-mac or /keyboard-linux' }]);
         } else {
           pushBlock([infoLine(renderKeyboardCommandsHelp(undefined, wanted))]);
+        }
+      } else if (commandName(input) === '/view-log') {
+        // E18: a log in the user's editor. Bare = the newest run log made readable (think blocks too).
+        pushBlock([userLine(input)]);
+        const arg = (input.trim().split(/\s+/)[1] ?? 'run').toLowerCase();
+        const kind = (['run', 'full', 'lifecycle', 'crash'] as const).find((k) => k === arg);
+        if (!kind) pushBlock([infoLine('Usage: /view-log [run|full|lifecycle|crash] - run (default) is the newest run log, readable; full is the FULLCONTEXT log.')]);
+        else {
+          const target = logToView(kind === 'crash' ? defaultLogsDir() : logsDirFor(projectRoot), kind);
+          if (!target.path) pushBlock([infoLine(target.error ?? 'No log found.')]);
+          else {
+            const r = viewInEditor(target.path);
+            pushBlock([infoLine(r.ok ? `Opened ${target.path} in ${r.editor}.` : `Could not open the editor (${r.editor}): ${r.error ?? ''}. The file is ${target.path}.`)]);
+          }
+        }
+      } else if (commandName(input) === '/edit-config') {
+        // E18: a config file in the user's editor, checked when the editor closes.
+        pushBlock([userLine(input)]);
+        const scope = await pickChoice<ConfigScope>('Which config file? (↑/↓, Enter, Esc to cancel)', [
+          { key: 'global', label: `global - every project (${configStore.configPath('global') ?? 'n/a'})` },
+          ...(projectRoot
+            ? ([
+                { key: 'local', label: `local - this project, shared (${configStore.configPath('local') ?? 'n/a'})` },
+                { key: 'personal', label: `personal - this project, just you, gitignored (${configStore.configPath('personal') ?? 'n/a'})` },
+              ] as const)
+            : []),
+        ]);
+        const file = scope ? configStore.configPath(scope) : undefined;
+        if (!scope || !file) pushBlock([infoLine('Config unchanged.')]);
+        else {
+          if (!existsSync(file)) {
+            mkdirSync(dirname(file), { recursive: true });
+            writeFileSync(file, '{}\n', 'utf-8');
+          }
+          const r = openInEditor(file);
+          if (!r.ok) pushBlock([infoLine(`Could not open the editor (${r.editor}): ${r.error ?? ''}. The file is ${file}.`)]);
+          else {
+            try {
+              JSON.parse(readFileSync(file, 'utf-8'));
+              pushBlock([infoLine(`Saved ${file}. It takes effect from your next message.`)]);
+            } catch (err) {
+              pushBlock([infoLine(`${file} is not valid JSON now (${err instanceof Error ? err.message : String(err)}) - run /edit-config again to fix it.`)]);
+            }
+          }
+        }
+      } else if (commandName(input) === '/config-editor') {
+        // E18: the editor o4c opens (Ctrl+G, /view-log, /edit-config), apart from VISUAL/EDITOR.
+        pushBlock([userLine(input)]);
+        const arg = input.trim().slice('/config-editor'.length).trim();
+        if (!arg) {
+          pushBlock([infoLine(`o4c opens: ${editorCommand()}. Usage: /config-editor <command> (a GUI editor needs its wait flag, e.g. "code --wait"), or /config-editor default to use VISUAL/EDITOR again.`)]);
+        } else if (arg === 'default') {
+          await configStore.set('global', EDITOR_CONFIG_KEY, '').catch(() => undefined);
+          delete process.env.O4C_EDITOR;
+          pushBlock([infoLine(`Editor back to the default: ${editorCommand()}.`)]);
+        } else {
+          await configStore.set('global', EDITOR_CONFIG_KEY, arg).catch(() => undefined);
+          process.env.O4C_EDITOR = arg;
+          pushBlock([infoLine(`o4c now opens ${arg}.${isTerminalEditor(arg) ? ' (A terminal editor - it takes over this window until you quit it.)' : ''}`)]);
         }
       } else if (commandName(input) === '/keyboard-bindings') {
         // E17: the remappable Ctrl+letter actions as bound now, and any problem in the file.
