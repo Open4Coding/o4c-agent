@@ -146,6 +146,8 @@ import { loadLanguage } from '../graph/loadLanguage.js';
 import { probeLocalServer } from '../providers/local.js';
 import { commandSection, formatSection, searchDocs } from '../session/helpDocs.js';
 import { SHOW_TIPS_KEY, TIPS } from './tips.js';
+import { completeMention, expandMentions, mentionCandidates, mentionPrefix } from './mentions.js';
+import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
@@ -1461,6 +1463,11 @@ export function App({
   useInput(
     (_input, key) => {
       if (key.tab) {
+        // E6: while an @mention is being typed, Tab completes it instead of cycling modes.
+        if (mentionChoices.length > 0) {
+          setPrefill({ token: nextPrefillToken++, text: completeMention(inputValueRef.current, mentionChoices[0]!) });
+          return;
+        }
         const currentIndex = MODES.findIndex((m) => m.mode === mode);
         const next = MODES[(currentIndex + 1) % MODES.length].mode;
         setMode(next);
@@ -1477,6 +1484,17 @@ export function App({
     },
     { isActive: true },
   );
+
+  // @mentions (E6): the project's files, listed once when the first @ is typed.
+  const [projectFiles, setProjectFiles] = useState<string[] | undefined>(undefined);
+  const typingMention = mentionPrefix(inputValue);
+  useEffect(() => {
+    if (typingMention === undefined || projectFiles !== undefined) return;
+    void walkFiles(process.cwd())
+      .then(({ entries }) => setProjectFiles(entries.filter((e) => !e.isDirectory).map((e) => e.path.replace(/\\/g, '/'))))
+      .catch(() => setProjectFiles([]));
+  }, [typingMention, projectFiles]);
+  const mentionChoices = typingMention !== undefined && projectFiles ? mentionCandidates(typingMention, projectFiles) : [];
 
   const processTurn = useCallback(
     async (input: string) => {
@@ -2697,7 +2715,8 @@ export function App({
           ? planPrompt(planCommand, ultra ? plans?.research?.(planCommand.goal) : undefined)
           : reviewCommand
             ? reviewPrompt(reviewDiff, input.trim().slice('/review'.length).trim())
-            : input;
+            : // E6: @file and @file:10-40 attach those contents; the typed text stays as typed.
+              expandMentions(input);
         turnModeRef.current = planCommand || reviewCommand ? 'plan' : undefined;
 
         const responseLines: Line[] = [];
@@ -3689,6 +3708,14 @@ export function App({
         historyAppend={historyAppend}
         onHistoryChange={handleInputHistoryChange}
       />
+      {/* E6: files matching the @mention being typed; Tab takes the first. */}
+      {mentionChoices.length > 0 ? (
+        <Text color={theme.border}>
+          {'  @ '}
+          {mentionChoices.join('   ')}
+          {'  (Tab completes)'}
+        </Text>
+      ) : null}
       {/* Three footer lines, grouped by how fast each one changes: what is live (mode, hints,
           think level, context fill, clock), what accumulates (tokens), and what holds still for
           the session (model, branch, directory). Front-end plan item #8 put context
