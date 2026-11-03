@@ -34,3 +34,28 @@ test('toastCommand per platform', () => {
   assert.match(toastCommand('win32').args.at(-1)!, /ShowBalloonTip/);
   assert.equal(toastCommand('linux').cmd, 'sh');
 });
+
+test('H3: ntfy gets the message when configured; secure mode allows only a local/LAN server; off sends nothing', async () => {
+  const { setNtfy, ntfyTarget } = await import('../ui/notify.js');
+  const posted: string[] = [];
+  const post = async (url: string, body: string) => void posted.push(`${url} ${body}`);
+  const quiet = { write: () => {}, launch: () => {} };
+  try {
+    setNtfy({ url: 'https://ntfy.sh/my-topic', secureMode: false, post });
+    notifyUser('bell', 'Approval needed: write_file', quiet);
+    assert.deepEqual(posted, ['https://ntfy.sh/my-topic Approval needed: write_file']);
+    notifyUser('off', 'nothing', quiet);
+    assert.equal(posted.length, 1, 'notifications off means off, phone included');
+    setNtfy({ secureMode: true });
+    assert.match(ntfyTarget().refused ?? '', /secure mode is on and the ntfy server is off-site/);
+    notifyUser('bell', 'x', quiet);
+    assert.equal(posted.length, 1);
+    setNtfy({ url: 'http://192.168.1.20:8080/o4c' });
+    notifyUser('bell', 'lan ok', quiet);
+    assert.deepEqual(posted.at(-1), 'http://192.168.1.20:8080/o4c lan ok');
+    setNtfy({ url: 'ftp://x' });
+    assert.match(ntfyTarget().refused ?? '', /http or https/);
+  } finally {
+    setNtfy({ url: undefined, secureMode: false });
+  }
+});

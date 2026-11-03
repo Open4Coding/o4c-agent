@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { allowedInSecureMode, egressClassOfUrl } from '../session/secureMode.js';
 
 /**
  * Notifications (plan 0006 E12): when a long turn ends, or an approval is waiting, tell the user
@@ -55,8 +56,41 @@ const launchDetached = (cmd: string, args: string[], env: NodeJS.ProcessEnv) => 
   }
 };
 
+/**
+ * ntfy (plan 0006 H3): with config `ntfyUrl` (https://ntfy.sh/<your-topic>, or a self-hosted
+ * server), the same events also go to a phone. Fire and forget, 5 s timeout, never in the way of a
+ * turn. In secure mode only a local or LAN ntfy host is used - a public one would be the off-site
+ * egress secure mode exists to stop.
+ */
+export const NTFY_URL_KEY = 'ntfyUrl';
+let ntfy: { url?: string; secureMode: boolean; post: (url: string, body: string) => Promise<unknown> } = {
+  secureMode: false,
+  post: (url, body) => fetch(url, { method: 'POST', body, headers: { Title: 'o4c', Tags: 'robot' }, signal: AbortSignal.timeout(5000) }),
+};
+
+export function setNtfy(o: { url?: string; secureMode?: boolean; post?: (url: string, body: string) => Promise<unknown> }): void {
+  ntfy = { ...ntfy, ...o };
+}
+
+/** Whether a message would go to ntfy right now, and if not, why. */
+export function ntfyTarget(): { url?: string; refused?: string } {
+  const url = ntfy.url?.trim();
+  if (!url) return {};
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { refused: `ntfyUrl is not a URL: ${url}` };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { refused: 'ntfyUrl must be http or https' };
+  if (ntfy.secureMode && !allowedInSecureMode(egressClassOfUrl(url))) return { refused: 'secure mode is on and the ntfy server is off-site' };
+  return { url };
+}
+
 export function notifyUser(mode: NotifyMode, message: string, deps: NotifyDeps = {}): void {
   if (mode === 'off') return;
+  const target = ntfyTarget();
+  if (target.url) void ntfy.post(target.url, message.slice(0, 500)).catch(() => undefined);
   // The bell only means something on a terminal (tests and pipes would just get a stray byte).
   const write = deps.write ?? (process.stdout.isTTY ? (s: string) => process.stdout.write(s) : undefined);
   if ((mode === 'bell' || mode === 'both') && write) write(String.fromCharCode(7));
