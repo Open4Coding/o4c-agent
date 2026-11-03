@@ -162,6 +162,7 @@ import { redactSecrets } from '../session/redact.js';
 import { logsDirFor } from '../session/projectContext.js';
 import { defaultLogsDir } from '../session/runLog.js';
 import { MOUSE_CONFIG_KEY } from './mouse.js';
+import { BLOCK_GAP_KEY, parseBlockGap, settingLabel, settingValues } from './settingsIndex.js';
 import { describeKeybindings, isAction } from './keybindings.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
@@ -1214,6 +1215,14 @@ export function App({
     resolve: (answer: ConfirmAnswer) => void;
   } | null>(null);
 
+  // E23: blank rows between finished blocks (0/1/2, default 1).
+  const [blockGap, setBlockGap] = useState<0 | 1 | 2>(1);
+  useEffect(() => {
+    void configStore
+      .get(BLOCK_GAP_KEY)
+      .then((v) => setBlockGap(parseBlockGap(v)))
+      .catch(() => undefined);
+  }, [configStore]);
   // E16: click-to-place-cursor, opt-in (it takes the wheel away from scrollback while on).
   const [mouseOn, setMouseOn] = useState(false);
   useEffect(() => {
@@ -2984,6 +2993,30 @@ export function App({
           await configStore.set('global', 'autoAllowReadOnly', arg === 'on').catch(() => undefined);
           pushBlock([infoLine(arg === 'on' ? 'Read-only shell commands now run without asking (see /view-permissions).' : 'Read-only shell commands ask again, like any other command.')]);
         }
+      } else if (commandName(input) === '/settings') {
+        // E23: every setting with its value and scope; picking one runs its command.
+        pushBlock([userLine(input)]);
+        const values = await settingValues(configStore, model);
+        const picked = await pickChoice(
+          'Settings - value (scope it comes from). Enter changes it, Esc closes:',
+          values.map((v) => ({ key: v.command, label: settingLabel(v) })),
+        );
+        if (picked) await processTurn(picked);
+      } else if (commandName(input) === '/set-blockgap') {
+        // E23: the gap between blocks; applies to blocks printed from now on.
+        pushBlock([userLine(input)]);
+        const choice = await pickChoice('Blank rows between blocks (↑/↓, Enter, Esc to cancel):', [
+          { key: '0', label: '0 - compact, no gap' },
+          { key: '1', label: '1 - one blank row (default)' },
+          { key: '2', label: '2 - two blank rows' },
+        ]);
+        if (!choice) pushBlock([infoLine('Block gap unchanged.')]);
+        else {
+          const gap = parseBlockGap(Number(choice));
+          await configStore.set('global', BLOCK_GAP_KEY, gap).catch(() => undefined);
+          setBlockGap(gap);
+          pushBlock([infoLine(`Block gap: ${gap}. Blocks already on screen keep their spacing.`)]);
+        }
       } else if (commandName(input) === '/set-mouse') {
         // E16: opt-in, with the trade-off said up front.
         pushBlock([userLine(input)]);
@@ -4106,7 +4139,7 @@ export function App({
           /* A flow block is one chunk of a stream that is still being written (full view), so it
              gets neither the trailing blank row nor the labelled-line gaps - both would break a
              single think block or answer into visually separate pieces as it arrives. */
-          <Box key={block.id} flexDirection="column" marginBottom={block.flow ? 0 : 1}>
+          <Box key={block.id} flexDirection="column" marginBottom={block.flow ? 0 : blockGap}>
             {block.lines.map((line, i) => (
               <React.Fragment key={i}>
                 {/* A blank row before a labelled line ([think], [tool], ...) so it does not sit directly

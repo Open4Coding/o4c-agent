@@ -455,6 +455,17 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose hidden commands to show in the bare / list too (toggle one at a time; Esc when done).',
   },
   {
+    name: '/set-blockgap',
+    hidden: true,
+    select: 'run',
+    description: 'Blank rows between blocks in the conversation: 0, 1 (default) or 2.',
+  },
+  {
+    name: '/settings',
+    select: 'run',
+    description: 'Every setting in one list - its current value and the scope it comes from; pick one to change it.',
+  },
+  {
     name: '/undo',
     select: 'run',
     description: "Put the project's files back as they were before the last turn changed them (a shadow git copy in .o4c/checkpoints - your .git is untouched). The undone state is kept as a restore point.",

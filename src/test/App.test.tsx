@@ -2176,7 +2176,10 @@ test('/set opens its family dropdown; choosing a setting prefills the input box 
     await waitFor(() => (lastFrame() ?? '').includes('/set-sessionname'));
 
     // Row 0 is the bare /set, which is `select: 'none'` - Enter on it deliberately does nothing
-    // and leaves the list open, so the real choices are reached by arrowing down.
+    // and leaves the list open, so the real choices are reached by arrowing down. The settle wait is
+    // the same one the palette test uses: the dropdown being drawn and its useInput being subscribed
+    // are two moments, and under full-suite load an Enter in between reached the input box instead.
+    await tick(150);
     stdin.write(ENTER);
     await tick(50);
     assert.ok((lastFrame() ?? '').includes('/set commands'), 'the inert first row keeps the list open');
