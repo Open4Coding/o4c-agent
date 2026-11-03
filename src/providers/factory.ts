@@ -12,14 +12,17 @@ import type { LLMProvider } from './types.js';
  *     { "provider": "anthropic", "model": "claude-sonnet-5-5" }
  *   ]
  *
- * A local entry's key comes from the environment variable it names (`apiKeyEnv`), else
- * O4C_LOCAL_API_KEY - never from config.json, where it would sit in plain text.
+ * An entry's key comes from the `credentials` map entry it names (`credential`, plan 0006 F2), else
+ * the environment variable it names (`apiKeyEnv`), else O4C_LOCAL_API_KEY / the map's `anthropic` -
+ * never from a key written into the fallback entry itself.
  */
 export interface ProviderSpec {
   provider: 'local' | 'anthropic' | 'mock';
   baseUrl?: string;
   model?: string;
   apiKeyEnv?: string;
+  /** F2: a name in the `credentials` map. */
+  credential?: string;
 }
 
 export interface SharedProviderOptions {
@@ -48,17 +51,24 @@ export function parseProviderSpecs(value: unknown): { specs: ProviderSpec[]; err
       ...(typeof o.baseUrl === 'string' ? { baseUrl: o.baseUrl } : {}),
       ...(typeof o.model === 'string' ? { model: o.model } : {}),
       ...(typeof o.apiKeyEnv === 'string' ? { apiKeyEnv: o.apiKeyEnv } : {}),
+      ...(typeof o.credential === 'string' ? { credential: o.credential } : {}),
     });
   });
   return { specs, errors };
 }
 
-export function createProvider(spec: ProviderSpec, shared: SharedProviderOptions = {}, env: NodeJS.ProcessEnv = process.env): LLMProvider {
+export function createProvider(
+  spec: ProviderSpec,
+  shared: SharedProviderOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+  credentials: Record<string, string> = {},
+): LLMProvider {
   if (spec.provider === 'mock') return new MockProvider();
+  const named = spec.credential ? credentials[spec.credential] : undefined;
   if (spec.provider === 'local') {
     return new LocalProvider({
       baseUrl: spec.baseUrl!,
-      apiKey: (spec.apiKeyEnv ? env[spec.apiKeyEnv] : undefined) ?? env.O4C_LOCAL_API_KEY,
+      apiKey: named ?? (spec.apiKeyEnv ? env[spec.apiKeyEnv] : undefined) ?? env.O4C_LOCAL_API_KEY,
       maxTokens: shared.maxTokens,
       connectTimeoutMs: shared.connectTimeoutMs,
       idleTimeoutMs: shared.idleTimeoutMs,
@@ -66,6 +76,7 @@ export function createProvider(spec: ProviderSpec, shared: SharedProviderOptions
     });
   }
   return new AnthropicProvider({
+    apiKey: named ?? (spec.apiKeyEnv ? env[spec.apiKeyEnv] : undefined) ?? credentials.anthropic,
     model: spec.model,
     maxTokens: shared.maxTokens,
     timeoutMs: shared.connectTimeoutMs && shared.connectTimeoutMs > 0 ? shared.connectTimeoutMs : undefined,

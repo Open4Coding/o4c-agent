@@ -43,6 +43,7 @@ import { globalUsageFile, UsageStore } from './session/usageStore.js';
 import { latestSession, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
+import { loadCredentials } from './session/credentials.js';
 import { createProvider, parseProviderSpecs } from './providers/factory.js';
 import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
 import { EDITOR_CONFIG_KEY } from './ui/externalEditor.js';
@@ -549,8 +550,11 @@ program
     // takes effect on the very next run without needing anything re-threaded through opts.
     // config.local.json (personal, always gitignored - see configStore.ts) is the right scope for
     // this, never the shared config.json.
+    // F2: the credentials map (config.local.json / ~/.o4c/config.json only) comes first.
+    const credentials = await loadCredentials(configStore);
+    for (const value of Object.values(credentials.values)) registerSecret(value);
     const localApiKey =
-      typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined;
+      credentials.values.local ?? (typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined);
     // Every key o4c holds is redacted wherever o4c writes text to disk (session/redact.ts).
     registerSecret(localApiKey);
     registerSecret(process.env.O4C_LOCAL_API_KEY);
@@ -746,7 +750,7 @@ program
           last: await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined),
         });
     // A restore that just ran (E20) is reported even on a resume - the restart that applied it is one.
-    const startup = [restoreNote, health].filter(Boolean).join('\n') || undefined;
+    const startup = [restoreNote, ...credentials.problems, health].filter(Boolean).join('\n') || undefined;
     // Half the configured context window, not the flat 4096 both providers used to hardcode -
     // that flat cap was unrelated to the model's real budget and silently truncated any turn
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
@@ -781,6 +785,7 @@ program
     } else if (opts.provider === 'anthropic') {
       try {
         provider = new AnthropicProvider({
+          apiKey: credentials.values.anthropic,
           model: opts.model,
           thinkingEffort: anthropicThinkingEffort,
           maxTokens: providerMaxTokens,
@@ -821,7 +826,7 @@ program
       const fallbacks: LLMProvider[] = [];
       for (const spec of specs) {
         try {
-          fallbacks.push(createProvider(spec, { maxTokens: providerMaxTokens, connectTimeoutMs, idleTimeoutMs }));
+          fallbacks.push(createProvider(spec, { maxTokens: providerMaxTokens, connectTimeoutMs, idleTimeoutMs }, process.env, credentials.values));
         } catch (err) {
           console.error(`config.json fallbackChain: ${spec.provider} skipped - ${err instanceof Error ? err.message : String(err)}`);
         }
