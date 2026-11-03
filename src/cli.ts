@@ -21,6 +21,7 @@ import { SessionStore } from './session/sessionStore.js';
 import { RunLogger, createProviderCallLogger } from './session/runLog.js';
 import { buildSystemPrompt, PROMPT_PROFILE_CONFIG_KEY, promptProfileFor } from './agent/systemPrompt.js';
 import { registerSecret, setPassKeysToShell } from './session/redact.js';
+import { setPinnedCommands } from './ui/slashCommand.js';
 import { defaultProvider } from './session/providerDefault.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
@@ -764,6 +765,7 @@ program
     setSyntaxCheckMode(resolvedConfig.syntaxCheck);
     setShellTimeoutDefault(resolvedConfig.shellTimeoutMs);
     setPassKeysToShell(resolvedConfig.passKeysToShell);
+    setPinnedCommands(resolvedConfig.pinnedCommands);
     // Background jobs (B22): records under .o4c/jobs; this process kills the ones it owns on exit -
     // a reloading worker owns none (the supervisor does), so a reload never stops a dev server.
     setJobsDir(trusted && projectRoot ? join(projectRoot, '.o4c', 'jobs') : join(tmpdir(), 'o4c-jobs'));

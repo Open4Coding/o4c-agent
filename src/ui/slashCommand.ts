@@ -79,6 +79,11 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/all',
+    select: 'run',
+    description: 'Every command, hidden ones included, in one list - pick one to run it (or to fill it in when it needs an argument).',
+  },
+  {
     name: '/view-prompt',
     select: 'run',
     description: "Show the system prompt this session sends, section by section with token estimates, and which profile chose it (config promptProfile: default, qwen or small) - no LLM call.",
@@ -351,6 +356,12 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Let read-only shell commands (git status, ls, dir, cat ...) run without asking. Usage: /set-autoallowreadonly on|off',
   },
   {
+    name: '/set-pinnedcommands',
+    hidden: true,
+    select: 'run',
+    description: 'Choose hidden commands to show in the bare / list too (toggle one at a time; Esc when done).',
+  },
+  {
     name: '/undo',
     select: 'run',
     description: "Put the project's files back as they were before the last turn changed them (a shadow git copy in .o4c/checkpoints - your .git is untouched). The undone state is kept as a restore point.",
@@ -473,12 +484,26 @@ export function isComposingCommand(value: string): boolean {
  * (see `CommandInfo.hidden`'s doc comment): it's still directly invocable by its exact name, and
  * discoverable via its own family's picker instead.
  */
+/** Hidden commands the user pinned into the bare palette (plan 0006 E1, config `pinnedCommands`). */
+let pinned = new Set<string>();
+export function setPinnedCommands(names: unknown): void {
+  pinned = new Set(Array.isArray(names) ? names.filter((n): n is string => typeof n === 'string') : []);
+}
+export function pinnedCommands(): string[] {
+  return [...pinned];
+}
+
 export function matchCommands(prefix: string, extra: readonly CommandInfo[] = []): CommandInfo[] {
   const needle = prefix.toLowerCase();
   return [...COMMANDS, ...extra].filter(
     (c) =>
-      !c.hidden && [c.name, ...(c.aliases ?? [])].some((name) => name.toLowerCase().startsWith(needle)),
+      (!c.hidden || pinned.has(c.name)) && [c.name, ...(c.aliases ?? [])].some((name) => name.toLowerCase().startsWith(needle)),
   ).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Every command, hidden ones included, alphabetically - `/all` (E1). */
+export function allCommands(extra: readonly CommandInfo[] = []): CommandInfo[] {
+  return [...COMMANDS, ...extra].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**

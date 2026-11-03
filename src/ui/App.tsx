@@ -157,6 +157,9 @@ import {
   matchCommands,
   commandName,
   commandForHelpTarget,
+  allCommands,
+  pinnedCommands,
+  setPinnedCommands,
   setCommands,
   configCommands,
   commandFamily,
@@ -1593,6 +1596,32 @@ export function App({
             pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
           }
         }
+      } else if (commandName(input) === '/all') {
+        // E1: everything, hidden commands included; Enter runs it or fills it in, like the palette.
+        pushBlock([userLine(input)]);
+        const commands = allCommands(mcpCommands).filter((c) => c.name !== '/all');
+        const picked = await pickChoice('All commands (↑/↓, Enter, Esc to close):', commands.map((c) => ({ key: c.name, label: `${c.name}${c.hidden ? ' (hidden)' : ''} - ${c.description}` })));
+        const command = commands.find((c) => c.name === picked);
+        // Into the input box either way: Enter runs it, or type its argument first.
+        if (command) setPrefill({ token: nextPrefillToken++, text: command.select === 'run' ? command.name : `${command.name} ` });
+      } else if (commandName(input) === '/set-pinnedcommands') {
+        // E1: pin hidden commands into the bare / list. One toggle per pick; Esc when done.
+        pushBlock([userLine(input)]);
+        const hidden = allCommands().filter((c) => c.hidden);
+        for (;;) {
+          const current = new Set(pinnedCommands());
+          const picked = await pickChoice(
+            'Pinned commands show in the bare / list (Enter toggles, Esc when done):',
+            hidden.map((c) => ({ key: c.name, label: `${current.has(c.name) ? '[x]' : '[ ]'} ${c.name} - ${c.description}` })),
+          );
+          if (!picked) break;
+          if (current.has(picked)) current.delete(picked);
+          else current.add(picked);
+          setPinnedCommands([...current]);
+          await configStore.set('global', 'pinnedCommands', [...current]).catch(() => undefined);
+        }
+        const now = pinnedCommands();
+        pushBlock([infoLine(now.length ? `Pinned: ${now.join(', ')}` : 'No commands pinned.')]);
       } else if (commandName(input) === '/view-prompt') {
         // Display-only: the prompt was fixed when the session started (systemPrompt.ts).
         pushBlock([userLine(input)]);

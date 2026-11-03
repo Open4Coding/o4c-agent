@@ -2176,11 +2176,9 @@ test('/set opens its family dropdown; choosing a setting prefills the input box 
     await tick(50);
     assert.ok((lastFrame() ?? '').includes('/set commands'), 'the inert first row keeps the list open');
 
-    // Rows below the first are alphabetical, so /set-sessionname is the twelfth: /set,
-    // -autoallowreadonly, -contextwindowtype, -global-contextwindowtype, -global-sessionsToSave,
-    // -global-sessionview, -global-think, -local-contextwindowtype, -local-sessionsToSave,
-    // -local-sessionview, -local-think, -sessionname.
-    for (let i = 0; i < 11; i++) {
+    // Down until /set-sessionname is the selected row - rows are alphabetical and the family grows,
+    // so no fixed count.
+    for (let i = 0; i < 30 && !(lastFrame() ?? '').includes('> /set-sessionname'); i++) {
       stdin.write(DOWN);
       await tick(50);
     }
@@ -2242,8 +2240,11 @@ test('/config opens its family dropdown; choosing one prefills the input box ins
     // The palette unmounts and the family dropdown takes over input - two commits, not one.
     await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor'));
 
-    stdin.write(DOWN); // past the inert bare /config row
-    await tick(50);
+    // Down until /config-highlightcolor is the selected row - the family grows, so no fixed count.
+    for (let i = 0; i < 10 && !(lastFrame() ?? '').includes('> /config-highlightcolor'); i++) {
+      stdin.write(DOWN);
+      await tick(50);
+    }
     stdin.write(ENTER);
     await waitFor(() => (lastFrame() ?? '').includes('/config-highlightcolor '));
 
@@ -3057,12 +3058,11 @@ test('choosing /set-sessionview from the dropdown opens its picklist straight aw
     await waitFor(() => (lastFrame() ?? '').includes('/set commands'));
     await tick(150); // the palette unmounts and the dropdown's key handler takes over input
 
-    // Row 0 is the inert /set itself and the rest are alphabetical, so /set-sessionview is the
-    // fourteenth row: -autoallowreadonly, -contextwindowtype, the four -global-*, the four -local-*,
-    // -sessionname, -sessionsToSave, then it.
-    for (let i = 0; i < 13; i++) {
+    // Down until /set-sessionview is the selected row - rows are alphabetical and the family grows,
+    // so no fixed count.
+    for (let i = 0; i < 30 && !(lastFrame() ?? '').includes('> /set-sessionview'); i++) {
       stdin.write(DOWN);
-      await tick(100);
+      await tick(50);
     }
     stdin.write(ENTER);
 
