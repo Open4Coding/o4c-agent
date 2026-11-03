@@ -45,6 +45,7 @@ import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
 import { logRotationSettings, pruneRunLogs } from './session/logRotation.js';
 import { loadSkills, setSkills, skillGate, skillListing } from './session/skills.js';
+import { hasHooks, hookProblems, hooksConfig, parseHooks, postToolHooksComponent, preToolHookVerdict, runHooks, setHooks } from './session/hooks.js';
 import { loadCredentials } from './session/credentials.js';
 import { createProvider, parseProviderSpecs } from './providers/factory.js';
 import { applyPendingRestore, dbDirsFor } from './session/dbBackup.js';
@@ -757,7 +758,7 @@ program
           last: await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined),
         });
     // A restore that just ran (E20) is reported even on a resume - the restart that applied it is one.
-    const startup = [restoreNote, ...credentials.problems, health].filter(Boolean).join('\n') || undefined;
+    const startup = [restoreNote, ...credentials.problems, ...hookProblems().map((p) => `config.json hooks: ${p}`), health].filter(Boolean).join('\n') || undefined;
     // Half the configured context window, not the flat 4096 both providers used to hardcode -
     // that flat cap was unrelated to the model's real budget and silently truncated any turn
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
@@ -820,6 +821,9 @@ program
     // will expose it - fixed for the session, like everything else in the system prompt.
     // The shell run_shell uses (B24) - set before the prompt, which names it.
     setShell(resolvedConfig[SHELL_CONFIG_KEY]);
+    // G3: hooks from config, Claude Code format (see session/hooks.ts).
+    const hookSetup = parseHooks(resolvedConfig.hooks);
+    setHooks(hookSetup);
     // G2: skills (project > global > bundled), listed in the prompt and loadable with the skill tool.
     const skills = loadSkills(trusted ? projectRoot : undefined);
     setSkills(skills);
@@ -850,6 +854,11 @@ program
       }
     }
     const loop = new AgentLoop(provider, defaultTools, systemPrompt);
+    // G3: PostToolUse runs around every tool; PreCompact is told before a compaction.
+    loop.registerCore(postToolHooksComponent({ sessionId: opts.resume ?? opts.session, cwd }));
+    loop.onBeforeCompact = (trigger) => {
+      if (hasHooks('PreCompact')) void runHooks(hooksConfig(), 'PreCompact', { trigger }, { cwd }).catch(() => undefined);
+    };
     loop.textToolCallRecovery = resolvedConfig.textToolCallRecovery !== false;
     loop.loopGuardEnabled = resolvedConfig.loopGuard !== false;
     if (typeof resolvedConfig.deferToolsAbove === 'number') loop.deferToolsAbove = resolvedConfig.deferToolsAbove;
@@ -1218,6 +1227,10 @@ program
           ? async (tool, input) => {
               const skillDenied = skillGate(tool.name);
               if (skillDenied) return { verdict: 'deny', reason: skillDenied };
+              const hooked = await preToolHookVerdict(tool.name, input, cwd);
+              if (typeof hooked === 'object') return hooked;
+              if (hooked === 'ask') return { verdict: 'deny', reason: 'a PreToolUse hook asks for approval, which a headless run cannot give' };
+              if (hooked === 'allow') return 'allow';
               const ruled = evaluateRules(headlessRules, tool, input, splitShellSegments);
               if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
               if (ruled?.decision === 'ask') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} asks for approval, which a headless run cannot give` };
@@ -1226,9 +1239,12 @@ program
               return 'allow';
             }
           : // G2: with no rules, the only headless restriction is an active skill's allowed-tools.
-            async (tool) => {
+            async (tool, input) => {
               const skillDenied = skillGate(tool.name);
-              return skillDenied ? { verdict: 'deny', reason: skillDenied } : 'allow';
+              if (skillDenied) return { verdict: 'deny', reason: skillDenied };
+              const hooked = await preToolHookVerdict(tool.name, input, cwd);
+              if (hooked === 'ask') return { verdict: 'deny', reason: 'a PreToolUse hook asks for approval, which a headless run cannot give' };
+              return hooked ?? 'allow';
             },
         // One-shot is autonomous like Auto mode: ask once to verify edits nobody checked (B19).
         verifyOnStop: resolvedConfig.verifyOnStop !== false,

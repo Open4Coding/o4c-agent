@@ -118,6 +118,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help an
     '/view-permissions',
     '/set-autoallowreadonly',
     '/set-pinnedcommands',
+    '/hooks',
     '/set-blockgap',
     '/settings',
     '/undo',

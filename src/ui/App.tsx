@@ -155,6 +155,7 @@ import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { EDITOR_CONFIG_KEY, editorCommand, editText, isTerminalEditor, openInEditor, viewInEditor } from './externalEditor.js';
 import { logToView } from '../session/logView.js';
 import { expandCustomCommand, loadCustomCommands } from '../session/customCommands.js';
+import { describeHooks, hasHooks, hookProblems, hooksConfig, preToolHookVerdict, runHooks, type HookOutcome } from '../session/hooks.js';
 import { activateSkill, clearActiveSkill, findSkill, getSkills, skillGate, skillText } from '../session/skills.js';
 import { markIncorrect } from '../session/workedCommand.js';
 import { backupDatabases, checkBackup, dbDirsFor, listBackups, scheduleRestore } from '../session/dbBackup.js';
@@ -1256,6 +1257,22 @@ export function App({
       .then((v) => setMouseOn(v === true))
       .catch(() => undefined);
   }, [configStore]);
+  // G3: hook state - the UserPromptSubmit answer for the message being sent, and the Stop loop guard.
+  const promptHookRef = useRef<HookOutcome | undefined>(undefined);
+  const stopHookActiveRef = useRef(false);
+  const stopHookRunsRef = useRef(0);
+  // G3: SessionStart on a fresh session (not the per-turn reload); its context rides on the first message.
+  useEffect(() => {
+    if (initialSession || !hasHooks('SessionStart')) return;
+    void runHooks(hooksConfig(), 'SessionStart', { source: 'startup' }, { cwd: process.cwd() })
+      .then((h) => {
+        for (const m of h.messages) pushBlock([infoLine(m)]);
+        if (h.additionalContext.length) shellNotesRef.current.push(`[SessionStart hook]\n${h.additionalContext.join('\n')}`);
+      })
+      .catch(() => undefined);
+    // Once, on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // E12: bell / OS toast when a long turn ends or an approval waits. Read once; /set-notify updates it.
   const notifyRef = useRef<{ mode: NotifyMode; after: number }>({ mode: DEFAULT_NOTIFY, after: DEFAULT_NOTIFY_AFTER_SECONDS });
   useEffect(() => {
@@ -1275,6 +1292,8 @@ export function App({
       alwaysLabel?: string,
     ): Promise<ConfirmAnswer> => {
       notifyUser(notifyRef.current.mode, `Approval needed: ${message.split('\n')[0]}`);
+      // G3: Notification hooks hear about it too (fire and forget).
+      if (hasHooks('Notification')) void runHooks(hooksConfig(), 'Notification', { message: `Approval needed: ${message.split('\n')[0]}` }, { cwd: process.cwd() }).catch(() => undefined);
       return new Promise((resolve) => {
         setConfirmDialog({ id: nextDialogId++, message, diff, tool, input, alwaysLabel, resolve });
       });
@@ -1389,6 +1408,11 @@ export function App({
       const access = classifyToolAccess(turnModeRef.current ?? modeRef.current, tool, input, plansDirRef.current);
       // A mode's own refusal is absolute (Plan mode stays read-only whatever the rules say).
       if (access === 'deny') return 'deny';
+      // G3: PreToolUse hooks - a deny stops it, allow skips the dialog, ask forces it.
+      const hooked = await preToolHookVerdict(tool.name, input, process.cwd(), (m) => pushBlock([infoLine(m)]));
+      if (typeof hooked === 'object') return hooked;
+      if (hooked === 'allow') return 'allow';
+      const hookAsks = hooked === 'ask';
       // Permission rules (C3), read fresh so an edit to config.json applies at once: deny > ask >
       // allow, and ahead of the mode's own allow, so a deny or ask rule holds in Auto mode too.
       const rulesNow = await loadRules((s) => configStore.readScope(s as ConfigScope));
@@ -1396,7 +1420,7 @@ export function App({
       if (ruled?.decision === 'deny') return { verdict: 'deny', reason: `the permission rule ${ruled.rule.pattern} (${ruled.rule.scope}) denies this` };
       // C5: with confirmDestructive on, a destructive command always asks - Auto mode included.
       const destructive = rulesNow.confirmDestructive && tool.name === 'run_shell' && typeof input.command === 'string' ? destructiveReason(input.command) : undefined;
-      if (ruled?.decision !== 'ask' && !destructive) {
+      if (ruled?.decision !== 'ask' && !destructive && !hookAsks) {
         if (access === 'allow' || ruled?.decision === 'allow') return 'allow';
         if (alwaysAllowRef.current.some((p) => matchesPattern(p, tool, input))) return 'allow';
       }
@@ -1616,6 +1640,7 @@ export function App({
       const notifyTurnEnd = () => {
         if (shouldNotifyTurn(notifyRef.current.mode, Date.now() - turnStartedAt, notifyRef.current.after)) {
           notifyUser(notifyRef.current.mode, 'Done - o4c is waiting for your next message.');
+          if (hasHooks('Notification')) void runHooks(hooksConfig(), 'Notification', { message: 'Done - o4c is waiting for your next message.' }, { cwd: process.cwd() }).catch(() => undefined);
         }
       };
       // /exit, /quit, and /clear are intercepted earlier, in handleSubmit, before they can ever
@@ -3023,6 +3048,10 @@ export function App({
           await configStore.set('global', 'autoAllowReadOnly', arg === 'on').catch(() => undefined);
           pushBlock([infoLine(arg === 'on' ? 'Read-only shell commands now run without asking (see /view-permissions).' : 'Read-only shell commands ask again, like any other command.')]);
         }
+      } else if (commandName(input) === '/hooks') {
+        // G3: the configured hooks and any problems in them.
+        pushBlock([userLine(input)]);
+        pushBlock([infoLine(describeHooks(hooksConfig(), hookProblems()).join('\n'))]);
       } else if (commandName(input) === '/settings') {
         // E23: every setting with its value and scope; picking one runs its command.
         pushBlock([userLine(input)]);
@@ -3188,10 +3217,22 @@ export function App({
             text: `Unknown command: ${commandName(input)}. Known commands: ${knownCommandNames(mcpCommands).join(', ')}.`,
           },
         ]);
+      } else if (
+        // G3: UserPromptSubmit runs on what is about to go to the model; exit 2 / block stops it.
+        hasHooks('UserPromptSubmit') &&
+        (!looksLikeSlashCommand(input) || mcpCommands.some((c) => c.name === commandName(input) && c.skill)) &&
+        (promptHookRef.current = await runHooks(hooksConfig(), 'UserPromptSubmit', { prompt: input }, { cwd: process.cwd(), sessionId: currentSessionIdRef.current })).block !== undefined
+      ) {
+        pushBlock([userLine(input), { kind: 'error', text: `A UserPromptSubmit hook blocked this message: ${promptHookRef.current!.block}` }]);
+        promptHookRef.current = undefined;
       } else {
         // Echo the user's own line immediately, as its own permanent block - don't
         // wait for the (possibly very long) response before it shows up in scrollback.
         pushBlock([userLine(input)]);
+        // G3: what a UserPromptSubmit hook had to say (it did not block) - shown, and its context sent.
+        const promptHook = promptHookRef.current;
+        promptHookRef.current = undefined;
+        for (const m of promptHook?.messages ?? []) pushBlock([infoLine(m)]);
         // `/plan <goal>`: the same turn with a planning prompt, run read-only, its answer saved as a
         // plan below. The echo above stays the user's own short command.
         const planCommand = plans ? parsePlanCommand(input) : undefined;
@@ -3215,7 +3256,7 @@ export function App({
         const skillCommand = mcpCommands.find((c) => c.name === commandName(input) && c.skill);
         const invokedSkill = skillCommand ? findSkill(skillCommand.skill!) : undefined;
         if (invokedSkill) activateSkill(invokedSkill);
-        const sent = invokedSkill
+        const sentText = invokedSkill
           ? `${skillText(invokedSkill)}\n\nThe user's request: ${input.trim().slice(skillCommand!.name.length).trim() || '(none given - apply the skill to the current work)'}`
           : planCommand
           ? planPrompt(planCommand, ultra ? plans?.research?.(planCommand.goal) : undefined)
@@ -3224,6 +3265,7 @@ export function App({
             : // E6: @file and @file:10-40 attach those contents; the typed text stays as typed.
               // E7: any `!command` outputs since the last message go in front of it.
               withShellNotes(shellNotesRef.current.splice(0), expandMentions(input));
+        const sent = promptHook?.additionalContext.length ? `${sentText}\n\n[UserPromptSubmit hook]\n${promptHook.additionalContext.join('\n')}` : sentText;
         turnModeRef.current = planCommand || reviewCommand ? 'plan' : undefined;
 
         const responseLines: Line[] = [];
@@ -3634,6 +3676,24 @@ export function App({
         // after this point may run: a per-turn reload here would call restart() with this
         // session's id and, landing after /clear's own restart(), resume the session it cleared.
         if (sessionClosedRef.current) return;
+
+        // G3: Stop hooks. A block with a reason means "not done yet": the reason goes next, as the
+        // following message; stop_hook_active tells the hook it is looking at its own continuation,
+        // and five in a row is the hard stop against a hook that never lets go.
+        if (!turnFailed && hasHooks('Stop')) {
+          const h = await runHooks(hooksConfig(), 'Stop', { stop_hook_active: stopHookActiveRef.current }, { cwd: process.cwd(), sessionId: currentSessionIdRef.current }).catch(() => undefined);
+          for (const m of h?.messages ?? []) pushBlock([infoLine(m)]);
+          if (h?.block && stopHookRunsRef.current < 5) {
+            stopHookActiveRef.current = true;
+            stopHookRunsRef.current += 1;
+            queuedInputsRef.current.unshift(`[Stop hook] ${h.block}`);
+            setQueuedPreview([...queuedInputsRef.current]);
+            pushBlock([infoLine(`A Stop hook asked to continue: ${h.block}`)]);
+          } else {
+            stopHookActiveRef.current = false;
+            stopHookRunsRef.current = 0;
+          }
+        }
 
         // Reload the session in a fresh process: the fix for a long thinking/coding turn that ends in a
         // clear or partial screen. Everything the live view held (streamed think text, narration, the

@@ -459,6 +459,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Choose hidden commands to show in the bare / list too (toggle one at a time; Esc when done).',
   },
   {
+    name: '/hooks',
+    description: 'The hooks configured in config.json (PreToolUse, PostToolUse, UserPromptSubmit, Stop, SessionStart, PreCompact, Notification) and any problems with them.',
+  },
+  {
     name: '/set-blockgap',
     hidden: true,
     select: 'run',

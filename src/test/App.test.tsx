@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parseHooks, setHooks } from '../session/hooks.js';
 import { App } from '../ui/App.js';
 import type { OsKey } from '../ui/platform.js';
 import { AgentLoop } from '../agent/loop.js';
@@ -4201,5 +4202,21 @@ test('a custom command (G1) from .o4c/commands expands into the input box and is
     await waitFor(() => anyFrameIncludes(frames, 'expanded into the input box'));
     await waitFor(() => (lastFrame() ?? '').includes('Say hello to Ada Lovelace, warmly.'));
     assert.equal(anyFrameIncludes(frames, 'canned mock response'), false, 'nothing went to the model');
+  });
+});
+
+test('a UserPromptSubmit hook (G3) that exits 2 blocks the message - nothing reaches the model', async () => {
+  await withTempDir(async (dir) => {
+    const script = join(dir, 'block.mjs');
+    await writeFile(script, "process.stderr.write('no secrets in prompts'); process.exit(2);");
+    setHooks(parseHooks({ UserPromptSubmit: [{ hooks: [{ type: 'command', command: `node "${script}"` }] }] }));
+    try {
+      const { stdin, frames } = await setup({ dir });
+      await submit(stdin, 'here is my password hunter2');
+      await waitFor(() => anyFrameIncludes(frames, 'A UserPromptSubmit hook blocked this message: no secrets in prompts'));
+      assert.equal(anyFrameIncludes(frames, 'canned mock response'), false);
+    } finally {
+      setHooks({ hooks: {}, problems: [] });
+    }
   });
 });

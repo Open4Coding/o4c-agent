@@ -280,6 +280,8 @@ export const CONTEXT_PRESSURE_RATIO = 0.8;
 export const MAX_CUTOFF_CONTINUATIONS = 5;
 
 export class AgentLoop {
+  /** G3: told just before a compaction summarizes anything - the PreCompact hook. Never awaited. */
+  onBeforeCompact?: (trigger: 'auto' | 'manual') => void;
   private entries: ContextEntry[] = [];
   /** id -> entry, kept in lockstep with `entries` (see `indexEntry()`/`deindexEntry()`) - O(1)
    * lookup for `tool_call_id` linkage, `is_correct` marking, and (once §2.3 compaction exists)
@@ -1186,6 +1188,11 @@ export class AgentLoop {
     // A manual /compact (D6) folds nearly everything: only about the last turn stays verbatim.
     const cutPoint = findCutPoint(this.entries, manual ? Math.min(settings.keepRecentTokens, 1000) : settings.keepRecentTokens);
     if (cutPoint === 0) return; // no safe turn boundary to cut at yet - skip this round
+    try {
+      this.onBeforeCompact?.(manual ? 'manual' : 'auto');
+    } catch {
+      // An observer cannot stop a compaction.
+    }
 
     const toCompact = this.entries.slice(0, cutPoint);
     // An earlier compaction's own summary entry, if this round's cut point has pushed it into the
