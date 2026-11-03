@@ -3,7 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { McpServerConfig } from './serverConfig.js';
-import type { McpCallResult, McpToolDescriptor } from './toolProxy.js';
+import type { McpCallOptions, McpCallResult, McpToolDescriptor } from './toolProxy.js';
 import type { McpPromptDescriptor, McpPromptResult } from './promptCommands.js';
 
 /**
@@ -59,7 +59,7 @@ export interface ConnectedServer {
   readonly prompts: readonly McpPromptDescriptor[];
   /** Why `prompts` is empty when it should not have been. */
   readonly promptProblem?: string;
-  callTool(toolName: string, input: Record<string, unknown>): Promise<McpCallResult>;
+  callTool(toolName: string, input: Record<string, unknown>, options?: McpCallOptions): Promise<McpCallResult>;
   /** Expands one prompt. Arguments are strings per the spec's own `GetPromptRequest`. */
   getPrompt(promptName: string, args: Record<string, string>): Promise<McpPromptResult>;
   /** Whatever the server wrote to stderr, newest last, capped. Empty for an http server. */
@@ -183,7 +183,14 @@ export async function connectServer(server: McpServerConfig): Promise<ConnectedS
       tools,
       prompts,
       promptProblem,
-      callTool: (toolName, input) => client.callTool({ name: toolName, arguments: input }),
+      // G6: progress notifications are asked for, and keep a long call alive past the SDK's 60 s
+      // default; the signal cancels the request on the server, not just locally.
+      callTool: (toolName, input, options) =>
+        client.callTool({ name: toolName, arguments: input }, undefined, {
+          signal: options?.signal,
+          onprogress: options?.onProgress,
+          resetTimeoutOnProgress: true,
+        }),
       getPrompt: (promptName, args) => client.getPrompt({ name: promptName, arguments: args }),
       stderrTail: () => stderr,
       close: async () => {

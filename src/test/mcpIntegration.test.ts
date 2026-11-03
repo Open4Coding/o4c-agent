@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseServers, type McpServerConfig } from '../mcp/serverConfig.js';
@@ -446,5 +446,40 @@ test('the whole prompt path works through a session: config to command to expand
     assert.ok(report.some((l) => l.startsWith('  /mcp-fixture-review-file - Review one file')));
   } finally {
     await session.shutdown();
+  }
+});
+
+test('G6: a long tool call reports progress lines as it runs', async () => {
+  const host = await McpHost.start([fixtureServer('progress')]);
+  try {
+    const slow = host.tools().find((t) => t.name === 'mcp__fixture__slow')!;
+    const lines: string[] = [];
+    const out = await slow.execute({ steps: 3 }, { onOutput: (t) => void lines.push(t) });
+    assert.equal(out, 'slow done after 3 steps');
+    assert.deepEqual(lines, ['[fixture] 1/3 step 1\n', '[fixture] 2/3 step 2\n', '[fixture] 3/3 step 3\n']);
+  } finally {
+    await host.shutdown();
+  }
+});
+
+test('G6: cancelling a call (Esc) reaches the server, not just the local promise', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-mcp-cancel-'));
+  const cancelFile = join(dir, 'cancelled.txt');
+  const host = await McpHost.start([fixtureServer('progress', {}, { O4C_FIXTURE_CANCELFILE: cancelFile })]);
+  try {
+    const slow = host.tools().find((t) => t.name === 'mcp__fixture__slow')!;
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 200);
+    const out = await slow.execute({ steps: 20 }, { signal: ac.signal });
+    assert.match(out, /^Cancelled - the call to slow on the MCP server "fixture" was cancelled/);
+    let heard = '';
+    for (let i = 0; i < 40 && !heard; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      heard = await readFile(cancelFile, 'utf-8').catch(() => '');
+    }
+    assert.match(heard, /^cancelled at step \d+$/);
+  } finally {
+    await host.shutdown();
+    await rm(dir, { recursive: true, force: true });
   }
 });

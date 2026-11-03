@@ -91,7 +91,7 @@ export class McpHost {
 
         try {
           const connection = await connect(server);
-          const tools = proxyTools(server, connection.tools, (toolName, input) => connection.callTool(toolName, input));
+          const tools = proxyTools(server, connection.tools, (toolName, input, options) => connection.callTool(toolName, input, options));
           return { status: { ...base, state: 'ready', toolCount: tools.length }, connection, tools };
         } catch (error) {
           // The whole point of this class. A server that will not start, or starts and never

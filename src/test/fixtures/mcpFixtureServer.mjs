@@ -19,6 +19,8 @@
 //   silent   - connects at the transport level but never answers, to exercise the timeout
 //   promptfail - lists tools fine, then throws on prompts/list, to prove prompts failing does
 //              not cost the server its tools
+//   progress - adds a `slow` tool that sends progress notifications (plan 0006 G6) and, when the
+//              client cancels it, writes O4C_FIXTURE_CANCELFILE so a test can see the server heard
 //
 // O4C_FIXTURE_PIDFILE, when set, gets this process's pid written to it before anything else -
 // which is how a test can check that the subprocess o4c spawned is really gone afterwards, rather
@@ -78,6 +80,9 @@ if (MODE === 'silent') {
         inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
         annotations: { readOnlyHint: true },
       },
+      ...(MODE === 'progress'
+        ? [{ name: 'slow', description: 'Takes a while and reports progress', inputSchema: { type: 'object', properties: { steps: { type: 'number' } } } }]
+        : []),
     ],
   }));
 
@@ -124,8 +129,23 @@ if (MODE === 'silent') {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (MODE === 'callfail') throw new Error('fixture: this tool always fails');
+    if (request.params.name === 'slow') {
+      const steps = Number(request.params.arguments?.steps ?? 3);
+      const token = request.params._meta?.progressToken;
+      for (let i = 1; i <= steps; i++) {
+        await new Promise((r) => setTimeout(r, 150));
+        if (extra.signal.aborted) {
+          if (process.env.O4C_FIXTURE_CANCELFILE) writeFileSync(process.env.O4C_FIXTURE_CANCELFILE, `cancelled at step ${i}`);
+          throw new Error('cancelled');
+        }
+        if (token !== undefined) {
+          await extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: i, total: steps, message: `step ${i}` } });
+        }
+      }
+      return { content: [{ type: 'text', text: `slow done after ${steps} steps` }] };
+    }
     if (MODE === 'legacy') return { toolResult: 'legacy shape' };
     const text = String(request.params.arguments?.text ?? '');
     return { content: [{ type: 'text', text: `echo: ${text}` }] };

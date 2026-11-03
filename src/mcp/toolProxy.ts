@@ -48,7 +48,19 @@ export interface McpCallResult {
 }
 
 /** How a proxied tool reaches its server. Injected so tests need no subprocess. */
-export type McpToolCaller = (toolName: string, input: Record<string, unknown>) => Promise<McpCallResult>;
+/** G6: a call can be cancelled (Esc reaches the server as a cancellation) and can report progress. */
+export interface McpCallOptions {
+  signal?: AbortSignal;
+  onProgress?: (progress: { progress: number; total?: number; message?: string }) => void;
+}
+
+export type McpToolCaller = (toolName: string, input: Record<string, unknown>, options?: McpCallOptions) => Promise<McpCallResult>;
+
+/** One progress notification as a line under the running tool. */
+export function formatProgress(serverId: string, p: { progress: number; total?: number; message?: string }): string {
+  const amount = p.total ? `${p.progress}/${p.total}` : `${p.progress}`;
+  return `[${serverId}] ${amount}${p.message ? ` ${p.message}` : ''}\n`;
+}
 
 /** `mcp__<server>__<tool>`, per the `toolNamespace` convention. */
 export function mcpToolName(serverId: string, toolName: string): string {
@@ -228,10 +240,16 @@ export function proxyTools(
     inputSchema: descriptor.inputSchema,
     mutating: isMutating(server, descriptor),
     mcp: provenanceOf(server, descriptor),
-    execute: async (input: Record<string, unknown>): Promise<string> => {
+    execute: async (input: Record<string, unknown>, context?: { signal?: AbortSignal; onOutput?: (text: string) => void }): Promise<string> => {
       try {
-        return flattenToolResult(await call(descriptor.name, input));
+        return flattenToolResult(
+          await call(descriptor.name, input, {
+            signal: context?.signal,
+            onProgress: context?.onOutput ? (p) => context.onOutput!(formatProgress(server.id, p)) : undefined,
+          }),
+        );
       } catch (error) {
+        if (context?.signal?.aborted) return `Cancelled - the call to ${descriptor.name} on the MCP server "${server.id}" was cancelled (the server was told).`;
         // A transport failure, a timeout, or a dead server. The loop gets a string it can show
         // the model and carry on with; it must never take the turn down.
         const message = error instanceof Error ? error.message : String(error);
