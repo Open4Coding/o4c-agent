@@ -145,6 +145,7 @@ import { runShellCommand } from '../tools/shellRunner.js';
 import { loadLanguage } from '../graph/loadLanguage.js';
 import { probeLocalServer } from '../providers/local.js';
 import { commandSection, formatSection, searchDocs } from '../session/helpDocs.js';
+import { SHOW_TIPS_KEY, TIPS } from './tips.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
 import { describeJob, getJob, killJob, listJobs } from '../tools/jobs.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY } from '../tools/shell.js';
@@ -236,6 +237,8 @@ export interface AppProps {
    * cli.ts, where the config read and the launch counting already live, so this stays a plain
    * render flag: the app shows the tip when told to and records the moment Tab is first pressed. */
   showTabHint?: boolean;
+  /** This start's tip (E5); undefined when tips are off, on a reload, or the tab hint shows instead. */
+  tip?: string;
   /** How the local server answered at launch (`up` when unknown/not a local server). When it is `down` or
    * `loading` the app opens the "Server is down: wait or choose another model" box straight away. */
   serverStatus?: ServerStatus;
@@ -676,6 +679,7 @@ export function App({
   reloadAfterTurn,
   sessionView,
   showTabHint,
+  tip,
   projectRoot,
   thinkCaps: probedThinkCaps,
   usageStore,
@@ -755,7 +759,9 @@ export function App({
             { kind: 'system', text: 'Tip: press Tab to cycle modes, or /mode to pick one directly.' },
             { kind: 'system', text: `     ${MODES.map((m) => m.label).join(' → ')}` },
           ] as const)
-        : []),
+        : tip
+          ? ([{ kind: 'system', text: `Tip: ${tip}  (/tips off to hide)` }] as const)
+          : []),
     ]);
     if (!initialSession) return initialTextWindow([banner], liveRegionCapChars(), liveRegionCapRows(), liveRegionCols());
     const blocks: TextBlock[] = [
@@ -1602,6 +1608,16 @@ export function App({
           } catch (err) {
             pushBlock([infoLine(err instanceof PlanRuleError ? err.message : formatError(err))]);
           }
+        }
+      } else if (commandName(input) === '/tips') {
+        // E5: the start-of-session tip, on or off.
+        pushBlock([userLine(input)]);
+        const arg = input.trim().split(/\s+/)[1]?.toLowerCase();
+        if (arg === 'on' || arg === 'off') {
+          await configStore.set('global', SHOW_TIPS_KEY, arg === 'on').catch(() => undefined);
+          pushBlock([infoLine(arg === 'on' ? 'Tips on - one at the start of each new session.' : 'Tips off.')]);
+        } else {
+          pushBlock([infoLine(['Usage: /tips on|off. All the tips:', ...TIPS.map((t) => `  - ${t}`)].join('\n'))]);
         }
       } else if (commandName(input) === '/doctor') {
         // E3: each check, and for each failure what to do.

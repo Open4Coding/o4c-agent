@@ -22,6 +22,7 @@ import { RunLogger, createProviderCallLogger } from './session/runLog.js';
 import { buildSystemPrompt, PROMPT_PROFILE_CONFIG_KEY, promptProfileFor } from './agent/systemPrompt.js';
 import { registerSecret, setPassKeysToShell } from './session/redact.js';
 import { setPinnedCommands } from './ui/slashCommand.js';
+import { SHOW_TIPS_KEY, TIP_COUNTER_KEY, tipFor } from './ui/tips.js';
 import { defaultProvider } from './session/providerDefault.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
@@ -234,6 +235,7 @@ async function runRepl(
   markWorked?: (arg: string) => string,
   plans?: PlanHooks,
   checkpoints?: CheckpointHooks,
+  tip?: string,
 ): Promise<void> {
   if (!process.stdin.isTTY) {
     console.error(
@@ -311,6 +313,7 @@ async function runRepl(
       markWorked,
       plans,
       checkpoints,
+      tip,
       restart,
       initialMode,
       sessionView,
@@ -570,6 +573,13 @@ program
     // count as a run, is in tabHint.ts where it can be tested.
     const tabHint = decideTabHint(resolvedConfig, Boolean(opts.resume));
     const showTabHint = tabHint.show;
+    // E5: a tip on a fresh start (not on a reload, not when the Tab hint shows), rotating.
+    let tip: string | undefined;
+    if (!showTabHint && !opts.resume && resolvedConfig[SHOW_TIPS_KEY] !== false) {
+      const counter = typeof resolvedConfig[TIP_COUNTER_KEY] === 'number' ? (resolvedConfig[TIP_COUNTER_KEY] as number) : 0;
+      tip = tipFor(counter);
+      void configStore.set('global', TIP_COUNTER_KEY, counter + 1).catch(() => undefined);
+    }
     if (tabHint.recordRuns !== undefined) {
       // Fire-and-forget, and global: which shortcuts somebody has been taught is a fact about the
       // user, not about a project. A failed write means the tip shows once more, which is a far
@@ -1083,6 +1093,7 @@ program
             }),
         },
         checkpointHooks,
+        tip,
       );
       return;
     }

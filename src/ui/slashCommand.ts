@@ -79,6 +79,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/tips',
+    description: 'Turn the start-of-session tip on or off, or list all the tips. Usage: /tips [on|off]',
+  },
+  {
     name: '/doctor',
     select: 'run',
     description: 'Check what can make o4c fail - Node, config files, git, shell, grammars, databases, disk, the server and a real tool call - with a fix for each failure.',
