@@ -149,6 +149,7 @@ import { SHOW_TIPS_KEY, TIPS } from './tips.js';
 import { completeMention, expandMentions, mentionCandidates, mentionPrefix } from './mentions.js';
 import { bangCommand, runBang, withShellNotes } from './bangCommand.js';
 import { editText } from './externalEditor.js';
+import { copyToClipboard, replyBack } from './clipboard.js';
 import { runShellTool } from '../tools/runShell.js';
 import { walkFiles } from '../tools/searchUtils.js';
 import { describeSampling, samplingFor } from '../agent/sampling.js';
@@ -1650,6 +1651,16 @@ export function App({
           const { output, note } = await runBang(command, runShellTool);
           shellNotesRef.current.push(note);
           pushBlock([infoLine(`${output}\n(the model sees this with your next message)`)]);
+        }
+      } else if (commandName(input) === '/copy') {
+        // E9: a reply to the clipboard - /copy is the last one, /copy 2 the one before.
+        pushBlock([userLine(input)]);
+        const n = Math.max(1, Number.parseInt(input.trim().split(/\s+/)[1] ?? '1', 10) || 1);
+        const reply = replyBack(loop.getMessages(), n);
+        if (reply === undefined) pushBlock([infoLine(n === 1 ? 'No reply to copy yet.' : `There is no reply ${n} back.`)]);
+        else {
+          const via = copyToClipboard(reply);
+          pushBlock([infoLine(via ? `Copied ${reply.length.toLocaleString()} characters (via ${via}).` : 'Could not reach a clipboard: no clip/pbcopy/wl-copy/xclip/xsel worked and this is not a terminal.')]);
         }
       } else if (commandName(input) === '/tips') {
         // E5: the start-of-session tip, on or off.

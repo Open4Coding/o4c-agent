@@ -79,6 +79,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Pick one of this project\'s plans from a list, then view it (summary or full, checklist last) or make it active - no LLM call.',
   },
   {
+    name: '/copy',
+    description: 'Copy the last reply to the clipboard - /copy 2 for the one before. Works over SSH in terminals that support OSC 52.',
+  },
+  {
     name: '/tips',
     description: 'Turn the start-of-session tip on or off, or list all the tips. Usage: /tips [on|off]',
   },
