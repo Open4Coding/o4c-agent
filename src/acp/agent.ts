@@ -1,6 +1,7 @@
 import { Readable, Writable } from 'node:stream';
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, type Agent } from '@agentclientprotocol/sdk';
 import type { AgentEvent, PolicyAnswer, RunOptions } from '../agent/loop.js';
+import { packageVersion } from '../packageRoot.js';
 import type { Tool } from '../tools/types.js';
 
 /**
@@ -76,7 +77,7 @@ export class O4cAcpAgent implements Agent {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: { loadSession: false, promptCapabilities: { image: false, audio: false, embeddedContext: true } },
       authMethods: [],
-      agentInfo: { name: this.deps.agentName ?? 'o4c', version: '0.0.1' },
+      agentInfo: { name: this.deps.agentName ?? 'o4c', version: packageVersion() },
     } as never;
   }
 

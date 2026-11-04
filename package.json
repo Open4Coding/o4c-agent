@@ -1,7 +1,7 @@
 {
   "name": "@open4coding/o4c-agent",
-  "version": "0.0.1",
-  "description": "o4c-agent - the open4coding programming harness: core agent loop, tool execution, CLI (o4c)",
+  "version": "0.1.0",
+  "description": "o4c - a terminal coding agent built for local models first (llama.cpp, Ollama, LM Studio, any OpenAI-compatible server), with Claude as an option",
   "type": "module",
   "bin": {
     "o4c": "./dist/cli.js"
@@ -51,5 +51,25 @@
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.15",
     "@xterm/headless": "6.0.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Open4Coding/o4c-agent.git"
+  },
+  "homepage": "https://github.com/Open4Coding/o4c-agent#readme",
+  "bugs": {
+    "url": "https://github.com/Open4Coding/o4c-agent/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "coding-agent",
+    "llm",
+    "llama.cpp",
+    "local-llm",
+    "cli",
+    "mcp",
+    "acp"
+  ]
 }

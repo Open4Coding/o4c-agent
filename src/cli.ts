@@ -45,6 +45,7 @@ import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
 import { runAcp } from './acp/agent.js';
 import { prepareSea } from './sea.js';
+import { packageVersion } from './packageRoot.js';
 import { checkForUpdate, describeUpdate, SECURE_UPDATE_REFUSAL } from './session/update.js';
 import { setUpdateSecureMode } from './session/updateState.js';
 import { classifyToolAccess } from './ui/modePolicy.js';
@@ -478,7 +479,6 @@ const program = new Command();
 program
   .name('o4c')
   .description('open4coding programming harness')
-  .version('0.0.1')
   .argument('[prompt...]', 'the task to ask the harness to perform; omit to start an interactive session')
   .option('-m, --model <model>', 'model to use', 'claude-opus-5')
   .option(
@@ -1506,6 +1506,9 @@ program
 await prepareSea();
 // `o4c acp` (plan 0006 H2) is the --acp flag, so it shares every startup step with the other modes.
 if (process.argv[2] === 'acp') process.argv.splice(2, 1, '--acp');
+// Here rather than on the chain above: in the single executable package.json exists only once
+// prepareSea() has unpacked it.
+program.version(packageVersion());
 if (process.argv[2] === 'eval' && ['run', 'diff', 'list'].includes(process.argv[3] ?? '')) {
   process.exitCode = await runEvalCli(process.argv.slice(3));
 } else {

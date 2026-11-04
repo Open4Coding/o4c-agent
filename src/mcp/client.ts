@@ -10,6 +10,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { McpServerConfig } from './serverConfig.js';
 import type { McpCallOptions, McpCallResult, McpToolDescriptor } from './toolProxy.js';
 import type { McpPromptDescriptor, McpPromptResult } from './promptCommands.js';
+import { packageVersion } from '../packageRoot.js';
 
 /**
  * One MCP client connection, and the two transports behind it.
@@ -21,7 +22,7 @@ import type { McpPromptDescriptor, McpPromptResult } from './promptCommands.js';
  */
 
 /** What o4c calls itself when it introduces itself to a server. */
-const CLIENT_INFO = { name: 'o4c-agent', version: '0.0.1' };
+const clientInfo = () => ({ name: 'o4c-agent', version: packageVersion() });
 
 /**
  * How long a server gets to complete the MCP handshake plus its first `tools/list`.
@@ -154,7 +155,7 @@ export async function connectServer(server: McpServerConfig): Promise<ConnectedS
 
   // G7: elicitation - the server may ask the user for input mid-call; see mcp/elicitation.ts.
   const makeClient = () => {
-    const c = new Client(CLIENT_INFO, { capabilities: { elicitation: { form: {}, url: {} } } });
+    const c = new Client(clientInfo(), { capabilities: { elicitation: { form: {}, url: {} } } });
     c.setRequestHandler(ElicitRequestSchema, async (request) => {
       const h = askUserHandler();
       return (await elicit(server.id, request.params as unknown as ElicitParams, h ? (q, o) => h(q, o) : undefined)) as never;
