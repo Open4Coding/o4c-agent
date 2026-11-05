@@ -19,6 +19,12 @@ does not get greener the second time. Save the full suite for the one gate immed
 commit, and skip even that when the change is confined to a single module whose own tests pass. If
 a test fails once and passes on retry, call it a flake and move on.
 
+## Dependencies
+
+Every version is pinned exact (`save-exact=true`). The one pre-release in the tree is the optional
+`@lydell/node-pty@1.2.0-beta.15` (the PTY tool); move it to a stable release when one ships, and
+re-check `src/test/pty.test.ts` on Windows and Linux when you do.
+
 ## Dropdown and picker rows
 
 Every dropdown / slash-choice window (`/set`, `/config`, `/mode`, `/resume`, the `/` palette, the session view

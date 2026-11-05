@@ -12,10 +12,18 @@ ask for.
 
 ## Install
 
-**Single executable** (Node included, nothing else to install): one file per OS, built with
-`npm run build:sea` (Node 26) - release builds will be attached to the GitHub releases.
+**Single executable** (Node included, nothing else to install): download `o4c-win32-x64.exe` or
+`o4c-linux-x64` from the [GitHub releases](https://github.com/Open4Coding/o4c-agent/releases)
+(`chmod +x` it on Linux; `SHA256SUMS.txt` is there to check the download). To build one yourself:
+`npm run build:sea` with Node 26.
 
-**From npm** (coming with the first release) or **from source**:
+**From npm:**
+
+```
+npm install -g @open4coding/o4c-agent
+```
+
+**From source:**
 
 ```
 git clone https://github.com/Open4Coding/o4c-agent
