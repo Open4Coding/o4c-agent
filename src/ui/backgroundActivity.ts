@@ -1,4 +1,5 @@
 import { jobStatus, listJobs, ownerPid, type JobRecord } from '../tools/jobs.js';
+import type { CodeGraphStatus } from '../graph/toolHook.js';
 
 /**
  * What o4c is doing that no spinner shows: the footer's `bg:` part (found 2026-11-07 on the VS
@@ -34,4 +35,22 @@ export function backgroundActivity(sources: BackgroundSources): string[] {
 export function ownJobs(): JobRecord[] {
   const me = ownerPid();
   return listJobs().filter((job) => job.ownerPid === me);
+}
+
+/** Printed when the session's first index pass starts (David's wording, 2026-11-07). */
+export const INDEX_START_LINE = '[code graph] running in background, indexing files (bg)';
+
+/** Printed when it ends: how many files the pass went through, and how long it took. */
+export function indexDoneLine(status: CodeGraphStatus): string {
+  if (status.phase === 'failed') return `[code graph] scan failed: ${status.lastError ?? 'unknown error'}`;
+  const run = status.lastRun;
+  const files = run ? run.indexed + run.unchanged : 0;
+  return `[code graph] completed scan, scanned ${files.toLocaleString('en-US')} file${files === 1 ? '' : 's'} (${hms(run?.elapsedMs ?? 0)})`;
+}
+
+/** A duration as hh:mm:ss. */
+export function hms(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
 }

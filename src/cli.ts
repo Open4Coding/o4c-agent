@@ -311,7 +311,9 @@ async function runRepl(
   }
   // Set only by spawnRestart, on the process it just spawned - cleared immediately so it doesn't
   // survive into anything this process itself spawns later.
-  if (process.env.O4C_FRESH_SCREEN === '1') {
+  // A restart of a running session (the per-turn reload, /clear, /set-sessionview) rather than a launch.
+  const relaunched = process.env.O4C_FRESH_SCREEN === '1';
+  if (relaunched) {
     delete process.env.O4C_FRESH_SCREEN;
     process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
   }
@@ -413,6 +415,7 @@ async function runRepl(
       },
       expandMcpPrompt: mcp?.expandPrompt,
       codeGraph: graph,
+      announceIndexing: !relaunched,
     }),
     {
       // Ink turns live rendering off whenever CI or CONTINUOUS_INTEGRATION is set (is-in-ci), even

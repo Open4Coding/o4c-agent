@@ -205,7 +205,7 @@ import { activeMemoryStores } from '../session/memories.js';
 import { parseLessons, recentTasks, reflectPrompt, REFLECT_SCHEMA } from '../session/reflect.js';
 import { reviewPrompt } from '../session/review.js';
 import type { CheckpointHooks } from '../session/checkpoints.js';
-import { backgroundActivity, ownJobs, type BackgroundSources } from './backgroundActivity.js';
+import { backgroundActivity, indexDoneLine, INDEX_START_LINE, ownJobs, type BackgroundSources } from './backgroundActivity.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -343,6 +343,12 @@ export interface AppProps {
   ) => Promise<{ readonly text: string; readonly notes: readonly string[] }>;
   /** The Code Graph, for `/datagraph`. Undefined when it is not running (untrusted project, tests). */
   codeGraph?: CodeGraphSession;
+  /**
+   * Say in the transcript when the session's first index pass starts and when it ends (David,
+   * 2026-11-07). Off for a restart of a running session: every per-turn reload runs a pass too,
+   * and two lines a turn about a pass that found nothing new would be noise.
+   */
+  announceIndexing?: boolean;
   /** `'local' | 'anthropic' | 'mock'` - display only, for the startup splash header. */
   provider: string;
   /** Only meaningful (and only shown) for the local provider - display only, for the startup
@@ -804,6 +810,7 @@ export function App({
   mcpExtra,
   expandMcpPrompt,
   codeGraph,
+  announceIndexing,
 }: AppProps) {
   const { exit } = useApp();
   // The model name and context size can change after launch: a server that was down at startup tells us both
@@ -1616,6 +1623,19 @@ export function App({
   const pushBlock = useCallback((lines: Line[]) => {
     dispatchTextWindow({ type: 'commit', lines });
   }, []);
+
+  // The session's first index pass, in the transcript: when it starts and when it is done.
+  useEffect(() => {
+    if (!codeGraph || !announceIndexing || codeGraph.component.status().phase !== 'building') return;
+    pushBlock([infoLine(INDEX_START_LINE)]);
+    let mounted = true;
+    void codeGraph.ready.then(() => {
+      if (mounted) pushBlock([infoLine(indexDoneLine(codeGraph.component.status()))]);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [codeGraph, announceIndexing, pushBlock]);
 
   // Ctrl+C: force-recover, not exit - revised per direct instruction 2026-09-26 ("I do not want
   // to exit the app just stop background processing, and get the text entry window working again

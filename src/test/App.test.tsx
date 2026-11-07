@@ -500,6 +500,7 @@ async function setup(opts: {
   mcpPromptCommands?: Promise<readonly CommandInfo[]>;
   // The code graph, for the footer's `bg:` part. Only the background-activity test passes it.
   codeGraph?: CodeGraphSession;
+  announceIndexing?: boolean;
   mcpStatusReport?: () => readonly string[];
   expandMcpPrompt?: (
     ref: McpPromptRef,
@@ -549,6 +550,7 @@ async function setup(opts: {
       usageStore: opts.usageStore,
       mcpPromptCommands: opts.mcpPromptCommands,
       codeGraph: opts.codeGraph,
+      announceIndexing: opts.announceIndexing,
       mcpStatusReport: opts.mcpStatusReport,
       expandMcpPrompt: opts.expandMcpPrompt,
     }),
@@ -4288,6 +4290,24 @@ test('after Esc cancels a picker (/setup), the next slash command still runs on 
 
 // Found 2026-11-07 on the VS Code source: a 5-minute first index pass and a 1.5-minute checkpoint
 // warm-up ran with nothing on screen, so an idle o4c could not be told from a busy one.
+test('a launch says when the first index pass starts and when it is done; a reload says nothing', async () => {
+  const run = { indexed: 3, unchanged: 1, removed: 0, outcomes: new Map(), failures: [], elapsedMs: 65_000 };
+  for (const announce of [true, false]) {
+    await withTempDir(async (dir) => {
+      let phase = 'building';
+      let finish!: () => void;
+      const ready = new Promise<void>((r) => (finish = r));
+      const codeGraph = { component: { status: () => ({ phase, lastRun: phase === 'ready' ? run : undefined }), isExposed: () => true }, ready } as unknown as CodeGraphSession;
+      const { lastFrame } = await setup({ dir, codeGraph, announceIndexing: announce });
+      assert.equal((lastFrame() ?? '').includes('[code graph] running in background, indexing files (bg)'), announce, lastFrame());
+      phase = 'ready';
+      finish();
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal((lastFrame() ?? '').includes('[code graph] completed scan, scanned 4 files (00:01:05)'), announce, lastFrame());
+    });
+  }
+});
+
 test('the footer shows background work as a trailing bg: part, and drops it when the work ends', async () => {
   await withTempDir(async (dir) => {
     let phase = 'building';

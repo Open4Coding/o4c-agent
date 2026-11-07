@@ -20,6 +20,11 @@ The three lines under the input box:
    finishes), `checkpoint prep` (the first-time setup for `/undo`, which keeps the first edit
    fast), and `N job(s)` (background shell jobs, see `/ps`). No `bg:` means nothing is running.
 
+When you start o4c in a project, the transcript also says when the code graph's first scan
+starts (`[code graph] running in background, indexing files (bg)`) and when it is done
+(`[code graph] completed scan, scanned 15,902 files (00:11:12)`: files gone through, and how long
+the scan took). The reload after each turn rescans too, but quietly - only `bg:` shows it.
+
 ## REPL commands
 
 - Type a message and press Enter to send it. Up/down arrow recalls previously submitted
