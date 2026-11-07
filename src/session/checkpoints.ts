@@ -84,7 +84,10 @@ export class ShadowGit {
 
   private git(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
     return new Promise((resolve) => {
-      const child = spawn('git', [`--git-dir=${this.gitDir}`, `--work-tree=${this.projectRoot}`, ...args], {
+      // `gc.auto=0`: a commit never packs inline. The first snapshot of the VS Code source left 25,000
+      // loose objects, and the commit then sat in `gc --auto` for ~20 s (found 2026-11-07); `warm()`
+      // runs that housekeeping instead, off the edit path.
+      const child = spawn('git', [`--git-dir=${this.gitDir}`, `--work-tree=${this.projectRoot}`, '-c', 'gc.auto=0', ...args], {
         cwd: this.projectRoot,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -160,12 +163,20 @@ export class ShadowGit {
   }
 
   /**
-   * Stages the work tree without committing, so the shadow index holds every file's hash and the
-   * next `add -A` only re-reads what changed. Started at session start; a failure here is left
-   * for the real snapshot to report.
+   * The expensive first-time work, done at session start instead of inside the first edit. Measured
+   * on the VS Code source: the first `add -A` 56 s, the first commit (every tree object) ~20 s, and
+   * git's housekeeping after it ~20 s; afterwards an add is 0.3 s and a commit 0.8 s. So: stage,
+   * make the repository's first commit if it has none (not a checkpoint - nothing records it), and
+   * pack loose objects when git thinks it is time. A failure here is left for the real snapshot.
    */
   warm(): Promise<void> {
-    return this.serial(() => this.stage()).catch(() => undefined);
+    return this.serial(async () => {
+      await this.stage();
+      if (!(await this.git(['rev-parse', '--verify', '--quiet', 'HEAD'])).ok) {
+        await this.git(['commit', '--quiet', '--allow-empty', '--no-verify', '-m', 'o4c checkpoint base']);
+      }
+      await this.git(['-c', 'gc.auto=6700', 'gc', '--auto', '--quiet']);
+    }).catch(() => undefined);
   }
 
   /** Commits the work tree as it is now; returns the commit id. */

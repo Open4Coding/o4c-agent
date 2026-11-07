@@ -88,6 +88,11 @@ test('a snapshot does not block the event loop, and a warm-up running alongside 
   writeFileSync(join(root, 'f0.txt'), 'changed\n');
   assert.match(await shadow.diffSince(commit), /f0\.txt/);
 
+  // The warm-up made the repository's first commit (all the tree objects - ~20 s on the VS Code
+  // source), so the first real snapshot sits on top of it rather than paying for it.
+  const shadowGit = (...args: string[]) => spawnSync('git', [`--git-dir=${shadow.gitDir}`, ...args], { encoding: 'utf-8' }).stdout.trim();
+  assert.equal(shadowGit('log', '-1', '--format=%s', `${commit}~1`), 'o4c checkpoint base');
+
   // A lock left by a killed git long ago is cleared rather than failing every snapshot after it.
   const lock = join(shadow.gitDir, 'index.lock');
   writeFileSync(lock, '');
