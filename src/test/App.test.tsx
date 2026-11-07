@@ -516,9 +516,11 @@ async function setup(opts: {
   // just records what App asked for.
   const restartCalls: Array<string | undefined> = [];
   const restartModes: Array<Mode | undefined> = [];
-  const restart = (resumeId?: string, mode?: Mode) => {
+  const restartFromConfig: boolean[] = [];
+  const restart = (resumeId?: string, mode?: Mode, fromConfig?: boolean) => {
     restartCalls.push(resumeId);
     restartModes.push(mode);
+    restartFromConfig.push(fromConfig === true);
   };
   const instance = render(
     React.createElement(App, {
@@ -557,7 +559,7 @@ async function setup(opts: {
   );
   liveInstances.push(instance);
   await tick();
-  return { ...instance, loop, store, runLogger, fullContextLogger, restartCalls, restartModes };
+  return { ...instance, loop, store, runLogger, fullContextLogger, restartCalls, restartModes, restartFromConfig };
 }
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -682,6 +684,26 @@ test('a command that throws shows the error and gives the input back', async () 
     // Not stuck: the next command runs instead of being queued behind a turn that never ended.
     await submit(stdin, '/keyboard nosuchos');
     await waitFor(() => anyFrameIncludes(frames, 'Usage: /keyboard [windows|mac|linux]'));
+  });
+});
+
+test('/endpoint <name> selects a saved endpoint and restarts from config; an unknown name changes nothing', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    await mkdir(configGlobalDir, { recursive: true });
+    await writeFile(
+      join(configGlobalDir, 'config.json'),
+      JSON.stringify({ provider: 'local', endpoints: { bedrock: { url: 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1', model: 'openai.gpt-oss-20b-1:0' } } }),
+      'utf-8',
+    );
+    const { stdin, frames, restartCalls, restartFromConfig } = await setup({ dir, configGlobalDir });
+    await submit(stdin, '/endpoint nosuch');
+    await waitFor(() => anyFrameIncludes(frames, 'No endpoint named "nosuch"'));
+    assert.equal(restartCalls.length, 0);
+    await submit(stdin, '/endpoint bedrock');
+    await waitFor(() => restartCalls.length === 1);
+    assert.deepEqual(restartFromConfig, [true], 'the new process reads the provider from config, not from this one');
+    assert.equal(JSON.parse(await readFile(join(configGlobalDir, 'config.json'), 'utf-8')).provider, 'bedrock');
   });
 });
 

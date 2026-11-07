@@ -126,6 +126,8 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help an
     '/set-pinnedcommands',
     '/update',
     '/setup',
+    '/endpoint',
+    '/endpoint-add',
     '/goal',
     '/hooks',
     '/set-blockgap',

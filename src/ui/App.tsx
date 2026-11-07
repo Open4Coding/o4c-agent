@@ -84,6 +84,7 @@ import {
   parseContextWindowType,
 } from './contextWindowSetting.js';
 import { formatError } from './formatError.js';
+import { checkEndpoint, describeEndpoint, ENDPOINTS_KEY, listModels, normalizeUrl, parseEndpoints, PRESETS, saveEndpoint, selectProvider, validName } from '../session/endpoints.js';
 import { formatConfirmMessage, previewLineCount } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
 import { formatMessage } from './formatMessage.js';
@@ -268,7 +269,7 @@ export interface AppProps {
    * state in-place - see cli.ts's spawnRestart for why. Call this, then exit() (as /exit does),
    * never both without the other: cli.ts only spawns the replacement after this process's Ink
    * instance has actually unmounted. */
-  restart: (resumeId?: string, mode?: Mode) => void;
+  restart: (resumeId?: string, mode?: Mode, fromConfig?: boolean) => void;
   /** The mode to start in - set by a restart so a reload keeps Auto/Manual instead of dropping back
    * to Manual. Undefined means the normal default (Manual). */
   initialMode?: Mode;
@@ -3370,8 +3371,113 @@ export function App({
             await saveSetup(configStore, choice);
             pushBlock([infoLine(`Works (${check.detail}). Saved to your global config - restarting o4c with it now.`)]);
             await saveSessionNow().catch(() => undefined);
-            restart(currentSessionIdRef.current, modeRef.current);
+            // From config: the provider just saved, not the one this process was started with.
+            restart(currentSessionIdRef.current, modeRef.current, true);
+            setTimeout(() => exit(), 0);
           }
+        }
+      } else if (commandName(input) === '/endpoint-add') {
+        // A hosted OpenAI-compatible API (Amazon Bedrock, OpenAI, OpenRouter, any other): where, which
+        // model, its key, one real tool call - then saved to the global config, key in credentials.
+        pushBlock([userLine(input)]);
+        const ask = askUserHandler();
+        const typed = async (q: string): Promise<string | undefined> => ((ask ? await ask(q, []) : undefined) ?? '').trim() || undefined;
+        const presetId = await pickChoice('Which kind of endpoint? (↑/↓, Enter, Esc to cancel)', PRESETS.map((p) => ({ key: p.id, label: p.label })));
+        const preset = PRESETS.find((p) => p.id === presetId);
+        let url: string | undefined;
+        if (preset?.regions && preset.url) {
+          const region = await pickChoice('Region (↑/↓, Enter, Esc to cancel):', [
+            ...preset.regions.map((r) => ({ key: r, label: r })),
+            { key: '', label: 'Another region - type it' },
+          ]);
+          const chosen = region === '' ? await typed('The region (e.g. us-east-1):') : region;
+          if (chosen) url = preset.url(chosen);
+        } else if (preset?.url) {
+          url = preset.url('');
+        } else if (preset) {
+          url = await typed('Its base URL - the part before /chat/completions (e.g. https://example.com/v1):');
+          if (url && !/^https?:\/\//.test(url)) {
+            pushBlock([infoLine('That is not an http:// or https:// URL - nothing changed.')]);
+            url = undefined;
+          }
+        }
+        const apiKey = preset && url ? await typed(`${preset.keyHelp}. Paste it (saved in your global ~/.o4c/config.json credentials, never in a project; Enter for none):`) : undefined;
+        if (apiKey) registerSecret(apiKey);
+        let model: string | undefined;
+        if (preset && url) {
+          const listed = preset.listsModels ? await listModels(url, apiKey) : undefined;
+          const offered = (listed ?? [...preset.models]).slice(0, 40);
+          const picked = offered.length
+            ? await pickChoice(`Model${listed ? ` (${listed.length} from the endpoint${listed.length > 40 ? ', first 40' : ''})` : ''} (↑/↓, Enter, Esc to cancel):`, [
+                ...offered.map((m) => ({ key: `m:${m}`, label: m })),
+                { key: 'type', label: 'Another model - type its id' },
+              ])
+            : 'type';
+          model = picked === 'type' ? await typed('The model id:') : picked?.slice(2);
+        }
+        const existing = parseEndpoints(await configStore.get(ENDPOINTS_KEY).catch(() => undefined)).endpoints;
+        let name: string | undefined;
+        if (preset && url && model) {
+          const suggested = existing.some((e) => e.name === preset.name) ? `${preset.name}-${existing.length + 1}` : preset.name;
+          name = (await typed(`A name for it - you switch with /endpoint <name> (Enter for "${suggested}"):`)) ?? suggested;
+          const bad = validName(name);
+          if (bad) {
+            pushBlock([infoLine(`${bad} Nothing changed.`)]);
+            name = undefined;
+          }
+        }
+        if (!preset || !url || !model || !name) {
+          pushBlock([infoLine('No endpoint added. /endpoint-add starts again.')]);
+        } else {
+          const endpoint = { name, url: normalizeUrl(url), model };
+          pushBlock([infoLine(`Checking ${describeEndpoint({ ...endpoint, baseUrl: url })} with one real tool call...`)]);
+          const check = await checkEndpoint(endpoint, apiKey);
+          if (!check.ok) {
+            pushBlock([infoLine(`That did not work: ${check.detail}\nNothing was saved. Check the key, the model id and the region, and run /endpoint-add again.`)]);
+          } else {
+            const now = await pickChoice(`Works (${check.detail}). Use "${name}" now?`, [
+              { key: 'yes', label: `yes - save it and restart o4c on ${name}` },
+              { key: 'no', label: `no - save it; /endpoint ${name} switches later` },
+            ]);
+            await saveEndpoint(configStore, endpoint, apiKey, now === 'yes');
+            if (now === 'yes') {
+              pushBlock([infoLine(`Saved "${name}" - restarting o4c on it now.`)]);
+              await saveSessionNow().catch(() => undefined);
+              restart(currentSessionIdRef.current, modeRef.current, true);
+              setTimeout(() => exit(), 0);
+            } else {
+              pushBlock([infoLine(`Saved "${name}". /endpoint ${name} switches to it.`)]);
+            }
+          }
+        }
+      } else if (commandName(input) === '/endpoint') {
+        // Which provider o4c runs on: local, Anthropic, or a saved endpoint. A switch restarts o4c.
+        pushBlock([userLine(input)]);
+        const endpoints = parseEndpoints(await configStore.get(ENDPOINTS_KEY).catch(() => undefined)).endpoints;
+        const arg = input.slice(commandName(input).length).trim();
+        const mark = (n: string) => (n === provider ? ' (in use)' : '');
+        const choice = arg
+          ? arg
+          : await pickChoice('Run o4c on (↑/↓, Enter, Esc to cancel):', [
+              { key: 'local', label: `local - your own model server${mark('local')}` },
+              { key: 'anthropic', label: `anthropic - the Claude API${mark('anthropic')}` },
+              ...endpoints.map((e) => ({ key: e.name, label: `${describeEndpoint(e)}${mark(e.name)}` })),
+              { key: '+add', label: 'Add an endpoint (Amazon Bedrock, OpenAI, OpenRouter, any OpenAI-compatible API)' },
+            ]);
+        if (choice === '+add') {
+          await processTurn('/endpoint-add');
+        } else if (!choice) {
+          pushBlock([infoLine('Provider unchanged.')]);
+        } else if (choice !== 'local' && choice !== 'anthropic' && !endpoints.some((e) => e.name === choice)) {
+          pushBlock([{ kind: 'error', text: `No endpoint named "${choice}". /endpoint lists them; /endpoint-add adds one.` }]);
+        } else if (choice === provider) {
+          pushBlock([infoLine(`Already on ${choice}.`)]);
+        } else {
+          await selectProvider(configStore, choice);
+          pushBlock([infoLine(`Switching to ${choice} - restarting o4c.`)]);
+          await saveSessionNow().catch(() => undefined);
+          restart(currentSessionIdRef.current, modeRef.current, true);
+          setTimeout(() => exit(), 0);
         }
       } else if (commandName(input) === '/hooks') {
         // G3: the configured hooks and any problems in them.

@@ -24,6 +24,7 @@ import { registerSecret, setPassKeysToShell } from './session/redact.js';
 import { setPinnedCommands } from './ui/slashCommand.js';
 import { SHOW_TIPS_KEY, TIP_COUNTER_KEY, tipFor } from './ui/tips.js';
 import { defaultProvider } from './session/providerDefault.js';
+import { ENDPOINTS_KEY, endpointFor, HOSTED_DEFAULT_CONTEXT_WINDOW, parseEndpoints } from './session/endpoints.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
 import { setShellTimeoutDefault } from './tools/runShell.js';
@@ -236,8 +237,9 @@ function spawnRestart(
   resumeId: string | undefined,
   mode: string | undefined,
   window: string | undefined,
+  fromConfig?: boolean,
 ): number {
-  const args = buildRestartArgs({ ...opts, resumeId, mode, window });
+  const args = buildRestartArgs({ ...opts, resumeId, mode, window, fromConfig });
   const result = spawnSync(process.execPath, [process.argv[1], ...args], {
     stdio: 'inherit',
     env: { ...process.env, O4C_FRESH_SCREEN: '1' },
@@ -358,13 +360,14 @@ async function runRepl(
     });
   }
   let pendingRestart:
-    | { resumeId: string | undefined; mode: Mode | undefined; window: string | undefined }
+    | { resumeId: string | undefined; mode: Mode | undefined; window: string | undefined; fromConfig?: boolean }
     | undefined;
-  const restart = (resumeId?: string, mode?: Mode) => {
+  const restart = (resumeId?: string, mode?: Mode, fromConfig?: boolean) => {
     // The window setting is read from the loop rather than passed in, because it lives there and
     // every `restart()` caller would otherwise have to remember to forward it - which is exactly
     // the kind of thing that gets forgotten and then silently turns the feature off.
-    pendingRestart = { resumeId, mode, window: windowArgFor(loop.slidingWindowSettings()) };
+    // Sticky: a later restart in the same process (the end-of-turn reload) must not undo a provider change.
+    pendingRestart = { resumeId, mode, window: windowArgFor(loop.slidingWindowSettings()), fromConfig: fromConfig || pendingRestart?.fromConfig };
   };
   const { waitUntilExit } = render(
     React.createElement(App, {
@@ -463,13 +466,14 @@ async function runRepl(
         resumeId: pendingRestart.resumeId,
         mode: pendingRestart.mode,
         window: pendingRestart.window,
+        fromConfig: pendingRestart.fromConfig,
       });
       recordLifecycle(lifecycleDir, 'handoff', { via: 'supervisor', args: handoffArgs });
       writeHandoff(handoffFile, handoffArgs);
       process.exit(RESTART_EXIT_CODE);
     }
     recordLifecycle(lifecycleDir, 'handoff', { via: 'nested' });
-    process.exit(spawnRestart(opts, pendingRestart.resumeId, pendingRestart.mode, pendingRestart.window));
+    process.exit(spawnRestart(opts, pendingRestart.resumeId, pendingRestart.mode, pendingRestart.window, pendingRestart.fromConfig));
   }
   // Without an explicit exit, a lingering open handle (most likely a keep-alive socket from an
   // in-flight or just-finished fetch to the local model server) can keep the event loop alive
@@ -652,6 +656,10 @@ program
       provider: program.getOptionValueSource('provider') !== 'default' ? opts.provider : defaultProvider(resolvedConfig),
       baseUrl: configOr('baseUrl', opts.baseUrl),
     };
+    // A named endpoint (/endpoint-add) is selected like a provider; its own model unless -m says otherwise.
+    const endpointSetup = parseEndpoints(resolvedConfig[ENDPOINTS_KEY]);
+    const endpoint = endpointFor(resolvedConfig, opts.provider);
+    if (endpoint && program.getOptionValueSource('model') === 'default') opts = { ...opts, model: endpoint.model };
     // No CLI flag for this on purpose (same reasoning as O4C_LOCAL_API_KEY - keeps it out of
     // process listings). config.json read here on every launch/restart, so unlike model/provider/
     // baseUrl above it's never frozen into spawnRestart's argv - a key rotated in config.local.json
@@ -848,9 +856,10 @@ program
     const registryModel = modelEntry(opts.model);
     const contextWindow =
       configuredContextWindow ??
+      endpoint?.contextWindow ??
       registryModel?.contextWindow ??
       autoContextWindow ??
-      (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : undefined);
+      (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : endpoint ? HOSTED_DEFAULT_CONTEXT_WINDOW : undefined);
     // E18: /config-editor's choice, unless O4C_EDITOR is already set in the environment.
     if (!process.env.O4C_EDITOR && typeof resolvedConfig[EDITOR_CONFIG_KEY] === 'string' && resolvedConfig[EDITOR_CONFIG_KEY]) {
       process.env.O4C_EDITOR = resolvedConfig[EDITOR_CONFIG_KEY] as string;
@@ -868,7 +877,7 @@ program
           last: await latestSession(new SessionStore(sessionsDirFor(projectRoot))).catch(() => undefined),
         });
     // A restore that just ran (E20) is reported even on a resume - the restart that applied it is one.
-    const startup = [restoreNote, ...credentials.problems, ...hookProblems().map((p) => `config.json hooks: ${p}`), ...customModeSetup.problems.map((p) => `config.json ${p}`), health].filter(Boolean).join('\n') || undefined;
+    const startup = [restoreNote, ...credentials.problems, ...endpointSetup.problems, ...hookProblems().map((p) => `config.json hooks: ${p}`), ...customModeSetup.problems.map((p) => `config.json ${p}`), health].filter(Boolean).join('\n') || undefined;
     // Half the configured context window, not the flat 4096 both providers used to hardcode -
     // that flat cap was unrelated to the model's real budget and silently truncated any turn
     // whose <think> reasoning alone ran past it (real bug, found via direct reproduction against
@@ -920,8 +929,20 @@ program
         process.exitCode = 1;
         return;
       }
+    } else if (endpoint) {
+      // A hosted OpenAI-compatible API: the same streaming client, standard fields only, its own key.
+      provider = new LocalProvider({
+        hosted: endpoint.name,
+        baseUrl: endpoint.baseUrl,
+        apiKey: credentials.values[endpoint.name],
+        modelId: opts.model,
+        maxTokens: providerMaxTokens,
+        connectTimeoutMs,
+        idleTimeoutMs,
+      });
     } else {
-      console.error(`Unknown provider "${opts.provider}". Use "anthropic", "local", or "mock".`);
+      const names = endpointSetup.endpoints.map((e) => `"${e.name}"`);
+      console.error(`Unknown provider "${opts.provider}". Use "anthropic", "local", "mock"${names.length ? `, or an endpoint: ${names.join(', ')}` : ', or add an endpoint with /endpoint-add'}.`);
       process.exitCode = 1;
       return;
     }

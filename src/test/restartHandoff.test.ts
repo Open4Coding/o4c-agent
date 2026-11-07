@@ -117,3 +117,7 @@ test('the supervisor stops instead of looping when a restart is requested withou
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a restart after a provider change leaves model, provider and server to config', () => {
+  assert.deepEqual(buildRestartArgs({ model: 'm', provider: 'local', baseUrl: 'http://x', resumeId: 's1', fromConfig: true }), ['--resume', 's1']);
+});

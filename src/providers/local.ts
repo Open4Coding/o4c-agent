@@ -316,7 +316,18 @@ export async function fetchLocalContextWindow(baseUrl: string, apiKey?: string):
 }
 
 export class LocalProvider implements LLMProvider {
-  readonly name = 'local';
+  readonly name: string;
+  /**
+   * A hosted OpenAI-compatible endpoint (session/endpoints.ts) rather than a llama.cpp-style
+   * server: the request carries only standard fields - a strict API rejects llama-server's
+   * extensions (`id_slot`, `return_progress`, `reasoning_control`, `grammar`, the reasoning
+   * budget) - and names its model, and the llama-only side calls (token count, slot status, end
+   * reasoning) are not made. Its key is only ever its own: no O4C_LOCAL_API_KEY fallback, which
+   * would hand the local server's key to a third party.
+   */
+  private readonly hosted: boolean;
+  /** How errors name the server: "Local server", or the endpoint by name. */
+  private readonly label: string;
   private baseUrl: string;
   private connectTimeoutMs: number;
   private idleTimeoutMs: number;
@@ -362,18 +373,25 @@ export class LocalProvider implements LLMProvider {
       sampling?: unknown;
       /** Server slots from the startup probe (`total_slots`); 2+ enables slot pinning (A19). */
       slots?: number;
+      /** The endpoint's name, for a hosted OpenAI-compatible API (see `hosted`). */
+      hosted?: string;
     } = {},
   ) {
+    this.hosted = options.hosted !== undefined;
+    this.name = options.hosted ?? 'local';
+    this.label = options.hosted !== undefined ? `Endpoint "${options.hosted}"` : 'Local server';
     this.setSlots(options.slots);
     this.modelId = options.modelId;
     this.samplingConfig = options.sampling;
-    this.reasoningReplay = options.reasoningReplay ?? 'all';
+    // A hosted API gets no reasoning back: `reasoning_content` on an assistant message is a
+    // llama-server extension a strict API may refuse.
+    this.reasoningReplay = this.hosted ? 'none' : (options.reasoningReplay ?? 'all');
     this.reasoningBudgetTokens = options.reasoningBudgetTokens;
     this.thinkCaps = options.thinkCaps ?? DEFAULT_THINK_CAPS;
     this.baseUrl = options.baseUrl ?? 'http://localhost:8080';
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-    this.apiKey = options.apiKey ?? process.env.O4C_LOCAL_API_KEY;
+    this.apiKey = this.hosted ? options.apiKey : (options.apiKey ?? process.env.O4C_LOCAL_API_KEY);
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
   }
 
@@ -395,12 +413,32 @@ export class LocalProvider implements LLMProvider {
     };
   }
 
+  /** The whole request for a hosted endpoint: standard OpenAI Chat Completions fields only. */
+  private async hostedBody(request: CompletionRequest): Promise<Record<string, unknown>> {
+    const tools = request.tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+    }));
+    return {
+      model: this.modelId,
+      messages: await toOpenAIMessages(request.systemPrompt, request.messages, this.reasoningReplay),
+      // An empty list is a 400 on OpenAI's own API; no tools is said by leaving it out.
+      ...(tools.length ? { tools } : {}),
+      max_tokens: request.maxTokens ?? this.maxTokens,
+      ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
+      ...(request.responseSchema ? { response_format: { type: 'json_schema', json_schema: { name: 'answer', schema: request.responseSchema } } } : {}),
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+  }
+
   /**
    * The exact prompt size of `request` as the server would render it (plan 0006 A14), from
    * llama-server's `/v1/chat/completions/input_tokens` - no slot needed, answered in ~25 ms.
    * Undefined when the server cannot say; callers fall back to their estimate.
    */
   async countTokens(request: CompletionRequest): Promise<number | undefined> {
+    if (this.hosted) return undefined;
     try {
       const response = await fetch(`${this.baseUrl}/v1/chat/completions/input_tokens`, {
         method: 'POST',
@@ -450,7 +488,7 @@ export class LocalProvider implements LLMProvider {
 
   async endReasoning(): Promise<boolean> {
     const id = this.liveCompletionId;
-    if (!id) return false;
+    if (!id || this.hosted) return false;
     try {
       const response = await fetch(`${this.baseUrl}/v1/chat/completions/control`, {
         method: 'POST',
@@ -467,6 +505,7 @@ export class LocalProvider implements LLMProvider {
   /** Whether any of the server's slots is processing a request right now (`GET /slots`). False
    * whenever the answer is unknown - the caller only uses it to word a status line. */
   private async slotBusy(): Promise<boolean> {
+    if (this.hosted) return false;
     try {
       const response = await fetch(`${this.baseUrl}/slots`, {
         headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {},
@@ -527,7 +566,7 @@ export class LocalProvider implements LLMProvider {
             connectController.abort(
               Object.assign(
                 new Error(
-                  `Local server did not respond within ${Math.round(this.connectTimeoutMs / 1000)}s - it may be busy with another request, or the model may be stuck generating. Try again, or check the local server.`,
+                  `${this.label} did not respond within ${Math.round(this.connectTimeoutMs / 1000)}s - it may be busy with another request, or the model may be stuck generating. Try again, or check the ${this.hosted ? 'endpoint' : 'local server'}.`,
                 ),
                 { name: 'TimeoutError' },
               ),
@@ -562,7 +601,7 @@ export class LocalProvider implements LLMProvider {
           'Content-Type': 'application/json',
           ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
         },
-        body: JSON.stringify({
+        body: JSON.stringify(this.hosted ? await this.hostedBody(request) : {
           ...(await this.promptBody(request)),
           // Per-request override preferred when given - see CompletionRequest.maxTokens's own
           // doc comment for the exact mid-generation truncation bug this closes.
@@ -593,7 +632,7 @@ export class LocalProvider implements LLMProvider {
       // (the server answered the connection but not the request) keep their own handling.
       if (busyTimer) clearTimeout(busyTimer);
       if (request.signal?.aborted || !isUnreachable(err)) throw err;
-      throw new ServerUnavailableError(`The local server at ${this.baseUrl} is not reachable.`, false);
+      throw new ServerUnavailableError(`${this.hosted ? this.label : 'The local server'} at ${this.baseUrl} is not reachable.`, false);
     } finally {
       // Whether fetch resolved, rejected, or was aborted - either way this timer must never fire
       // again after this point (see connectController's own comment for why). A TimeoutError
@@ -605,8 +644,10 @@ export class LocalProvider implements LLMProvider {
       if (response.status === 401) {
         throw new Error(
           this.apiKey
-            ? `Local server rejected the API key (401) - it may have changed or been rotated on the server.`
-            : `Local server requires an API key (401) - set the O4C_LOCAL_API_KEY environment variable.`,
+            ? `${this.label} rejected the API key (401) - it may have changed or been rotated on the server.`
+            : this.hosted
+              ? `${this.label} requires an API key (401) - run /endpoint-add again to give it one.`
+              : `Local server requires an API key (401) - set the O4C_LOCAL_API_KEY environment variable.`,
         );
       }
       const body = await response.text();
@@ -614,11 +655,11 @@ export class LocalProvider implements LLMProvider {
         throw new ServerUnavailableError('The local server is still loading the model.', true);
       }
       // F1: typed, so RetryingProvider can tell a 429/5xx (worth another try) from a bad request.
-      throw new ProviderHttpError(`Local server error (status ${response.status}): ${body}`, response.status, parseRetryAfter(response.headers.get('retry-after')));
+      throw new ProviderHttpError(`${this.label} error (status ${response.status}): ${body}`, response.status, parseRetryAfter(response.headers.get('retry-after')));
     }
 
     if (!response.body) {
-      throw new Error('Local server returned no response body to stream from.');
+      throw new Error(`${this.label} returned no response body to stream from.`);
     }
 
     // Real generation happens here, not in the fetch() above - a big turn on a large context can

@@ -21,11 +21,17 @@ export interface RestartRequest {
    * still protecting itself.
    */
   window?: string;
+  /**
+   * The model, provider and server come from config.json, not from this process: set by a restart
+   * that follows a change to them (`/setup`, `/endpoint`). Carried on the command line they would
+   * win over the config just written, and the new process would come back on the old provider.
+   */
+  fromConfig?: boolean;
 }
 
 /** The argv (after the script path) a restarted o4c is launched with. */
 export function buildRestartArgs(request: RestartRequest): string[] {
-  const args = ['-m', request.model, '-p', request.provider, '--base-url', request.baseUrl];
+  const args = request.fromConfig ? [] : ['-m', request.model, '-p', request.provider, '--base-url', request.baseUrl];
   if (request.image) args.push('--image', request.image);
   if (request.resumeId) args.push('--resume', request.resumeId);
   if (request.mode) args.push('--mode', request.mode);

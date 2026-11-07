@@ -277,3 +277,49 @@ test('slot pinning (plan 0006 A19): main to slot 0, side calls to slot 1, only o
   await withMockedFetch(() => okResponse(), () => one.complete({ ...baseRequest, purpose: 'side' }));
   assert.equal('id_slot' in capturedBody(), false);
 });
+
+test('a hosted endpoint gets standard fields only: its model, no llama-server extensions, no empty tools list', async () => {
+  const provider = new LocalProvider({ hosted: 'bedrock', modelId: 'openai.gpt-oss-120b-1:0', apiKey: 'k', slots: 2, reasoningBudgetTokens: 500 });
+  await withMockedFetch(
+    () => okResponse(),
+    () => provider.complete({ ...baseRequest, onToken: () => {}, onPrefillProgress: () => {}, grammar: 'root ::= "x"', purpose: 'side' }),
+  );
+  const body = capturedBody();
+  assert.equal(body.model, 'openai.gpt-oss-120b-1:0');
+  for (const llamaOnly of ['id_slot', 'return_progress', 'reasoning_control', 'grammar', 'reasoning_budget_tokens', 'chat_template_kwargs', 'tools']) {
+    assert.equal(llamaOnly in body, false, llamaOnly);
+  }
+  assert.equal(body.stream, true);
+  assert.equal(provider.name, 'bedrock');
+});
+
+test('a hosted endpoint never borrows O4C_LOCAL_API_KEY, and says which endpoint failed', async () => {
+  const saved = process.env.O4C_LOCAL_API_KEY;
+  process.env.O4C_LOCAL_API_KEY = 'the-local-key';
+  try {
+    const provider = new LocalProvider({ hosted: 'openai', modelId: 'm' });
+    await assert.rejects(
+      withMockedFetch(() => new Response('no', { status: 401 }), () => provider.complete(baseRequest)),
+      /Endpoint "openai" requires an API key \(401\) - run \/endpoint-add/,
+    );
+    assert.equal('Authorization' in capturedHeaders(), false);
+    // The local server still gets it.
+    await withMockedFetch(() => okResponse(), () => new LocalProvider({}).complete(baseRequest));
+    assert.equal(capturedHeaders().Authorization, 'Bearer the-local-key');
+  } finally {
+    if (saved === undefined) delete process.env.O4C_LOCAL_API_KEY;
+    else process.env.O4C_LOCAL_API_KEY = saved;
+  }
+});
+
+test('a hosted endpoint makes no llama-only side calls', async () => {
+  let calls = 0;
+  const provider = new LocalProvider({ hosted: 'x', modelId: 'm' });
+  const n = await withMockedFetch(() => {
+    calls++;
+    return okResponse();
+  }, () => provider.countTokens(baseRequest));
+  assert.equal(n, undefined);
+  assert.equal(await provider.endReasoning(), false);
+  assert.equal(calls, 0);
+});

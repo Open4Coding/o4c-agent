@@ -496,6 +496,14 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Set up the model o4c uses: finds local servers (llama.cpp, Ollama, LM Studio), asks for a key if needed, checks one real tool call, saves it. Runs by itself on first start.',
   },
   {
+    name: '/endpoint',
+    description: 'Which model service o4c runs on: local, Anthropic, or an endpoint you added. Switching restarts o4c. Usage: /endpoint [name]',
+  },
+  {
+    name: '/endpoint-add',
+    description: 'Add a hosted model API: Amazon Bedrock, OpenAI, OpenRouter, or any OpenAI-compatible URL. Asks for the region, key and model, checks one real tool call, saves it.',
+  },
+  {
     name: '/goal',
     description: 'Set a goal o4c keeps working toward until it is verified (goalVerifyCommand, or the model replying GOAL MET) or a turn budget is spent. Usage: /goal [budget N] <goal> | /goal | /goal off',
   },

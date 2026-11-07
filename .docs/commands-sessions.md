@@ -183,6 +183,36 @@ Find a model server (llama.cpp on 8080, Ollama on 11434, LM Studio on 1234, and 
 for its key if it wants one, check one real tool call, and save it in the global config. Runs by itself
 the first time o4c starts.
 
+## `/endpoint-add`
+
+Add a hosted model API that speaks the OpenAI Chat Completions protocol:
+
+- **Amazon Bedrock**: `bedrock-runtime` (AWS's recommended endpoint) or `bedrock-mantle` (for models
+  runtime does not serve), in the region you pick. It needs an Amazon Bedrock API key (Bedrock console >
+  API keys). Runtime has no models list, so o4c offers the gpt-oss models and lets you type any other id.
+- **OpenAI**, **OpenRouter**, or **any other** OpenAI-compatible URL.
+
+o4c asks for the key (saved in your global `~/.o4c/config.json` credentials, never in a project), the
+model and a name, then checks one real tool call before saving anything. The endpoint is kept in the
+global config:
+
+```json
+"endpoints": { "bedrock": { "url": "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1", "model": "openai.gpt-oss-120b-1:0" } }
+```
+
+Optional `"contextWindow"` per endpoint; without it o4c assumes 128,000 tokens unless the models
+registry knows the model. An endpoint gets only standard request fields - the llama.cpp extras o4c uses
+with a local server (slot pinning, prefill progress, ending thinking early, exact token counts) are off.
+
+GitHub Copilot is not offered: GitHub Models, its key-based API, was retired on 2026-07-30, and
+Copilot's own chat endpoint is not open to other clients.
+
+## `/endpoint [name]`
+
+Which model service o4c runs on: `local`, `anthropic`, or an endpoint you added. Picking one saves it as
+`provider` in the global config and restarts o4c on it. `-p <name>` on the command line selects an
+endpoint for one run.
+
 ## `/exit` (alias `/quit`)
 
 End the session. It is saved and can be resumed.
