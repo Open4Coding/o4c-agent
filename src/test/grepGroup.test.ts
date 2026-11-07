@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { grepTool } from '../tools/grep.js';
+import { clipMatchLine, grepTool, MAX_LINE_CHARS } from '../tools/grep.js';
 import { groupGrepByDefinition } from '../tools/grepGroup.js';
 
 /** Plan 0006 B13: grep matches grouped by enclosing definition; broad searches lead with counts. */
@@ -65,4 +65,30 @@ test('a broad search leads with per-file counts and shows only the first lines',
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('a huge matching line is clipped to the part around the match, not returned whole', async () => {
+  // Found 2026-11-06 on the VS Code source: a 1.38 MB single-line test-data file put the whole
+  // line into a grep result (1,380,390 chars for 8 matches).
+  const dir = await mkdtemp(join(tmpdir(), 'o4c-grepclip-'));
+  try {
+    const huge = 'x'.repeat(500_000) + 'needleFn(1)' + 'y'.repeat(500_000);
+    await writeFile(join(dir, 'data.ts'), `${huge}\n`);
+    await writeFile(join(dir, 'real.md'), 'call needleFn here\n');
+    const out = await grepTool.execute({ pattern: 'needleFn', path: dir });
+    assert.ok(out.length < 1000, `result is ${out.length} chars`);
+    assert.match(out, /…x+needleFn\(1\)y+… \[line is 1,000,011 chars, clipped\]/);
+    assert.match(out, /real\.md:1: call needleFn here/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('clipMatchLine keeps short lines whole and clips at either end only where it cut', () => {
+  const short = 'a'.repeat(MAX_LINE_CHARS);
+  assert.equal(clipMatchLine(short, /a/), short);
+  const atStart = 'hit' + 'z'.repeat(1000);
+  const clipped = clipMatchLine(atStart, /hit/);
+  assert.ok(clipped.startsWith('hitz'), 'no leading … when the window starts at 0');
+  assert.match(clipped, /z… \[line is 1,003 chars, clipped\]$/);
 });

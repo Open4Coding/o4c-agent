@@ -34,6 +34,9 @@ const SIGNAL = new RegExp(
   ].join('|'),
   'i',
 );
+/** A line longer than this is clipped to its first `CLIPPED_LINE_HEAD` chars before anything else (step 0). */
+const MAX_KEPT_LINE = 2000;
+const CLIPPED_LINE_HEAD = 300;
 const CONTEXT_BEFORE = 1;
 const CONTEXT_AFTER = 2;
 
@@ -83,7 +86,28 @@ function fit(lines: readonly string[], budget: number, fromEnd = false): string[
 
 export function distillToolOutput(text: string, maxChars: number, spillPath?: string): TruncatedToolOutput | undefined {
   if (text.length <= maxChars) return undefined;
-  const lines = text.split('\n');
+  const rawLines = text.split('\n');
+
+  // 0. A few overlong lines are often the whole problem: a minified bundle or a one-line data file
+  // among ordinary results (found 2026-11-06: one 1.38 MB line in an 8-hit grep, which step 2 then
+  // treated as a log and kept "lines that look like errors"). Clip those lines first; if that
+  // alone fits, every ordinary line is kept as it was.
+  // Only when there are ordinary lines to save: output that is nothing but huge lines keeps more
+  // of itself through the plain head+tail cut than through 300 chars a line.
+  const overlongCount = rawLines.filter((l) => l.length > MAX_KEPT_LINE).length;
+  const overlong = overlongCount < rawLines.filter((l) => l.trim() !== '').length ? overlongCount : 0;
+  const lines = overlong
+    ? rawLines.map((l, i) =>
+        l.length > MAX_KEPT_LINE ? `${l.slice(0, CLIPPED_LINE_HEAD)}… [line ${i + 1}: ${l.length.toLocaleString()} chars, clipped]` : l,
+      )
+    : rawLines;
+  if (overlong) {
+    const clipped = lines.join('\n');
+    const head = marker(text, `${overlong} overlong line(s) clipped`, spillPath);
+    if (clipped.length + head.length + 1 <= maxChars) {
+      return { text: `${head}\n${clipped}`, truncated: true, originalChars: text.length };
+    }
+  }
   // Few, long lines (a minified file, one huge JSON blob) have no shape to work with, and testing a
   // multi-megabyte line against SIGNAL's patterns would backtrack for minutes.
   if (lines.length < MIN_LINES) return undefined;

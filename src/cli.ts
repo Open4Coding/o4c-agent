@@ -1270,6 +1270,10 @@ program
     }
 
     if (!prompt) {
+      // Fill the checkpoint index in the background now, so the first edit's snapshot does not wait
+      // for a whole-tree `git add` (1m42s on the VS Code source). Interactive only: in one-shot mode
+      // the running git would keep the process alive after the answer is printed.
+      if (checkpointHooks) void checkpointHooks.shadow.warm();
       const sessionStore = new SessionStore(sessionsDirFor(projectRoot), sessionsToSave);
       // The project's lifetime token count, for the footer's token line. Loaded with the session
       // id being resumed (if any) so a per-turn reload picks this session's subtotal back up

@@ -42,6 +42,23 @@ const BROAD_LINES_SHOWN = 40;
 const BROAD_FILES_SHOWN = 30;
 /** Matches counted (not kept) before even the counting stops. */
 const MAX_COUNTED = 5000;
+/** A matching line longer than this is shown as the part around the match (ripgrep's --max-columns idea). */
+export const MAX_LINE_CHARS = 300;
+const CLIP_CONTEXT = 120;
+
+/**
+ * The line as shown in a result: whole when it is short, otherwise the match with `CLIP_CONTEXT`
+ * characters either side and the full length said. Found 2026-11-06 on the VS Code source: one
+ * hit was a 1.38 MB single-line test-data file, and the whole line went into the result.
+ */
+export function clipMatchLine(line: string, regex: RegExp): string {
+  if (line.length <= MAX_LINE_CHARS) return line;
+  const at = Math.max(0, line.search(regex));
+  const matched = line.slice(at).match(regex)?.[0].length ?? 0;
+  const start = Math.max(0, at - CLIP_CONTEXT);
+  const end = Math.min(line.length, at + Math.min(matched, MAX_LINE_CHARS) + CLIP_CONTEXT);
+  return `${start > 0 ? '…' : ''}${line.slice(start, end)}${end < line.length ? '…' : ''} [line is ${line.length.toLocaleString('en-US')} chars, clipped]`;
+}
 
 export const grepTool: Tool = {
   name: 'grep_files',
@@ -102,7 +119,7 @@ export const grepTool: Tool = {
         const lines = content.split('\n');
         for (let i = 0; i < lines.length; i++) {
           if (regex.test(lines[i])) {
-            if (results.length < MAX_RESULTS) results.push(`${file}:${i + 1}: ${lines[i].trim()}`);
+            if (results.length < MAX_RESULTS) results.push(`${file}:${i + 1}: ${clipMatchLine(lines[i].trim(), regex)}`);
             perFile.set(file, (perFile.get(file) ?? 0) + 1);
             if (perFile.size <= BROAD_FILES) matchedContent.set(file, content);
             if (++counted >= MAX_COUNTED) break outer;

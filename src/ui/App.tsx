@@ -3028,7 +3028,7 @@ export function App({
             pushBlock([infoLine('No checkpoints yet in this session - one is taken before the first change of each turn.')]);
           } else if (cmd === '/diff') {
             const first = turns[turns.length - 1]!;
-            pushBlock([infoLine(`Changes since before "${first.label}":\n${checkpoints.shadow.diffSince(first.git_commit)}`)]);
+            pushBlock([infoLine(`Changes since before "${first.label}":\n${await checkpoints.shadow.diffSince(first.git_commit)}`)]);
           } else {
             let target = turns[0]!;
             let what: 'files' | 'conversation' | 'both' = 'files';
@@ -3054,7 +3054,7 @@ export function App({
             }
             if (what !== 'conversation') {
               try {
-                const r = checkpoints.shadow.restore(target.git_commit);
+                const r = await checkpoints.shadow.restore(target.git_commit);
                 checkpoints.store.add({ session_id: checkpoints.sessionId, turn_entry_id: null, label: `restore point before going back to "${target.label}"`, git_commit: r.current, kind: 'restore' });
                 pushBlock([infoLine(`Files restored to before "${target.label}": ${r.restored} restored, ${r.removed} removed. The state you left is kept as a restore point (git ${r.current.slice(0, 8)} in .o4c/checkpoints).`)]);
               } catch (err) {
@@ -3533,7 +3533,7 @@ export function App({
           const first = checkpoints.store.list(checkpoints.sessionId).at(-1);
           if (first) {
             try {
-              reviewDiff = checkpoints.shadow.diffSince(first.git_commit, 40_000);
+              reviewDiff = await checkpoints.shadow.diffSince(first.git_commit, 40_000);
             } catch {
               reviewDiff = undefined;
             }
