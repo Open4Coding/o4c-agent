@@ -40,6 +40,7 @@ const common = {
 };
 await build({ ...common, entryPoints: [join(root, 'dist', 'cli.js')], outfile: join(out, 'o4c.mjs') });
 await build({ ...common, entryPoints: [join(root, 'dist', 'graph', 'indexWorker.js')], outfile: join(out, 'assets', 'indexWorker.mjs') });
+await build({ ...common, entryPoints: [join(root, 'dist', 'graph', 'parseWorker.js')], outfile: join(out, 'assets', 'parseWorker.mjs') });
 
 // The data files, with the paths packageRoot() expects under the unpacked runtime folder.
 function addTree(from, to) {

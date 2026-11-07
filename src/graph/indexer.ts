@@ -32,7 +32,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 
 import type { GraphStore } from './graphStore.js';
-import { extractFile } from './tags.js';
+import { extractFile, type FileExtraction } from './tags.js';
 import { languageForPath } from './languages.js';
 import { declaresGenerated, skipReasonFor, type SkipReason } from './indexFilter.js';
 import { resetGrammarCache } from './loadLanguage.js';
@@ -79,13 +79,15 @@ const MAX_FAILURES_KEPT = 10;
  * a session free of extra I/O, and - more importantly - free of a race, since the bytes indexed
  * are provably the bytes the model saw.
  *
- * `writes` is where the result goes - the store itself unless a full pass is batching them.
+ * `writes` is where the result goes - the store itself unless a full pass is batching them; `parse`
+ * is where the parse happens - this thread unless a full pass has a `ParsePool`.
  */
 export async function indexSource(
   store: GraphStore,
   repoRelativePath: string,
   source: string,
   writes: IndexWrites = store,
+  parse: Parse = extractFile,
 ): Promise<FileOutcome> {
   const language = languageForPath(repoRelativePath);
   if (!language) return 'no-grammar';
@@ -100,7 +102,7 @@ export async function indexSource(
 
   if (store.freshness(repoRelativePath, source) === 'fresh') return 'unchanged';
 
-  const { tags, imports } = await extractFile(source, language.id);
+  const { tags, imports } = await parse(source, language.id);
   if (declaresGenerated(source)) {
     // Imports go too: they only ever settle this file's own references.
     const definitions = tags.filter((tag) => tag.kind === 'def');
@@ -110,6 +112,8 @@ export async function indexSource(
   writes.indexFile({ path: repoRelativePath, language: language.id, source, tags, imports });
   return 'indexed';
 }
+
+export type Parse = (source: string, languageId: string) => Promise<FileExtraction>;
 
 /** The two writes `indexSource` makes. */
 export type IndexWrites = Pick<GraphStore, 'indexFile' | 'removeFile'>;
@@ -186,6 +190,13 @@ export interface IndexProjectOptions {
    * repository runs for minutes, and "indexing" with no number cannot be told from stuck.
    */
   readonly onProgress?: (done: number, total: number) => void;
+  /**
+   * Where files are parsed - a `ParsePool`'s threads for a full pass in the index worker - and how
+   * many files are in flight at once (enough to keep every thread busy). Default: this thread, one
+   * file at a time.
+   */
+  readonly parse?: Parse;
+  readonly concurrency?: number;
 }
 
 const PROGRESS_EVERY = 100;
@@ -242,12 +253,23 @@ export async function indexProject(
     if (failures.length < MAX_FAILURES_KEPT) failures.push(`${path}: ${message(err)}`);
   });
 
-  for (let done = 0; done < total; done++) {
-    const entry = parsable[done]!;
-    if (options.onProgress && done % PROGRESS_EVERY === 0) options.onProgress(done, total);
-    const pending = reads[done]!;
-    reads[done] = undefined;
-    startRead(done + READ_AHEAD);
+  const parse = options.parse ?? extractFile;
+  let next = 0;
+  let done = 0;
+  // Each lane takes the next file in walk order; with one lane this is the plain sequential pass.
+  const lane = async (): Promise<void> => {
+    while (next < total) {
+      const i = next++;
+      await indexOne(i);
+      done++;
+      if (options.onProgress && done % PROGRESS_EVERY === 0) options.onProgress(done, total);
+    }
+  };
+  const indexOne = async (i: number): Promise<void> => {
+    const entry = parsable[i]!;
+    const pending = reads[i]!;
+    reads[i] = undefined;
+    startRead(i + READ_AHEAD);
 
     let source: string;
     try {
@@ -258,11 +280,11 @@ export async function indexProject(
       // definitions from a file that no longer exists is the one error the model cannot detect.
       note('failed');
       if (failures.length < MAX_FAILURES_KEPT) failures.push(`${entry.path}: ${message(err)}`);
-      continue;
+      return;
     }
 
     try {
-      const outcome = await indexSource(store, entry.path, source, writes);
+      const outcome = await indexSource(store, entry.path, source, writes, parse);
       if (outcome === 'indexed' || outcome === 'generated-header') {
         if (outcome === 'generated-header') note(outcome);
         indexed++;
@@ -283,7 +305,9 @@ export async function indexProject(
       note('failed');
       if (failures.length < MAX_FAILURES_KEPT) failures.push(`${entry.path}: ${message(err)}`);
     }
-  }
+  };
+  options.onProgress?.(0, total);
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(options.concurrency ?? 1, total)) }, lane));
 
   // Anything the index still holds that this walk did not account for is gone, renamed, or now
   // excluded. Leaving it would serve definitions from a file that no longer exists, which is the

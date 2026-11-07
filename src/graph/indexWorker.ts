@@ -33,11 +33,13 @@
  * refusing to remove a file indexed since the pass began.
  */
 
+import { availableParallelism } from 'node:os';
 import { parentPort, workerData } from 'node:worker_threads';
 
 import { GraphStore } from './graphStore.js';
 import { indexProject, type FileOutcome, type IndexRunResult } from './indexer.js';
 import { setGrammarDir } from './grammarPaths.js';
+import { ParsePool, parseThreadsFor } from './parsePool.js';
 
 /** What the host sends. Kept to plain data - a worker boundary is a serialisation boundary. */
 export interface IndexWorkerRequest {
@@ -45,6 +47,8 @@ export interface IndexWorkerRequest {
   readonly root: string;
   /** The host's grammar directory, so an overridden one is not lost across the boundary. */
   readonly grammarDir?: string;
+  /** Parse threads for this pass; default `parseThreadsFor(cores)`. Below 2, parsing stays in this worker. */
+  readonly parseThreads?: number;
 }
 
 /**
@@ -100,11 +104,18 @@ async function main(): Promise<void> {
   if (request.grammarDir) setGrammarDir(request.grammarDir);
 
   let store: GraphStore | undefined;
+  let pool: ParsePool | undefined;
   try {
     store = new GraphStore(request.dbPath);
     const port = parentPort;
     const onProgress = (done: number, total: number): void => port.postMessage({ progress: { done, total } } satisfies IndexWorkerProgress);
-    port.postMessage(toResponse(await indexProject(store, request.root, { onProgress })));
+    // Parsing is ~55% of a pass and single-threaded per runtime, so a pass on a multi-core machine
+    // parses on several threads. Two files in flight per thread keep each one busy while the
+    // next file's read and the last one's write happen here.
+    const threads = request.parseThreads ?? parseThreadsFor(availableParallelism());
+    if (threads >= 2) pool = new ParsePool(threads, { grammarDir: request.grammarDir });
+    const parsing = pool ? { parse: pool.parse.bind(pool), concurrency: threads * 2 } : {};
+    port.postMessage(toResponse(await indexProject(store, request.root, { onProgress, ...parsing })));
   } catch (err) {
     // Reported rather than thrown, so the host gets one message shape to handle and can fall
     // back to indexing in-process. A worker that dies silently would leave the index empty with
@@ -120,7 +131,10 @@ async function main(): Promise<void> {
       elapsedMs: 0,
     } satisfies IndexWorkerResponse);
   } finally {
+    // The store first and synchronously: the host terminates this worker as soon as the result
+    // arrives, and a close still waiting behind the pool's would leave the database file locked.
     store?.close();
+    await pool?.close();
   }
 }
 

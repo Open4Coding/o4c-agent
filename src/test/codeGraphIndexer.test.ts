@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 
 import { GraphStore, GRAPH_DB_FILENAME } from '../graph/graphStore.js';
 import { indexProject, indexSource, repoRelative } from '../graph/indexer.js';
+import { ParsePool, parseThreadsFor } from '../graph/parsePool.js';
 import { declaresGenerated } from '../graph/indexFilter.js';
 
 /**
@@ -63,6 +64,53 @@ test('a full pass indexes the tree and the next one finds it unchanged', async (
     assert.equal(second.unchanged, 2);
     assert.equal(second.removed, 0);
   });
+});
+
+test('a pass with a parse pool and many files in flight stores exactly what a sequential pass stores', async () => {
+  const sources: Record<string, string> = {};
+  for (let i = 0; i < 40; i++) {
+    sources[`src/m${i}.ts`] = `import { f${(i + 1) % 40} } from "./m${(i + 1) % 40}.js";\nexport function f${i}(x: number): number { return f${(i + 1) % 40}(x) + ${i}; }\n`;
+  }
+  const snapshot = async (store: GraphStore) =>
+    Promise.all(Object.keys(sources).sort().map(async (p) => [p, store.freshness(p, sources[p]!)]));
+  let sequential: unknown;
+  let sequentialStats: unknown;
+  await withProject(async ({ root, store }) => {
+    for (const [p, src] of Object.entries(sources)) await put(root, p, src);
+    const r = await indexProject(store, root);
+    assert.equal(r.indexed, 40);
+    sequential = await snapshot(store);
+    sequentialStats = store.stats();
+  });
+  await withProject(async ({ root, store }) => {
+    for (const [p, src] of Object.entries(sources)) await put(root, p, src);
+    const pool = new ParsePool(3);
+    let progress: [number, number][] = [];
+    try {
+      const r = await indexProject(store, root, { parse: pool.parse.bind(pool), concurrency: 6, onProgress: (d, t) => progress.push([d, t]) });
+      assert.equal(pool.size, 3, 'the threads did the parsing');
+      assert.equal(r.indexed, 40);
+      assert.deepEqual(r.failures, []);
+    } finally {
+      await pool.close();
+    }
+    assert.deepEqual(await snapshot(store), sequential);
+    assert.deepEqual(store.stats(), sequentialStats, 'the same definitions, references and imports');
+    assert.deepEqual(progress, [[0, 40], [40, 40]]);
+  });
+});
+
+test('a parse pool whose threads cannot start parses on the calling thread instead', async () => {
+  const reasons: string[] = [];
+  const pool = new ParsePool(2, { entry: new URL('file:///no/such/parseWorker.js'), onFallback: (r) => reasons.push(r) });
+  try {
+    const got = await pool.parse(AREA, 'typescript');
+    assert.ok(got.tags.some((t) => t.name === 'computeArea' && t.kind === 'def'));
+    assert.equal(pool.size, 0);
+    assert.equal(reasons.length, 1);
+  } finally {
+    await pool.close();
+  }
 });
 
 test('an edited file is reindexed and the old definitions go', async () => {
@@ -259,4 +307,8 @@ test('repoRelative refuses a path outside the project', () => {
   assert.equal(repoRelative(root, 'src/../../secrets.ts'), undefined);
   assert.equal(repoRelative(root, ''), undefined);
   assert.equal(repoRelative(root, root), undefined, 'the root itself is not a file in it');
+});
+
+test('parse threads: none on a small machine, at most six, two cores left over', () => {
+  assert.deepEqual([1, 2, 3, 4, 8, 20].map(parseThreadsFor), [0, 0, 1, 2, 6, 6]);
 });
