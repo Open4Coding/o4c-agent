@@ -17,13 +17,16 @@ import { Worker } from 'node:worker_threads';
 import type { GraphStore } from './graphStore.js';
 import { indexProject, type IndexRunResult } from './indexer.js';
 import { grammarDir } from './grammarPaths.js';
-import { fromResponse, type IndexWorkerRequest, type IndexWorkerResponse } from './indexWorker.js';
+import { fromResponse, type IndexWorkerProgress, type IndexWorkerRequest, type IndexWorkerResponse } from './indexWorker.js';
+
+/** Files parsed so far out of the pass's total (see `IndexProjectOptions.onProgress`). */
+export type IndexProgress = (done: number, total: number) => void;
 
 /** Runs one full pass over `root`, updating the index `store` is attached to. */
-export type RunIndexPass = (store: GraphStore, root: string) => Promise<IndexRunResult>;
+export type RunIndexPass = (store: GraphStore, root: string, onProgress?: IndexProgress) => Promise<IndexRunResult>;
 
 /** Indexes on the calling thread. The fallback, and what every test uses by default. */
-export const runIndexPassInProcess: RunIndexPass = (store, root) => indexProject(store, root);
+export const runIndexPassInProcess: RunIndexPass = (store, root, onProgress) => indexProject(store, root, { onProgress });
 
 export interface WorkerPassOptions {
   /** Test seam: resolve the worker entry differently, or point at a script that fails. */
@@ -58,16 +61,16 @@ export function createWorkerPass(options: WorkerPassOptions = {}): RunIndexPass 
   let broken = false;
   let active: Worker | undefined;
 
-  const run: RunIndexPass = async (store, root) => {
-    if (broken) return runIndexPassInProcess(store, root);
+  const run: RunIndexPass = async (store, root, onProgress) => {
+    if (broken) return runIndexPassInProcess(store, root, onProgress);
 
     try {
-      return await runInWorker(store, root, options, (worker) => (active = worker));
+      return await runInWorker(store, root, options, (worker) => (active = worker), onProgress);
     } catch (err) {
       broken = true;
       active = undefined;
       options.onFallback?.(err instanceof Error ? err.message : String(err));
-      return runIndexPassInProcess(store, root);
+      return runIndexPassInProcess(store, root, onProgress);
     }
   };
 
@@ -85,6 +88,7 @@ function runInWorker(
   root: string,
   options: WorkerPassOptions,
   register: (worker: Worker) => void,
+  onProgress?: IndexProgress,
 ): Promise<IndexRunResult> {
   const request: IndexWorkerRequest = { dbPath: store.path, root, grammarDir: grammarDir() };
 
@@ -106,7 +110,11 @@ function runInWorker(
       void worker.terminate();
     };
 
-    worker.on('message', (message: IndexWorkerResponse) => {
+    worker.on('message', (message: IndexWorkerResponse | IndexWorkerProgress) => {
+      if ('progress' in message) {
+        onProgress?.(message.progress.done, message.progress.total);
+        return;
+      }
       finish(() =>
         message?.ok
           ? resolve(fromResponse(message))

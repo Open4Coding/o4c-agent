@@ -65,6 +65,11 @@ export interface IndexWorkerResponse {
   readonly elapsedMs: number;
 }
 
+/** Sent any number of times before the one `IndexWorkerResponse`: how far the pass has got. */
+export interface IndexWorkerProgress {
+  readonly progress: { readonly done: number; readonly total: number };
+}
+
 export function toResponse(run: IndexRunResult): IndexWorkerResponse {
   return {
     ok: true,
@@ -97,7 +102,9 @@ async function main(): Promise<void> {
   let store: GraphStore | undefined;
   try {
     store = new GraphStore(request.dbPath);
-    parentPort.postMessage(toResponse(await indexProject(store, request.root)));
+    const port = parentPort;
+    const onProgress = (done: number, total: number): void => port.postMessage({ progress: { done, total } } satisfies IndexWorkerProgress);
+    port.postMessage(toResponse(await indexProject(store, request.root, { onProgress })));
   } catch (err) {
     // Reported rather than thrown, so the host gets one message shape to handle and can fall
     // back to indexing in-process. A worker that dies silently would leave the index empty with

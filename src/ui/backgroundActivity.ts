@@ -10,6 +10,8 @@ import { jobStatus, listJobs, ownerPid, type JobRecord } from '../tools/jobs.js'
 export interface BackgroundSources {
   /** The code graph's pass: `building` until the first full pass (or a rebuild) lands. */
   graphPhase?: () => string;
+  /** How far that pass has got, when it has said. */
+  graphProgress?: () => { readonly done: number; readonly total: number } | undefined;
   /** The checkpoint repository's session-start warm-up. */
   checkpointWarming?: () => boolean;
   /** This session's background jobs (run_shell with background, /ps). */
@@ -18,7 +20,10 @@ export interface BackgroundSources {
 
 export function backgroundActivity(sources: BackgroundSources): string[] {
   const parts: string[] = [];
-  if (sources.graphPhase?.() === 'building') parts.push('indexing code');
+  if (sources.graphPhase?.() === 'building') {
+    const progress = sources.graphProgress?.();
+    parts.push(progress && progress.total > 0 ? `indexing code ${progress.done.toLocaleString('en-US')}/${progress.total.toLocaleString('en-US')}` : 'indexing code');
+  }
   if (sources.checkpointWarming?.()) parts.push('checkpoint prep');
   const running = (sources.jobs?.() ?? []).filter((job) => jobStatus(job).state === 'running').length;
   if (running > 0) parts.push(`${running} job${running === 1 ? '' : 's'}`);

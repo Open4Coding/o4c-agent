@@ -39,7 +39,10 @@ test('run_shell background:true returns at once; the job finishes, its output an
 });
 
 test('kill stops a running job and everything it started; the owner kills its own jobs on exit', async () => {
-  const forever = script('forever.js', 'setInterval(() => {}, 1000);');
+  // "Forever" for the test's purposes, but it ends itself after two minutes: under a loaded full
+  // run a kill could land while the shell was still starting node, and the orphaned node then
+  // really did run forever (found 2026-11-06, 18 of them after a day of gate runs).
+  const forever = script('forever.js', 'setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 120000);');
   const job = startJob(forever);
   assert.ok(await wait(() => jobStatus(job).state === 'running'));
   assert.equal(killJob(job), true);

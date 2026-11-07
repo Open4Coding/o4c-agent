@@ -96,6 +96,8 @@ export interface CodeGraphStatus {
   /** The last completed pass, for `/context`-style reporting. */
   readonly lastRun?: IndexRunResult;
   readonly lastError?: string;
+  /** Files parsed so far out of the running pass's total; only while `phase` is `building`. */
+  readonly progress?: { readonly done: number; readonly total: number };
 }
 
 /** What `src/tools/codeGraph.ts` needs, so the tool itself knows nothing about indexing. */
@@ -115,6 +117,7 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   private phase: IndexPhase = 'building';
   private lastRun: IndexRunResult | undefined;
   private lastError: string | undefined;
+  private progress: { done: number; total: number } | undefined;
   /** The in-flight full pass, so a second request coalesces instead of running concurrently. */
   private running: Promise<void> | undefined;
   private rerunRequested = false;
@@ -144,7 +147,7 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
   ) {}
 
   status(): CodeGraphStatus {
-    return { phase: this.phase, lastRun: this.lastRun, lastError: this.lastError };
+    return { phase: this.phase, lastRun: this.lastRun, lastError: this.lastError, progress: this.phase === 'building' ? this.progress : undefined };
   }
 
   isExposed(): boolean {
@@ -188,7 +191,8 @@ export class CodeGraphComponent implements CoreComponent, CodeGraphLookup {
     do {
       this.rerunRequested = false;
       try {
-        this.lastRun = await this.runPass(this.store, this.root);
+        this.progress = undefined;
+        this.lastRun = await this.runPass(this.store, this.root, (done, total) => (this.progress = { done, total }));
         this.lastError = undefined;
         this.phase = 'ready';
       } catch (err) {

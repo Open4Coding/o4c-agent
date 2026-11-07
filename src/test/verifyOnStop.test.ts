@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentLoop, type AgentEvent } from '../agent/loop.js';
+import { AgentLoop, forbidsRunning, type AgentEvent } from '../agent/loop.js';
 import { FakeProvider } from './fakeProvider.js';
 import { makeFakeTool } from './fakeTool.js';
 import type { CompletionResponse } from '../providers/types.js';
@@ -35,4 +35,12 @@ test('no nudge when a command ran after the last edit, when nothing changed, or 
 
   const off = new FakeProvider([call('e1', 'edit_file'), answer('Fixed.')]);
   assert.equal(await new AgentLoop(off, [edit, shell], 'system').run('x'), 'Fixed.');
+});
+
+test('no nudge when the user said not to run anything', async () => {
+  const told = new FakeProvider([call('e1', 'edit_file'), answer('Added the comment.')]);
+  assert.equal(await new AgentLoop(told, [edit, shell], 'system').run('Do not build, install, or run anything. Add a comment.', { verifyOnStop: true }), 'Added the comment.');
+  assert.equal(told.callCount, 2);
+  for (const said of ["don't run the tests", 'Do NOT execute it', 'change it without running anything', 'never build it']) assert.equal(forbidsRunning(said), true, said);
+  for (const said of ['run the tests', 'fix the build', 'do not change the tests']) assert.equal(forbidsRunning(said), false, said);
 });

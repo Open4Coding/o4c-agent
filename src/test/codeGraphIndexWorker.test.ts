@@ -52,8 +52,11 @@ test('a pass really runs in a worker and the result comes back', async () => {
     let fellBack: string | undefined;
     const pass = createWorkerPass({ onFallback: (reason) => (fellBack = reason) });
     try {
-      const run = await pass(store, root);
+      const progress: Array<[number, number]> = [];
+      const run = await pass(store, root, (done, total) => progress.push([done, total]));
 
+      // Progress crosses the worker boundary too (the footer's indexing count): first and last.
+      assert.deepEqual(progress, [[0, 1], [1, 1]]);
       // The assertion that matters: the worker path was taken, not the fallback. If the entry
       // file cannot be resolved - the way a packaging change breaks a worker - this is what
       // notices, and a timing test never would.

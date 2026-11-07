@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -69,6 +69,28 @@ test('ensureTrusted does not prompt and stays untrusted when stdin is not a TTY'
       assert.equal(promptCalled, false);
     } finally {
       process.stdin.isTTY = original;
+    }
+  });
+});
+
+test('ensureTrusted never offers the home folder as a project, and creates nothing there', async () => {
+  await withTempDir(async (dir) => {
+    const original = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      let promptCalled = false;
+      const result = await ensureTrusted(dir, async () => {
+        promptCalled = true;
+        return 'y';
+      }, undefined, undefined, dir);
+      assert.deepEqual(result, { trusted: false, projectRoot: undefined });
+      assert.equal(promptCalled, false);
+      assert.equal(await stat(join(dir, '.o4c')).then(() => true, () => false), false);
+    } finally {
+      process.stdin.isTTY = original;
+      console.error = originalError;
     }
   });
 });

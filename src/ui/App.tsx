@@ -923,6 +923,7 @@ export function App({
   const backgroundSources = useMemo<BackgroundSources>(
     () => ({
       graphPhase: codeGraph ? () => codeGraph.component.status().phase : undefined,
+      graphProgress: codeGraph ? () => codeGraph.component.status().progress : undefined,
       checkpointWarming: checkpoints ? () => checkpoints.shadow.isWarming() : undefined,
       jobs: ownJobs,
     }),

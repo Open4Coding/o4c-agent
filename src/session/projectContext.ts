@@ -173,9 +173,19 @@ export async function ensureTrusted(
   prompt: (question: string) => Promise<string> = defaultPrompt,
   configGlobalDir?: string,
   profileName?: string,
+  home: string = homedir(),
 ): Promise<TrustResult> {
   const existingRoot = await findProjectRoot(cwd);
   if (existingRoot) return { trusted: true, projectRoot: existingRoot };
+
+  // The home directory is never a project: its `.o4c/` is the global config dir, so trusting it
+  // put a project's databases, checkpoints and logs in among the global files (hands-on
+  // 2026-11-06, a test run started in the home folder by mistake). Not even asked, so a reflex
+  // "y" cannot do it either.
+  if (resolve(cwd) === resolve(home)) {
+    console.error('o4c is running in your home folder, where its global settings live, so it is not offered as a project. Running untrusted - cd into a project folder to use one.');
+    return { trusted: false, projectRoot: undefined };
+  }
 
   if (!process.stdin.isTTY) return { trusted: false, projectRoot: undefined };
 

@@ -125,7 +125,17 @@ export interface IndexProjectOptions {
    * Windows. Defensive code with no test is how the defence stops working.
    */
   readonly readSource?: (absolutePath: string) => Promise<string>;
+  /**
+   * Files handled so far out of the files this pass will parse, every `PROGRESS_EVERY` files and
+   * once at the end - for the footer's `bg: indexing code 1,200/11,500`. A first pass over a large
+   * repository runs for minutes, and "indexing" with no number cannot be told from stuck.
+   */
+  readonly onProgress?: (done: number, total: number) => void;
 }
+
+const PROGRESS_EVERY = 100;
+/** Files read ahead of the one being parsed. */
+const READ_AHEAD = 16;
 
 export async function indexProject(
   store: GraphStore,
@@ -148,19 +158,37 @@ export async function indexProject(
 
   const seen = new Set<string>();
   const { entries } = await walkFiles(root);
-
+  const parsable: typeof entries = [];
   for (const entry of entries) {
     if (entry.isDirectory) continue;
     // Cheapest test first: most files in a mixed tree have no bundled grammar, and answering
     // that costs a string comparison rather than a read.
-    if (!languageForPath(entry.path)) {
-      note('no-grammar');
-      continue;
-    }
+    if (languageForPath(entry.path)) parsable.push(entry);
+    else note('no-grammar');
+  }
+  const total = parsable.length;
+
+  // Read ahead of the parse, for the reason `READ_AHEAD` in `tools/grep.ts` gives: a first pass
+  // otherwise waits out each file's first open (and its antivirus scan) one at a time.
+  const reads = new Array<Promise<string> | undefined>(total);
+  const startRead = (i: number): void => {
+    if (i >= total) return;
+    const pending = read(join(root, parsable[i]!.path));
+    pending.catch(() => undefined); // handled when awaited; this only stops an early rejection being "unhandled"
+    reads[i] = pending;
+  };
+  for (let i = 0; i < READ_AHEAD; i++) startRead(i);
+
+  for (let done = 0; done < total; done++) {
+    const entry = parsable[done]!;
+    if (options.onProgress && done % PROGRESS_EVERY === 0) options.onProgress(done, total);
+    const pending = reads[done]!;
+    reads[done] = undefined;
+    startRead(done + READ_AHEAD);
 
     let source: string;
     try {
-      source = await read(join(root, entry.path));
+      source = await pending;
     } catch (err) {
       // Left out of `seen`, so the sweep below drops whatever the index still holds for it. A
       // read can fail because the file was deleted between the walk and the read, and serving
@@ -207,6 +235,7 @@ export async function indexProject(
   // start time and failed intermittently, because `Date.now()` on Windows advances in steps of up
   // to 16 ms, so a file indexed in the same tick as the start compares equal to it rather than
   // earlier - and was then never swept.
+  options.onProgress?.(total, total);
   let removed = 0;
   for (const file of store.files()) {
     if (!seen.has(file.path) && file.indexSeq <= startSequence) {

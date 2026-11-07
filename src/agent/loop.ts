@@ -90,6 +90,16 @@ export interface AgentEvent {
   prefill?: { total: number; cached: number; processed: number; timeMs: number };
 }
 
+/**
+ * Whether the user's message rules out running anything ("Do not build, install, or run
+ * anything", "don't run the tests", "without running it"). The verify nudge (B19) is skipped then:
+ * found on the VS Code test 2026-11-07, where it asked the model to run something the prompt had
+ * just forbidden and the model spent a step explaining why it would not.
+ */
+export function forbidsRunning(userMessage: string): boolean {
+  return /\b(?:do\s+not|don'?t|never|no\s+need\s+to|without)\s+(?:build|run|test|execut|install|compil)/i.test(userMessage);
+}
+
 /** What to do when a turn reaches its step limit (plan 0006 B18). */
 export type StepLimitChoice = 'continue' | 'summarize' | 'stop';
 
@@ -2050,7 +2060,7 @@ export class AgentLoop {
         emptyTurnRetries = 0;
         hadToolWork = true;
       }
-      if (!summarizing && !isToolUse && !isMaxTokensCutoff && options.verifyOnStop && changedSinceRun && !verifyNudged) {
+      if (!summarizing && !isToolUse && !isMaxTokensCutoff && options.verifyOnStop && changedSinceRun && !verifyNudged && !forbidsRunning(userMessage)) {
         verifyNudged = true;
         onEvent({ type: 'warning', text: 'The model changed files but ran nothing to check them - asking it to verify once.' });
         this.appendEntry(

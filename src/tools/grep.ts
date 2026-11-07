@@ -45,6 +45,13 @@ const MAX_COUNTED = 5000;
 /** A matching line longer than this is shown as the part around the match (ripgrep's --max-columns idea). */
 export const MAX_LINE_CHARS = 300;
 const CLIP_CONTEXT = 120;
+/**
+ * Files being read at once. One at a time, a whole-project search waits out every file open in
+ * turn, and on Windows each first open of a file is also scanned by the antivirus: measured
+ * 2026-11-07 on the VS Code source (21k files), 136 s for a search over files not read lately
+ * against 15 s once they had been, and 7 m 42 s while the first index pass read the same files.
+ */
+const READ_AHEAD = 32;
 
 /**
  * The line as shown in a result: whole when it is short, otherwise the match with `CLIP_CONTEXT`
@@ -106,13 +113,18 @@ export const grepTool: Tool = {
       const perFile = new Map<string, number>();
       const matchedContent = new Map<string, string>();
       let counted = 0;
-      outer: for (const file of files) {
-        let content: string;
-        try {
-          content = await readFile(join(searchRoot, file), 'utf-8');
-        } catch {
-          continue;
-        }
+      // Read ahead, matched in order: the results come out exactly as a one-at-a-time loop's would.
+      const reads = new Array<Promise<string | undefined> | undefined>(files.length);
+      const startRead = (i: number): void => {
+        if (i < files.length) reads[i] = readFile(join(searchRoot, files[i]!), 'utf-8').catch(() => undefined);
+      };
+      for (let i = 0; i < READ_AHEAD; i++) startRead(i);
+      outer: for (let f = 0; f < files.length; f++) {
+        const file = files[f]!;
+        const content = await reads[f];
+        reads[f] = undefined;
+        startRead(f + READ_AHEAD);
+        if (content === undefined) continue;
         // A NUL in the first 8K is the usual test for a binary file (git uses the same one). Its
         // "lines" are noise at best and can be megabytes at worst; nothing in one is a search hit.
         if (content.slice(0, 8000).includes('\0')) continue;

@@ -15,8 +15,8 @@ The three lines under the input box:
 2. `view` and `Think` settings, then tokens: `t-tks` for this project, `s-tks` for this session
    (sent↑/received↓ and the server's speed), and how much of the prompt the server had cached.
 3. The model, the git branch (`*` = uncommitted changes) and the directory. While o4c is working
-   in the background, a `bg:` part is added at the end of this line: `indexing code` (the code
-   graph is building or refreshing its index; `code_graph` answers may be incomplete until it
+   in the background, a `bg:` part is added at the end of this line: `indexing code 1,200/11,509`
+   (the code graph is building or refreshing its index, files done out of the total; `code_graph` answers may be incomplete until it
    finishes), `checkpoint prep` (the first-time setup for `/undo`, which keeps the first edit
    fast), and `N job(s)` (background shell jobs, see `/ps`). No `bg:` means nothing is running.
 

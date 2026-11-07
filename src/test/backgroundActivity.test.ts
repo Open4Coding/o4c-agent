@@ -21,3 +21,9 @@ test('a job whose process has gone is not counted as running', () => {
   // PID 2^31-1 is never a live process.
   assert.deepEqual(backgroundActivity({ jobs: () => [job(2147483647)] }), []);
 });
+
+test('the index pass shows how far it has got once it has said', () => {
+  assert.deepEqual(backgroundActivity({ graphPhase: () => 'building', graphProgress: () => ({ done: 1200, total: 11509 }) }), ['indexing code 1,200/11,509']);
+  assert.deepEqual(backgroundActivity({ graphPhase: () => 'building', graphProgress: () => undefined }), ['indexing code']);
+  assert.deepEqual(backgroundActivity({ graphPhase: () => 'ready', graphProgress: () => ({ done: 5, total: 5 }) }), []);
+});
