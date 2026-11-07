@@ -136,6 +136,28 @@ test('identifiers split on camel, snake, kebab and acronym boundaries', () => {
 
 // ---------------------------------------------------------------- the store
 
+test('a batch commits its files together, and another connection sees them only after endBatch', async () => {
+  await withStore(async (store) => {
+    const tags = await extractTags(TS_SOURCE, 'typescript');
+    const other = new GraphStore(store.path);
+    try {
+      store.beginBatch();
+      store.indexFile({ path: 'a.ts', language: 'typescript', source: TS_SOURCE, tags });
+      store.indexFile({ path: 'b.ts', language: 'typescript', source: TS_SOURCE, tags });
+      assert.equal(store.stats().files, 2, 'its own writes are visible inside the batch');
+      assert.equal(other.stats().files, 0, 'not committed yet');
+      store.endBatch();
+      assert.equal(other.stats().files, 2);
+      // Outside a batch each call is still its own transaction.
+      store.removeFile('a.ts');
+      store.indexFile({ path: 'c.ts', language: 'typescript', source: TS_SOURCE, tags });
+      assert.deepEqual(other.files().map((f) => f.path).sort(), ['b.ts', 'c.ts']);
+    } finally {
+      other.close();
+    }
+  });
+});
+
 test('indexing a file stores its definitions and references', async () => {
   await withStore(async (store) => {
     const tags = await extractTags(TS_SOURCE, 'typescript');

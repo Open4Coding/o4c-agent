@@ -78,11 +78,14 @@ const MAX_FAILURES_KEPT = 10;
  * has just written them and a read has just read them. That makes keeping the index fresh during
  * a session free of extra I/O, and - more importantly - free of a race, since the bytes indexed
  * are provably the bytes the model saw.
+ *
+ * `writes` is where the result goes - the store itself unless a full pass is batching them.
  */
 export async function indexSource(
   store: GraphStore,
   repoRelativePath: string,
   source: string,
+  writes: IndexWrites = store,
 ): Promise<FileOutcome> {
   const language = languageForPath(repoRelativePath);
   if (!language) return 'no-grammar';
@@ -91,7 +94,7 @@ export async function indexSource(
   if (skip) {
     // A file that used to qualify and no longer does must leave the index, or a shrinking file
     // would keep answering from stale rows.
-    store.removeFile(repoRelativePath);
+    writes.removeFile(repoRelativePath);
     return skip;
   }
 
@@ -101,11 +104,63 @@ export async function indexSource(
   if (declaresGenerated(source)) {
     // Imports go too: they only ever settle this file's own references.
     const definitions = tags.filter((tag) => tag.kind === 'def');
-    store.indexFile({ path: repoRelativePath, language: language.id, source, tags: definitions, imports: [] });
+    writes.indexFile({ path: repoRelativePath, language: language.id, source, tags: definitions, imports: [] });
     return 'generated-header';
   }
-  store.indexFile({ path: repoRelativePath, language: language.id, source, tags, imports });
+  writes.indexFile({ path: repoRelativePath, language: language.id, source, tags, imports });
   return 'indexed';
+}
+
+/** The two writes `indexSource` makes. */
+export type IndexWrites = Pick<GraphStore, 'indexFile' | 'removeFile'>;
+
+/**
+ * Writes held back and committed together, one transaction per `BATCH_MS` of parsing (see
+ * `GraphStore.beginBatch`). Held here rather than by keeping a transaction open across the parse,
+ * so the database is locked only for the writes themselves - the main thread writes to the same
+ * file whenever the model reads or edits one.
+ */
+class BatchedWrites implements IndexWrites {
+  private queue: Array<{ path: string; write: () => void }> = [];
+  private since = 0;
+
+  constructor(
+    private readonly store: GraphStore,
+    private readonly failed: (path: string, err: unknown) => void,
+  ) {}
+
+  indexFile(input: Parameters<GraphStore['indexFile']>[0]): void {
+    this.add(input.path, () => this.store.indexFile(input));
+  }
+
+  removeFile(path: string): void {
+    this.add(path, () => this.store.removeFile(path));
+  }
+
+  private add(path: string, write: () => void): void {
+    if (this.queue.length === 0) this.since = Date.now();
+    this.queue.push({ path, write });
+    if (Date.now() - this.since >= BATCH_MS || this.queue.length >= BATCH_MAX) this.flush();
+  }
+
+  flush(): void {
+    if (this.queue.length === 0) return;
+    const queue = this.queue;
+    this.queue = [];
+    this.store.beginBatch();
+    try {
+      for (const { path, write } of queue) {
+        try {
+          write();
+        } catch (err) {
+          // One file's write rolled back on its own (a savepoint); the rest of the batch stands.
+          this.failed(path, err);
+        }
+      }
+    } finally {
+      this.store.endBatch();
+    }
+  }
 }
 
 /**
@@ -134,6 +189,9 @@ export interface IndexProjectOptions {
 }
 
 const PROGRESS_EVERY = 100;
+/** A batch of a full pass's writes is committed once it is this old, or this long. */
+const BATCH_MS = 100;
+const BATCH_MAX = 200;
 /** Files read ahead of the one being parsed. */
 const READ_AHEAD = 16;
 
@@ -179,6 +237,11 @@ export async function indexProject(
   };
   for (let i = 0; i < READ_AHEAD; i++) startRead(i);
 
+  const writes = new BatchedWrites(store, (path, err) => {
+    note('failed');
+    if (failures.length < MAX_FAILURES_KEPT) failures.push(`${path}: ${message(err)}`);
+  });
+
   for (let done = 0; done < total; done++) {
     const entry = parsable[done]!;
     if (options.onProgress && done % PROGRESS_EVERY === 0) options.onProgress(done, total);
@@ -199,7 +262,7 @@ export async function indexProject(
     }
 
     try {
-      const outcome = await indexSource(store, entry.path, source);
+      const outcome = await indexSource(store, entry.path, source, writes);
       if (outcome === 'indexed' || outcome === 'generated-header') {
         if (outcome === 'generated-header') note(outcome);
         indexed++;
@@ -235,6 +298,7 @@ export async function indexProject(
   // start time and failed intermittently, because `Date.now()` on Windows advances in steps of up
   // to 16 ms, so a file indexed in the same tick as the start compares equal to it rather than
   // earlier - and was then never swept.
+  writes.flush();
   options.onProgress?.(total, total);
   let removed = 0;
   for (const file of store.files()) {
