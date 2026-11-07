@@ -12,9 +12,11 @@ ask for.
 
 ## Install
 
-**Single executable** (Node included, nothing else to install): download `o4c-win32-x64.exe` or
-`o4c-linux-x64` from the [GitHub releases](https://github.com/Open4Coding/o4c-agent/releases)
-(`chmod +x` it on Linux; `SHA256SUMS.txt` is there to check the download). To build one yourself:
+**Single executable** (Node included, nothing else to install): download `o4c-win32-x64.exe`,
+`o4c-linux-x64` or `o4c-darwin-arm64` (Apple Silicon) from the
+[GitHub releases](https://github.com/Open4Coding/o4c-agent/releases) (`SHA256SUMS.txt` is there to
+check the download). On Linux and macOS, `chmod +x` it; on macOS the file is not notarized, so clear
+the download flag once with `xattr -d com.apple.quarantine o4c-darwin-arm64`. To build one yourself:
 `npm run build:sea` with Node 26.
 
 **From npm:**

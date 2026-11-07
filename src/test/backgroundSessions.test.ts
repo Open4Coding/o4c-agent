@@ -8,6 +8,9 @@ import { BackgroundSessions } from '../session/backgroundSessions.js';
 import { SessionStore } from '../session/sessionStore.js';
 import { sessionsDirFor } from '../session/projectContext.js';
 
+// Cleanup retries: on Windows a session process that has just finished can still hold its working
+// directory for a moment, and the rm then fails with EPERM (seen once in CI, 2026-11-07).
+
 /** Plan 0006 L1: background sessions - started detached, watched, stopped, opened when done. */
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -52,7 +55,7 @@ test('a background session runs on its own, reports finishing once, and shows it
     await until(() => bg.state(failed).state === 'failed', 'the failure');
     assert.equal(bg.state(failed).code, 3);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
@@ -71,7 +74,7 @@ test('a running background session can be stopped, and its owner stops the ones 
     bg.stopOwned(999_999);
     assert.equal(bg.state(b).state, 'stopped', "the owner's exit hook stopped it");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
@@ -88,6 +91,6 @@ test('a real background o4c session saves into the project session store, so it 
     const saved = await new SessionStore(sessionsDirFor(dir)).load(s.sessionId);
     assert.ok(saved, 'the session is in the store /resume and /session open read');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
