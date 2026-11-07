@@ -1,0 +1,10 @@
+{
+  "category": "navigate",
+  "tier": "large",
+  "timeoutS": 1800,
+  "source": {
+    "git": "https://github.com/microsoft/vscode.git",
+    "commit": "1745a4a6102e93173430b4b2debc1247a91cd036"
+  },
+  "prompt": "This is the VS Code source. List every class under src/vs, excluding test folders, that directly extends the class EditorModel (src/vs/workbench/common/editor/editorModel.ts) - direct subclasses only, not subclasses of those. Write the file path of each, relative to the repository root, one per line, to ANSWER.md (a file that holds two such classes is listed once). Change no other file."
+}

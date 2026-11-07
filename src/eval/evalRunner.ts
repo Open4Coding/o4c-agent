@@ -1,8 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GRAPH_DB_FILENAME, GraphStore } from '../graph/graphStore.js';
+import { indexProject } from '../graph/indexer.js';
 
 /**
  * The eval set (plan 0006 J1): fixture tasks run headless, each checked by its own pass script, so
@@ -11,6 +13,12 @@ import { fileURLToPath } from 'node:url';
  * A task is a directory `eval/tasks/<id>/` holding `task.json` (`prompt`, `category`, optional
  * `timeoutS`), `repo/` (the starting files) and `check.mjs` (exit 0 = pass). The agent only ever sees
  * a fresh copy of `repo/`; the pass script stays outside it, so the model cannot read or edit it.
+ *
+ * A large-repo task (K4c) names a public repository at a pinned commit instead - `"source": {"git":
+ * url, "commit": sha}` - and `repo/`, if present, is laid over it. The repository is fetched once
+ * into the cache (`O4C_EVAL_CACHE`, default `eval/.cache/`), each run gets its own git worktree of
+ * it, and the code graph's index of the commit is built once and copied in, so every task starts
+ * the way a real session on a known project does: index warm, only its own edits to re-parse.
  */
 export interface EvalTask {
   id: string;
@@ -18,8 +26,15 @@ export interface EvalTask {
   category: string;
   prompt: string;
   timeoutS: number;
-  /** 'base' (the first 20) or 'hard' (J1b: tasks the baseline does not always pass). */
+  /** 'base' (the first 20), 'hard' (J1b: tasks the baseline does not always pass), or 'large'. */
   tier: string;
+  /** A large-repo task's starting point, instead of (or under) `repo/`. */
+  source?: EvalSource;
+}
+
+export interface EvalSource {
+  git: string;
+  commit: string;
 }
 
 export interface EvalResult {
@@ -72,8 +87,12 @@ export function loadTasks(evalDir: string, only?: string[], tier?: string): Eval
     const dir = join(tasksDir, id);
     const spec = JSON.parse(readFileSync(join(dir, 'task.json'), 'utf-8')) as Partial<EvalTask>;
     if (tier && (spec.tier ?? 'base') !== tier) continue;
-    if (typeof spec.prompt !== 'string' || !existsSync(join(dir, 'repo')) || !existsSync(join(dir, 'check.mjs'))) {
-      throw new Error(`eval task ${id}: needs task.json with "prompt", repo/ and check.mjs`);
+    // The large tier fetches a whole repository and runs far longer: only when asked for, by tier or by id.
+    if (!tier && !(only && only.length > 0) && spec.tier === 'large') continue;
+    const source = spec.source && typeof spec.source.git === 'string' && /^[0-9a-f]{40}$/.test(spec.source.commit ?? '') ? spec.source : undefined;
+    if (spec.source && !source) throw new Error(`eval task ${id}: "source" needs "git" and a full 40-character "commit"`);
+    if (typeof spec.prompt !== 'string' || !(source || existsSync(join(dir, 'repo'))) || !existsSync(join(dir, 'check.mjs'))) {
+      throw new Error(`eval task ${id}: needs task.json with "prompt", repo/ (or "source") and check.mjs`);
     }
     tasks.push({
       id,
@@ -82,6 +101,7 @@ export function loadTasks(evalDir: string, only?: string[], tier?: string): Eval
       prompt: spec.prompt,
       timeoutS: typeof spec.timeoutS === 'number' ? spec.timeoutS : DEFAULT_TIMEOUT_S,
       tier: spec.tier ?? 'base',
+      ...(source ? { source } : {}),
     });
   }
   return tasks;
@@ -171,6 +191,77 @@ function runProcess(command: string, args: string[], cwd: string, timeoutS: numb
   });
 }
 
+function git(args: string[], cwd: string): string {
+  const r = spawnSync('git', ['-c', 'core.longpaths=true', ...args], { cwd, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed in ${cwd}: ${(r.stderr || r.stdout).trim()}`);
+  return r.stdout;
+}
+
+export function defaultCacheDir(evalDir: string): string {
+  return process.env.O4C_EVAL_CACHE ?? join(evalDir, '.cache');
+}
+
+/** Where a source's clone lives in the cache: one directory per repository and commit. */
+export function sourceDir(cacheDir: string, source: EvalSource): string {
+  const name = source.git.replace(/\.git$/, '').split(/[/:]/).filter(Boolean).slice(-2).join('-');
+  return join(cacheDir, `${name}-${source.commit.slice(0, 12)}`);
+}
+
+/**
+ * The cached clone of a source, fetched on first use: only the one commit, at depth 1, so VS Code
+ * is a ~90 MB download rather than its whole history. Its checkout is what the seed index is built
+ * from; tasks never touch it, they get worktrees.
+ */
+export function ensureSource(cacheDir: string, source: EvalSource, log: (line: string) => void = () => {}): string {
+  const dir = sourceDir(cacheDir, source);
+  if (existsSync(join(dir, '.git', 'o4c-ready'))) return dir;
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  log(`  fetching ${source.git} @ ${source.commit.slice(0, 12)} ...`);
+  git(['init', '-q'], dir);
+  git(['config', 'core.longpaths', 'true'], dir);
+  // Byte for byte the commit, whatever the machine's autocrlf: the pass scripts compare against it.
+  git(['config', 'core.autocrlf', 'false'], dir);
+  git(['config', 'core.eol', 'lf'], dir); // `* text=auto` would otherwise check out CRLF on Windows
+  git(['remote', 'add', 'origin', source.git], dir);
+  git(['fetch', '-q', '--depth', '1', 'origin', source.commit], dir);
+  git(['checkout', '-q', '--detach', source.commit], dir);
+  // The agent's own .o4c/ is not part of the task; keep it out of `git status` in every worktree.
+  appendFileSync(join(dir, '.git', 'info', 'exclude'), '\n.o4c/\n');
+  writeFileSync(join(dir, '.git', 'o4c-ready'), new Date().toISOString());
+  return dir;
+}
+
+/** The code graph's index of a source's commit, built once next to its clone. */
+export async function ensureSeedIndex(cacheDir: string, source: EvalSource, log: (line: string) => void = () => {}): Promise<string> {
+  const dir = ensureSource(cacheDir, source, log);
+  const seed = `${dir}.${GRAPH_DB_FILENAME}`;
+  if (existsSync(seed)) return seed;
+  log(`  indexing ${dir} for the code graph (once per source) ...`);
+  const building = `${seed}.building`;
+  rmSync(building, { force: true });
+  const store = new GraphStore(building);
+  try {
+    const result = await indexProject(store, dir);
+    log(`  indexed ${result.indexed} files in ${Math.round(result.elapsedMs / 1000)} s`);
+  } finally {
+    store.close();
+  }
+  renameSync(building, seed);
+  return seed;
+}
+
+/** A fresh worktree of the source at `workDir`, replacing whatever an earlier run left there. */
+function addWorktree(sourceClone: string, source: EvalSource, workDir: string): void {
+  if (existsSync(workDir)) {
+    spawnSync('git', ['worktree', 'remove', '--force', workDir], { cwd: sourceClone });
+    rmSync(workDir, { recursive: true, force: true });
+  }
+  git(['worktree', 'prune'], sourceClone);
+  mkdirSync(dirname(workDir), { recursive: true });
+  git(['worktree', 'add', '-q', '--detach', workDir, source.commit], sourceClone);
+}
+
 export interface RunTaskOptions {
   run: string;
   /** Where the task's fresh copy goes; removed and recreated. */
@@ -181,12 +272,23 @@ export interface RunTaskOptions {
   config?: Record<string, unknown>;
   commit: string;
   timeoutS?: number;
+  /** Where large-repo sources are cached; needed only by tasks with a `source`. */
+  cacheDir?: string;
+  log?: (line: string) => void;
 }
 
 export async function runTask(task: EvalTask, options: RunTaskOptions): Promise<EvalResult> {
-  rmSync(options.workDir, { recursive: true, force: true });
-  mkdirSync(options.workDir, { recursive: true });
-  cpSync(join(task.dir, 'repo'), options.workDir, { recursive: true });
+  if (task.source) {
+    if (!options.cacheDir) throw new Error(`eval task ${task.id}: a "source" task needs a cache directory`);
+    const seed = await ensureSeedIndex(options.cacheDir, task.source, options.log);
+    addWorktree(sourceDir(options.cacheDir, task.source), task.source, options.workDir);
+    mkdirSync(join(options.workDir, '.o4c'), { recursive: true });
+    copyFileSync(seed, join(options.workDir, '.o4c', GRAPH_DB_FILENAME));
+  } else {
+    rmSync(options.workDir, { recursive: true, force: true });
+    mkdirSync(options.workDir, { recursive: true });
+  }
+  if (existsSync(join(task.dir, 'repo'))) cpSync(join(task.dir, 'repo'), options.workDir, { recursive: true });
   // A .o4c/ marks the copy trusted (no prompt) and holds the per-run config overrides.
   mkdirSync(join(options.workDir, '.o4c'), { recursive: true });
   writeFileSync(join(options.workDir, '.o4c', 'config.json'), JSON.stringify(options.config ?? {}, null, 2));
@@ -291,12 +393,14 @@ function resultsFile(evalDir: string, name: string): string {
 }
 
 const USAGE = `usage:
-  o4c eval run [--tasks id,id] [--tier base|hard] [--name run] [--config json|file] [--timeout s] [--dir eval] [-- o4c flags]
+  o4c eval run [--tasks id,id] [--tier base|hard|large] [--name run] [--config json|file] [--timeout s] [--dir eval] [-- o4c flags]
   o4c eval diff <runA> <runB> [--dir eval]
   o4c eval list [--dir eval]
 
 run    each task headless in a fresh copy, then its pass script; one line per task in
        eval/results/<run>.jsonl. Re-running the same --name skips tasks already recorded.
+       Large-repo tasks (--tier large) fetch their repository once into O4C_EVAL_CACHE
+       (default eval/.cache/) and run in a git worktree of it.
 diff   task-by-task and total comparison of two runs.`;
 
 /** `o4c eval ...` - returns the process exit code. */
@@ -359,6 +463,8 @@ export async function runEvalCli(argv: string[], out: (line: string) => void = (
         config,
         commit,
         timeoutS: timeout ? Number(timeout) : undefined,
+        cacheDir: defaultCacheDir(evalDir),
+        log: out,
       });
       appendFileSync(file, `${JSON.stringify(result)}\n`);
       out(`  ${task.id} ${result.pass ? 'PASS' : 'fail'} ${result.wallS} s, ${result.inputTokens + result.outputTokens} tokens, ${result.toolCalls} tool calls${result.timedOut ? ' (timed out)' : ''}`);

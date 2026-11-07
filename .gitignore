@@ -11,3 +11,6 @@ dist-eval/
 .tmp-repro/
 tmp.tmp/
 dist-sea/
+
+# Large-repo eval sources (o4c eval run --tier large): fetched clones and their seed indexes.
+eval/.cache/

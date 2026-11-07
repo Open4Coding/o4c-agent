@@ -1,0 +1,13 @@
+src/vs/workbench/common/editor/binaryEditorModel.ts
+src/vs/workbench/common/editor/diffEditorModel.ts
+src/vs/workbench/common/editor/textEditorModel.ts
+src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatDiffBlockPart.ts
+src/vs/workbench/contrib/mergeEditor/browser/mergeEditorInputModel.ts
+src/vs/workbench/contrib/mergeEditor/browser/model/mergeEditorModel.ts
+src/vs/workbench/contrib/notebook/common/notebookDiffEditorInput.ts
+src/vs/workbench/contrib/notebook/common/notebookEditorModel.ts
+src/vs/workbench/contrib/testing/browser/testResultsView/testResultsOutput.ts
+src/vs/workbench/contrib/userDataProfile/browser/userDataProfilesEditorModel.ts
+src/vs/workbench/contrib/welcomeWalkthrough/browser/walkThroughInput.ts
+src/vs/workbench/services/preferences/browser/keybindingsEditorModel.ts
+src/vs/workbench/services/preferences/common/preferencesModels.ts

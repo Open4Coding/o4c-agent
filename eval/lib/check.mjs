@@ -38,8 +38,31 @@ export function original(checkUrl, rel) {
   return readFileSync(join(dirname(fileURLToPath(checkUrl)), 'repo', rel), 'utf-8');
 }
 
+/** A file as a large-repo task started: the pinned commit's copy, which the worktree's HEAD is. */
+export function atCommit(rel) {
+  const r = run('git', ['show', `HEAD:${rel}`]);
+  if (r.status !== 0) throw new Error(`not in the commit: ${rel}`);
+  return r.stdout;
+}
+
+/** Files the agent changed, added or deleted against the commit (forward slashes, sorted), .o4c/ aside. */
+export function changedFiles() {
+  const r = run('git', ['status', '--porcelain', '--untracked-files=all']);
+  return r.stdout
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => l.slice(3).replace(/^"|"$/g, ''))
+    .filter((f) => !f.startsWith('.o4c/'))
+    .sort();
+}
+
+/** Every repo-relative path named in the answer file, in the order written. */
+export function pathsIn(text) {
+  return [...text.matchAll(/[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)+\.[A-Za-z0-9]+/g)].map((m) => m[0].replace(/^\.\//, ''));
+}
+
 export function run(command, args, input) {
-  return spawnSync(command, args, { cwd, encoding: 'utf-8', input, timeout: 60000 });
+  return spawnSync(command, args, { cwd, encoding: 'utf-8', input, timeout: 60000, maxBuffer: 256 * 1024 * 1024 });
 }
 
 export function nodeTest(rel) {

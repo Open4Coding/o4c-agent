@@ -1,0 +1,13 @@
+src/vs/platform/agentHost/common/agentHostProcessExit.ts
+src/vs/platform/agentHost/common/agentTelemetryCorrelation.ts
+src/vs/platform/agentHost/node/agentService.ts
+src/vs/platform/agentHost/node/agentSideEffects.ts
+src/vs/platform/agentHost/node/copilot/copilotAgent.ts
+src/vs/platform/agentHost/node/copilot/copilotFailureTelemetry.ts
+src/vs/platform/agentHost/node/copilot/copilotLegacyMarkerFallback.ts
+src/vs/platform/agentHost/node/protocolServerHandler.ts
+src/vs/platform/agentHost/node/sshRemoteAgentHostService.ts
+src/vs/platform/agentHost/node/worktreeDiskUsage.ts
+src/vs/platform/otel/node/otlp/outboundForwarder.ts
+src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostLegacyMigration.ts
+src/vs/workbench/contrib/chat/browser/agentSessions/agentHost/agentHostSessionHandler.ts
