@@ -1,5 +1,5 @@
 # o4c CI (plan 0006 I5): typecheck, the test suite, a dependency audit, and an install smoke test of
-# the real package - npm pack, install it globally, run it - on Windows and Linux.
+# the real package - npm pack, install it globally, run it - on Windows, Linux and macOS.
 name: CI
 
 on:
@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:

@@ -1,0 +1,92 @@
+# o4c release: the single executables (plan 0006 I1) for Windows, Linux and macOS, the npm tarball,
+# and SHA256SUMS.txt, attached to a DRAFT GitHub release for the pushed tag. Publishing the draft and
+# `npm publish` stay manual: npm's 2FA needs the maintainer's own terminal.
+#
+#   git tag v0.1.1 && git push origin v0.1.1      -> builds, then a draft release v0.1.1
+#   Actions > Release > Run workflow               -> builds and keeps the files as run artifacts only
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: ubuntu-latest
+            pack: true
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # build-sea needs Node 26: --build-sea with an ESM main that uses top-level await.
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          want="v$(node -p "require('./package.json').version")"
+          [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME but package.json says $want"; exit 1; }
+      - run: npm run build:sea
+      - name: Sign (macOS, ad hoc)
+        if: runner.os == 'macOS'
+        # Injecting the app invalidates node's own signature, and an unsigned arm64 binary is killed
+        # on launch. An ad hoc signature runs; Gatekeeper still asks on a downloaded copy (see README).
+        run: codesign --force --sign - dist-sea/o4c-darwin-*
+      - name: Smoke test the executable
+        shell: bash
+        run: |
+          exe=$(ls dist-sea/o4c-*-* | grep -v '\.json$' | head -1)
+          mkdir -p "$RUNNER_TEMP/smoke" && cp "$exe" "$RUNNER_TEMP/smoke/" && cd "$RUNNER_TEMP/smoke"
+          ./$(basename "$exe") --version
+          ./$(basename "$exe") --provider mock --output-format json "read something" > out.json
+          node -e "const o = JSON.parse(require('fs').readFileSync('out.json', 'utf8')); if (o.exit_code !== 0 || o.tool_calls < 1) { console.error(o); process.exit(1); } console.log('smoke ok:', o.result.slice(0, 60));"
+      - name: npm tarball
+        if: matrix.pack
+        run: npm pack
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir out
+          cp dist-sea/o4c-*-* out/ 2>/dev/null; rm -f out/*.json
+          if [ -n "${{ matrix.pack }}" ]; then cp open4coding-o4c-agent-*.tgz out/; fi
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: o4c-${{ matrix.os }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+      - name: Checksums
+        working-directory: files
+        run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" files/* --repo "$GITHUB_REPOSITORY" --draft \
+            --title "o4c $GITHUB_REF_NAME" --generate-notes
