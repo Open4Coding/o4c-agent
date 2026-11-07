@@ -4120,13 +4120,25 @@ export function App({
     [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans, pickChoice, checkpoints],
   );
 
+  // Every turn starts here. processTurn unlocks the input only at its own end, so a command that
+  // throws would leave it busy until Ctrl+C with nothing on screen but a crash.log line.
+  const startTurn = useCallback(
+    (input: string) => {
+      processTurn(input).catch((err: unknown) => {
+        pushBlock([{ kind: 'error', text: `${input.split('\n')[0].slice(0, 60)} failed: ${formatError(err)}` }]);
+        setIsProcessing(false);
+      });
+    },
+    [processTurn, pushBlock],
+  );
+
   // I2: the first start ever (no global config) runs /setup by itself, once the app is up.
   const firstRunDoneRef = useRef(false);
   useEffect(() => {
     if (!firstRun || firstRunDoneRef.current) return;
     firstRunDoneRef.current = true;
     pushBlock([infoLine('Welcome to o4c. First, a model to work with:')]);
-    void processTurn('/setup');
+    startTurn('/setup');
     // Once, on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -4481,9 +4493,9 @@ export function App({
       }
 
       setIsProcessing(true);
-      void processTurn(input);
+      startTurn(input);
     },
-    [isProcessing, processTurn, exit, restart, openResumePicker, pushBlock],
+    [isProcessing, startTurn, exit, restart, openResumePicker, pushBlock],
   );
 
   // ask_user (C7): the question in the transcript, the options as a dropdown, and free text always.
@@ -4522,7 +4534,7 @@ export function App({
       if (!text) return;
       if (!isProcessing) {
         setIsProcessing(true);
-        void processTurn(text);
+        startTurn(text);
         return;
       }
       queuedInputsRef.current.push(text);

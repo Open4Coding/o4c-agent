@@ -670,6 +670,21 @@ test('the banner says nothing about Tab once the tip has retired', async () => {
   });
 });
 
+test('a command that throws shows the error and gives the input back', async () => {
+  await withTempDir(async (dir) => {
+    const configGlobalDir = join(dir, 'fake-global');
+    await mkdir(configGlobalDir, { recursive: true });
+    // A config file that is not JSON: reading it throws inside the command.
+    await writeFile(join(configGlobalDir, 'config.json'), '{ not json', 'utf-8');
+    const { stdin, frames } = await setup({ dir, configGlobalDir });
+    await submit(stdin, '/config-global-autosuggest x');
+    await waitFor(() => anyFrameIncludes(frames, '/config-global-autosuggest x failed:'));
+    // Not stuck: the next command runs instead of being queued behind a turn that never ended.
+    await submit(stdin, '/keyboard nosuchos');
+    await waitFor(() => anyFrameIncludes(frames, 'Usage: /keyboard [windows|mac|linux]'));
+  });
+});
+
 test('pressing Tab retires the tip for good, in the global scope', async () => {
   await withTempDir(async (dir) => {
     const configGlobalDir = join(dir, 'fake-global');

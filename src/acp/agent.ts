@@ -107,7 +107,8 @@ export class O4cAcpAgent implements Agent {
     const sid = params.sessionId;
     const pending: { id: string; name: string }[] = [];
     let stepLimit = false;
-    const update = (u: Record<string, unknown>) => this.conn.sessionUpdate({ sessionId: sid, update: u } as never);
+    // Fire and forget: once the editor has gone, each update rejects, and that is nothing to report.
+    const update = (u: Record<string, unknown>) => this.conn.sessionUpdate({ sessionId: sid, update: u } as never).catch(() => undefined);
     const onEvent = (e: AgentEvent) => {
       if (e.type === 'delta' && e.text) void update({ sessionUpdate: e.kind === 'think' ? 'agent_thought_chunk' : 'agent_message_chunk', content: { type: 'text', text: e.text } });
       else if ((e.type === 'text' || e.type === 'think') && !e.streamed && e.text) void update({ sessionUpdate: e.type === 'think' ? 'agent_thought_chunk' : 'agent_message_chunk', content: { type: 'text', text: e.text } });
