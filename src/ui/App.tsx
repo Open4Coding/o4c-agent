@@ -205,6 +205,7 @@ import { activeMemoryStores } from '../session/memories.js';
 import { parseLessons, recentTasks, reflectPrompt, REFLECT_SCHEMA } from '../session/reflect.js';
 import { reviewPrompt } from '../session/review.js';
 import type { CheckpointHooks } from '../session/checkpoints.js';
+import { backgroundActivity, ownJobs, type BackgroundSources } from './backgroundActivity.js';
 import {
   COMMANDS,
   KNOWN_COMMANDS,
@@ -659,22 +660,44 @@ function UsageBar({
  * session. That is why the model name lives here and not on the status line, which re-renders on
  * a timer - this component takes already-resolved strings and does no I/O of its own (see
  * `session/gitInfo.ts` on why reading `.git/HEAD` per render would be the wrong shape even though
- * it is cheap).
+ * it is cheap). The one moving part is the trailing `bg:` activity, sampled every 2 s by
+ * `useBackgroundActivity` and rendered only when the answer changes; it is last on the line so the
+ * rest still holds still.
  *
  * Renders without a branch when there is none, which is a normal case rather than an error: the
  * meta workspace and the scratch directories are not repositories.
  */
+/**
+ * `backgroundActivity()` sampled every two seconds. Kept as a string in state so an unchanged
+ * answer is an identical value and React skips the render: an idle footer is not repainted.
+ */
+function useBackgroundActivity(sources: BackgroundSources | undefined): string {
+  const sample = () => (sources ? backgroundActivity(sources).join(' · ') : '');
+  const [text, setText] = useState(sample);
+  useEffect(() => {
+    if (!sources) return;
+    const id = setInterval(() => setText(sample()), BACKGROUND_POLL_MS);
+    return () => clearInterval(id);
+  }, [sources]);
+  return text;
+}
+const BACKGROUND_POLL_MS = 2000;
+
 function ProjectBar({
   model,
   branch,
   dirty,
   project,
+  background,
 }: {
   model: string;
   branch?: string;
   dirty?: boolean;
   project: string;
+  /** Work running between and alongside turns, shown as a trailing `bg:` part while there is any. */
+  background?: BackgroundSources;
 }) {
+  const activity = useBackgroundActivity(background);
   return (
     <Text>
       <Text color={theme.accent}>◆ {formatModelName(model)}</Text>
@@ -689,6 +712,13 @@ function ProjectBar({
         </Text>
       )}
       <Text color={theme.border}>dir: {project}</Text>
+      {/* Last on the line, so the parts that hold still all session never shift when it comes and goes. */}
+      {activity && (
+        <Text>
+          <Text color={theme.border}> | bg: </Text>
+          <Text color={theme.warn}>{activity}</Text>
+        </Text>
+      )}
     </Text>
   );
 }
@@ -889,6 +919,15 @@ export function App({
   const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
   // L1: background sessions - only in a trusted project, where sessions are saved.
   const backgroundSessions = useMemo(() => (projectRoot ? new BackgroundSessions(join(projectRoot, '.o4c', 'sessions-bg')) : undefined), [projectRoot]);
+  // The footer's `bg:` part. Stable for the session, so the poll in ProjectBar starts once.
+  const backgroundSources = useMemo<BackgroundSources>(
+    () => ({
+      graphPhase: codeGraph ? () => codeGraph.component.status().phase : undefined,
+      checkpointWarming: checkpoints ? () => checkpoints.shadow.isWarming() : undefined,
+      jobs: ownJobs,
+    }),
+    [codeGraph, checkpoints],
+  );
   // L2: the next-message guess shown in the empty input box; carried over a per-turn reload.
   const [suggestion, setSuggestion] = useState<string | undefined>(() => takeSuggestion(initialSession?.id));
   const suggestionRef = useRef<string | undefined>(undefined);
@@ -4662,7 +4701,7 @@ export function App({
           into it. */}
       <StatusBar loop={loop} usage={usageStore} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} customMode={customMode} />
       <UsageBar loop={loop} usage={usageStore} busy={isProcessing} sessionView={shownSessionView} thinkLevel={shownThinkLevel} />
-      <ProjectBar model={model} branch={gitBranch} dirty={gitDirty} project={projectLabelText} />
+      <ProjectBar model={model} branch={gitBranch} dirty={gitDirty} project={projectLabelText} background={backgroundSources} />
       {confirmDialog ? (
         <ConfirmDialog
           key={confirmDialog.id}

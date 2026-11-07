@@ -170,14 +170,25 @@ export class ShadowGit {
    * pack loose objects when git thinks it is time. A failure here is left for the real snapshot.
    */
   warm(): Promise<void> {
+    this.warming = true;
     return this.serial(async () => {
       await this.stage();
       if (!(await this.git(['rev-parse', '--verify', '--quiet', 'HEAD'])).ok) {
         await this.git(['commit', '--quiet', '--allow-empty', '--no-verify', '-m', 'o4c checkpoint base']);
       }
       await this.git(['-c', 'gc.auto=6700', 'gc', '--auto', '--quiet']);
-    }).catch(() => undefined);
+    })
+      .catch(() => undefined)
+      .finally(() => {
+        this.warming = false;
+      });
   }
+
+  /** Whether `warm()` is still running - the footer shows it (`bg: checkpoint prep`). */
+  isWarming(): boolean {
+    return this.warming;
+  }
+  private warming = false;
 
   /** Commits the work tree as it is now; returns the commit id. */
   snapshot(label: string): Promise<string> {

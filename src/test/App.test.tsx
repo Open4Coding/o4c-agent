@@ -1,5 +1,6 @@
 import { test, afterEach } from 'node:test';
 import type { PlanHooks } from '../session/planAuthoring.js';
+import type { CodeGraphSession } from '../graph/startup.js';
 import { InfiniteContextStore as PlanTestStore } from '../session/infiniteContextStore.js';
 import assert from 'node:assert/strict';
 import React from 'react';
@@ -497,6 +498,8 @@ async function setup(opts: {
   // The MCP command surface (item 21e). Only the /mcp tests pass these; undefined elsewhere is
   // exactly a session with no MCP layer, which is what most launches are.
   mcpPromptCommands?: Promise<readonly CommandInfo[]>;
+  // The code graph, for the footer's `bg:` part. Only the background-activity test passes it.
+  codeGraph?: CodeGraphSession;
   mcpStatusReport?: () => readonly string[];
   expandMcpPrompt?: (
     ref: McpPromptRef,
@@ -545,6 +548,7 @@ async function setup(opts: {
       os: opts.os,
       usageStore: opts.usageStore,
       mcpPromptCommands: opts.mcpPromptCommands,
+      codeGraph: opts.codeGraph,
       mcpStatusReport: opts.mcpStatusReport,
       expandMcpPrompt: opts.expandMcpPrompt,
     }),
@@ -4279,5 +4283,20 @@ test('after Esc cancels a picker (/setup), the next slash command still runs on 
     await tick(300);
     stdin.write(ENTER);
     await waitFor(() => anyFrameIncludes(frames, 'Available commands'), 8000);
+  });
+});
+
+// Found 2026-11-07 on the VS Code source: a 5-minute first index pass and a 1.5-minute checkpoint
+// warm-up ran with nothing on screen, so an idle o4c could not be told from a busy one.
+test('the footer shows background work as a trailing bg: part, and drops it when the work ends', async () => {
+  await withTempDir(async (dir) => {
+    let phase = 'building';
+    const codeGraph = { component: { status: () => ({ phase }), isExposed: () => true } } as unknown as CodeGraphSession;
+    const { lastFrame } = await setup({ dir, codeGraph });
+    const projectLine = () => (lastFrame() ?? '').split('\n').find((l) => l.startsWith('◆ ')) ?? '';
+    assert.match(projectLine(), /dir: .* \| bg: indexing code\s*$/, projectLine());
+    phase = 'ready';
+    await new Promise((r) => setTimeout(r, 2300));
+    assert.equal(/bg:/.test(lastFrame() ?? ''), false, projectLine());
   });
 });
