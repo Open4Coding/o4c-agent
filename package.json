@@ -1,6 +1,6 @@
 {
   "name": "@open4coding/o4c-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "o4c - a terminal coding agent built for local models first (llama.cpp, Ollama, LM Studio, any OpenAI-compatible server), with Claude as an option",
   "type": "module",
   "bin": {
