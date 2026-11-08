@@ -133,6 +133,7 @@ import {
   cacheReportLines,
 } from './statusBar.js';
 import { AbortedError, CONTEXT_PRESSURE_RATIO, type AgentLoop, type AgentEvent, type PolicyAnswer } from '../agent/loop.js';
+import { formatPhases } from '../agent/phaseTimer.js';
 import { describeCacheBreak } from '../agent/cacheBreak.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import { createProviderCallLogger, type RunLogger } from '../session/runLog.js';
@@ -696,6 +697,7 @@ function ProjectBar({
   dirty,
   project,
   background,
+  phases,
 }: {
   model: string;
   branch?: string;
@@ -703,6 +705,8 @@ function ProjectBar({
   project: string;
   /** Work running between and alongside turns, shown as a trailing `bg:` part while there is any. */
   background?: BackgroundSources;
+  /** Where the turn's time went (`phaseTimer.ts`): live while one runs, then the last one's. */
+  phases?: { loop: AgentLoop; usage?: UsageStore; busy: boolean };
 }) {
   const activity = useBackgroundActivity(background);
   return (
@@ -719,6 +723,7 @@ function ProjectBar({
         </Text>
       )}
       <Text color={theme.border}>dir: {project}</Text>
+      {phases && <TurnPhasesText {...phases} />}
       {/* Last on the line, so the parts that hold still all session never shift when it comes and goes. */}
       {activity && (
         <Text>
@@ -728,6 +733,24 @@ function ProjectBar({
       )}
     </Text>
   );
+}
+
+/**
+ * `prefill 4.2s · think 38.0s · answer 6.1s` for the turn running, or the last one: a slow turn
+ * read at a glance as a long prompt, a long think or a long answer. Its own component with its own
+ * clock, ticking only while a turn runs, so the rest of the line still holds still. After the
+ * per-turn reload this process has run nothing, and the figure comes from the usage store.
+ */
+function TurnPhasesText({ loop, usage, busy }: { loop: AgentLoop; usage?: UsageStore; busy: boolean }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    const id = setInterval(() => tick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
+  const phases = loop.getTurnPhases() ?? usage?.totals().session.lastTurn;
+  if (!phases) return null;
+  return <Text color={theme.border}> | {formatPhases(phases)}</Text>;
 }
 
 function LineText({ line }: { line: Line }) {
@@ -4847,7 +4870,7 @@ export function App({
           into it. */}
       <StatusBar loop={loop} usage={usageStore} contextWindow={contextWindow} liveText={textWindow.live} mode={mode} busy={isProcessing} customMode={customMode} />
       <UsageBar loop={loop} usage={usageStore} busy={isProcessing} sessionView={shownSessionView} thinkLevel={shownThinkLevel} />
-      <ProjectBar model={model} branch={gitBranch} dirty={gitDirty} project={projectLabelText} background={backgroundSources} />
+      <ProjectBar model={model} branch={gitBranch} dirty={gitDirty} project={projectLabelText} background={backgroundSources} phases={{ loop, usage: usageStore, busy: isProcessing }} />
       {confirmDialog ? (
         <ConfirmDialog
           key={confirmDialog.id}

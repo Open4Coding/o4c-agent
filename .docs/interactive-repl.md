@@ -14,7 +14,11 @@ The three lines under the input box:
 1. The mode, the key hints, how full the context window is, and the session's active time.
 2. `view` and `Think` settings, then tokens: `t-tks` for this project, `s-tks` for this session
    (sent↑/received↓ and the server's speed), and how much of the prompt the server had cached.
-3. The model, the git branch (`*` = uncommitted changes) and the directory. While o4c is working
+3. The model, the git branch (`*` = uncommitted changes) and the directory, then where the turn's
+   time went: `prefill 4.2s · think 38.0s · answer 6.1s`, live while a turn runs and the last
+   turn's afterwards. Prefill is the server reading the prompt (its own figure; before it reports
+   one, the wait for the first token). Think and answer are timed by o4c from the stream, because
+   the server reports them as one figure. A turn with tool calls sums all its requests. While o4c is working
    in the background, a `bg:` part is added at the end of this line: `indexing code 1,200/11,509`
    (the code graph is building or refreshing its index, files done out of the total; `code_graph` answers may be incomplete until it
    finishes), `checkpoint prep` (the first-time setup for `/undo`, which keeps the first edit

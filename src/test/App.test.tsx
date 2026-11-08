@@ -216,6 +216,18 @@ class SplitThinkThenToolProvider implements LLMProvider {
   }
 }
 
+// Thinks for ~300 ms, then answers for ~200 ms, and reports a server prefill of 1.2 s.
+class TimedThinkProvider implements LLMProvider {
+  readonly name = 'timed-think-test';
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    request.onToken?.('pondering', 'think');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    request.onToken?.('PHASEANSWER', 'text');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { content: 'PHASEANSWER', toolCalls: [], stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5, prefillMs: 1_200 } };
+  }
+}
+
 // Streams a real 'think' chunk via onToken, then pauses (until the test calls resume()) before
 // streaming the real answer and resolving - lets a test inspect the LIVE frame mid-turn, the
 // actual behavior being tested (a live "[think]" label the instant reasoning starts streaming,
@@ -620,6 +632,22 @@ test('the footer is three lines, in order, with the model and dir line last', as
   });
 });
 
+test("the footer's third line shows where the last turn's time went: prefill, think, answer", async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new TimedThinkProvider() });
+    assert.equal(lastFrame()!.includes('prefill '), false, 'nothing before the first turn');
+    await submit(stdin, 'go');
+    await waitFor(() => anyFrameIncludes(frames, 'PHASEANSWER'));
+    await tick(800);
+    const line = lastFrame()!.split('\n').find((l) => l.includes('prefill ')) ?? '';
+    const m = /prefill 1\.2s · think (\d+\.\d)s · answer (\d+\.\d)s/.exec(line);
+    assert.ok(m, `the split is on the line: ${line}`);
+    assert.ok(Number(m[1]) >= 0.2 && Number(m[1]) < 2, `think ~0.3s: ${line}`);
+    assert.ok(Number(m[2]) >= 0.1 && Number(m[2]) < 2, `answer ~0.2s: ${line}`);
+    assert.match(line, /dir: /, 'on the model/dir line');
+  });
+});
+
 const execFileAsync = promisify(execFile);
 
 // The branch has been in the footer since 2026-10-01 with no test behind it, and the dirty marker
@@ -835,7 +863,7 @@ test('Ctrl+K drops everything queued behind a busy turn, and the hint for it sho
     assert.ok(lastFrame()!.includes('Queued #2: /view-permissions'));
     assert.ok(lastFrame()!.includes('Ctrl+K drops all 2'));
 
-    stdin.write('');
+    stdin.write('\x0b'); // Ctrl+K
     await tick(50);
     assert.equal(lastFrame()!.includes('Queued #1'), false, 'the queue is empty');
     assert.equal(lastFrame()!.includes('Ctrl+K drops'), false, 'and the hint is gone');

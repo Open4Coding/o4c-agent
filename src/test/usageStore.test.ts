@@ -110,6 +110,30 @@ test('a reloaded session picks its own subtotal back up', async () => {
   });
 });
 
+test("the last turn's prefill/think/answer split survives the reload, until a newer turn replaces it", async () => {
+  const file = await tempFile();
+  const phases = { prefillMs: 4_200, thinkMs: 38_000, answerMs: 6_100 };
+  const spend = () => ({ input: 10, output: 5, requests: 1, cached: 0, processed: 0, prefillMs: 0, draftN: 0, draftAccepted: 0 });
+  const a = new UsageStore(file, () => ({ ...spend(), lastTurn: phases }), () => 0);
+  a.load(undefined);
+  a.setSessionId('abc123');
+  a.flush();
+
+  const b = new UsageStore(file, spend, () => 0);
+  b.load('abc123');
+  assert.deepEqual(b.totals().session.lastTurn, phases, 'a process that has run nothing shows the stored turn');
+  b.flush();
+
+  const newer = { prefillMs: 100, thinkMs: 0, answerMs: 900 };
+  const c = new UsageStore(file, () => ({ ...spend(), lastTurn: newer }), () => 0);
+  c.load('abc123');
+  assert.deepEqual(c.totals().session.lastTurn, newer);
+  c.flush();
+  const d = new UsageStore(file, spend, () => 0);
+  d.load('abc123');
+  assert.deepEqual(d.totals().session.lastTurn, newer);
+});
+
 test('the session clock survives the per-turn reload', async () => {
   // 0002 item 7, and the whole reason active time is stored at all: the footer clock used to count
   // from process start, so it restarted every turn or two and a long session read as a short one.

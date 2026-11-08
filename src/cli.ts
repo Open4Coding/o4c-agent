@@ -1316,6 +1316,7 @@ program
               prefillMs: used.prefillMs,
               draftN: used.draftTokens,
               draftAccepted: used.draftAccepted,
+              lastTurn: loop.getTurnPhases(),
             };
           }, Date.now, globalUsageFile())
         : undefined;

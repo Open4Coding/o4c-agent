@@ -54,6 +54,7 @@ import {
   type CompactionSettings,
 } from './compaction.js';
 import { createThinkTagStripper } from './streamFilter.js';
+import { addPhases, RequestPhases, zeroPhases, type PhaseTimes } from './phaseTimer.js';
 import type { ThinkLevel } from './thinkLevel.js';
 import { NO_SPAN, type SpanHandle, type SpanKind, type TurnTracer } from './tracer.js';
 import {
@@ -406,6 +407,12 @@ export class AgentLoop {
    * delta of anything.
    */
   private baseEstimateAtLastRealCount = 0;
+  /** This turn's prefill/think/answer split (`phaseTimer.ts`): the requests that finished, and the
+   * one in flight. Kept after the turn ends - it is what the footer shows until the next one. */
+  private turnPhases: PhaseTimes | undefined;
+  private requestPhases: RequestPhases | undefined;
+  /** Nesting of `run()`: a sub-agent's run on this loop is part of the outer turn, not a new one. */
+  private runDepth = 0;
   /** Last reported decode rate, for the status bar - see `getTokensPerSecond()`. */
   private lastTokensPerSecond: number | undefined;
   /**
@@ -691,6 +698,21 @@ export class AgentLoop {
    */
   getTokensPerSecond(): number | undefined {
     return this.lastTokensPerSecond;
+  }
+
+  /** The current turn's prefill/think/answer time, including the request still running, or the last
+   * turn's once it has ended. Undefined before this process has sent a turn's first request. */
+  getTurnPhases(now = Date.now()): PhaseTimes | undefined {
+    if (!this.turnPhases) return undefined;
+    return this.requestPhases ? addPhases(this.turnPhases, this.requestPhases.times(now)) : this.turnPhases;
+  }
+
+  private endRequestPhases(serverPrefillMs?: number): void {
+    const phases = this.requestPhases;
+    if (!phases) return;
+    this.requestPhases = undefined;
+    phases.end(Date.now(), serverPrefillMs);
+    this.turnPhases = addPhases(this.turnPhases ?? zeroPhases(), phases.times(Date.now()));
   }
 
   /**
@@ -1466,6 +1488,19 @@ export class AgentLoop {
   }
 
   async run(userMessage: string, options: RunOptions = {}): Promise<string> {
+    if (this.runDepth === 0) {
+      this.turnPhases = undefined;
+      this.requestPhases = undefined;
+    }
+    this.runDepth += 1;
+    try {
+      return await this.runTraced(userMessage, options);
+    } finally {
+      this.runDepth -= 1;
+    }
+  }
+
+  private async runTraced(userMessage: string, options: RunOptions): Promise<string> {
     const tracer = this.tracer;
     // A nested run (a sub-agent on this loop) is traced inside the outer turn, not as its own.
     if (!tracer || this.turnSpan) return this.runTurn(userMessage, options);
@@ -1804,7 +1839,10 @@ export class AgentLoop {
       // splitThinkBlock() on the complete text below) - a real invariant this codebase already
       // guarantees for the final answer, extended here to cover the streamed preview too (see
       // streamFilter.ts's own doc comment for why this needs to be stateful across chunks).
-      const thinkFilter = createThinkTagStripper((text, kind) => onEvent({ type: 'delta', text, kind }));
+      const thinkFilter = createThinkTagStripper((text, kind) => {
+        this.requestPhases?.output(kind, Date.now());
+        onEvent({ type: 'delta', text, kind });
+      });
       let streamed = false;
       // §5.7's request-construction hook - the one the four core-tier features actually needed,
       // and the one MCP could never have provided. A hook returns the list to build FROM; it does
@@ -1877,13 +1915,20 @@ export class AgentLoop {
           streamed = true;
           thinkFilter.feed(delta, kind);
         },
-        onToolProgress: (toolName, chars) => onEvent({ type: 'tool_progress', toolName, chars }),
+        onToolProgress: (toolName, chars) => {
+          this.requestPhases?.output('text', Date.now());
+          onEvent({ type: 'tool_progress', toolName, chars });
+        },
         onPrefillProgress: (prefill) => onEvent({ type: 'prefill_progress', prefill }),
         onServerBusy: () => onEvent({ type: 'server_busy' }),
       };
       const modelSpan = this.span('model', request.purpose ?? 'main');
+      this.turnPhases ??= zeroPhases();
+      this.requestPhases = new RequestPhases(Date.now());
       try {
         response = await this.provider.complete(request);
+        thinkFilter.flush();
+        this.endRequestPhases(response.usage?.prefillMs);
         modelSpan.end({
           prompt_tokens: response.usage?.inputTokens,
           cached_tokens: response.usage?.cachedTokens,
@@ -1923,6 +1968,7 @@ export class AgentLoop {
         // or rename the underlying abort error (e.g. LocalProvider merges this signal with its
         // own request timeout via AbortSignal.any, so a plain `err.name` check can't tell "the
         // user cancelled" apart from "the provider's own timeout fired" the way this can).
+        this.endRequestPhases();
         modelSpan.end({ error: options.signal?.aborted ? 'aborted' : err instanceof Error ? err.name : 'error' });
         if (options.signal?.aborted) {
           this.rollbackTo(lengthBeforeTurn);

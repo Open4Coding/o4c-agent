@@ -71,6 +71,20 @@ export interface ProcessSpend extends TokenSpend {
   prefillMs: number;
   draftN: number;
   draftAccepted: number;
+  /** The last turn's prefill/think/answer split (`agent/phaseTimer.ts`), when this process ran one. */
+  lastTurn?: TurnPhases;
+}
+
+/**
+ * Where the last turn's time went, for the footer. Not a counter: the newest turn replaces it. Kept
+ * here because the per-turn reload ends the process that timed it, and the footer would otherwise
+ * be blank after every turn. Optional within v4 rather than a new version: an older build that
+ * drops it on write loses one display line until the next turn, which is not worth freezing over.
+ */
+export interface TurnPhases {
+  prefillMs: number;
+  thinkMs: number;
+  answerMs: number;
 }
 
 /** The v4 counters, in one list so parse, add and zero cannot drift apart. */
@@ -127,6 +141,12 @@ function addCache(a: Pick<ProcessSpend, (typeof CACHE_FIELDS)[number]>, b: Pick<
   return out;
 }
 
+/** This process's last turn if it ran one, else the one the session had. */
+function lastTurnOf(spent: ProcessSpend, base: SessionSpend): { lastTurn?: TurnPhases } {
+  const lastTurn = spent.lastTurn ?? base.lastTurn;
+  return lastTurn ? { lastTurn } : {};
+}
+
 function emptyUsage(): StoredUsage {
   return { version: USAGE_FILE_VERSION, project: zero(), sessions: {} };
 }
@@ -157,6 +177,11 @@ function saneSessionSpend(value: unknown): SessionSpend {
     session.requests = sane(obj.requests);
     session.activeMs = sane(obj.activeMs);
     for (const f of CACHE_FIELDS) session[f] = sane(obj[f]);
+    const t = obj.lastTurn;
+    if (t && typeof t === 'object') {
+      const p = t as Record<string, unknown>;
+      session.lastTurn = { prefillMs: sane(p.prefillMs), thinkMs: sane(p.thinkMs), answerMs: sane(p.answerMs) };
+    }
   }
   return session;
 }
@@ -263,6 +288,7 @@ export class UsageStore {
         requests: this.sessionBaseline.requests + requests,
         activeMs: this.sessionBaseline.activeMs + this.elapsed(),
         ...addCache(this.sessionBaseline, spent),
+        ...lastTurnOf(spent, this.sessionBaseline),
       },
       ...(this.machineBaseline ? { machine: { input: this.machineBaseline.input + input, output: this.machineBaseline.output + output } } : {}),
     };
@@ -320,6 +346,7 @@ export class UsageStore {
           requests: base.requests + requests,
           activeMs: base.activeMs + activeMs,
           ...addCache({ ...zeroSession(), ...base }, spent),
+          ...lastTurnOf(spent, base),
         };
         // Delete before setting so the touched session moves to the end, making the key order a
         // real recency order for the trim below.
