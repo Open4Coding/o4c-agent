@@ -178,7 +178,7 @@ import { defaultLogsDir } from '../session/runLog.js';
 import { MOUSE_CONFIG_KEY } from './mouse.js';
 import { CUSTOM_MODE_KEY, customModeGate, customModes, findCustomMode, initialCustomMode, nextInCycle, withCustomNote, type CustomMode } from './customModes.js';
 import { BLOCK_GAP_KEY, parseBlockGap, settingLabel, settingValues } from './settingsIndex.js';
-import { describeKeybindings, isAction } from './keybindings.js';
+import { describeKeybindings, isAction, keyLabel } from './keybindings.js';
 import { copyToClipboard, replyBack } from './clipboard.js';
 import { cleanCommitMessage, commitDiff, commitPrompt, runCommit } from '../session/commit.js';
 import { formatStats, taskCounts } from './statsReport.js';
@@ -1679,6 +1679,13 @@ export function App({
         void loop.endReasoning().then((ended) => {
           if (ended) pushBlock([{ kind: 'system', text: 'Thinking ended by you (Ctrl+T) - answering now.' }]);
         });
+      }
+      // Ctrl+K: drop everything waiting - queued commands and messages, and steering the turn has
+      // not picked up yet. The hint under the queued list says so whenever there is something.
+      if (isAction('drop-queue', input, key) && queuedInputsRef.current.length + steeringRef.current.length > 0) {
+        const dropped = [...steeringRef.current.splice(0), ...queuedInputsRef.current.splice(0)];
+        setQueuedPreview([]);
+        pushBlock([infoLine(`Dropped ${dropped.length} waiting: ${dropped.map((d) => (d.length > 60 ? `${d.slice(0, 60)}...` : d)).join(' | ')}`)]);
       }
       // L1: Ctrl+X is /session, when nothing else has the keyboard.
       if (isAction('sessions', input, key) && !isProcessing && !choicePicker) handleSubmit('/session');
@@ -4948,6 +4955,11 @@ export function App({
           Queued #{i + 1}: {q}
         </Text>
       ))}
+      {queuedPreview.length > 0 && (
+        <Text color={theme.border}>
+          {keyLabel('drop-queue')} drops {queuedPreview.length === 1 ? 'it' : `all ${queuedPreview.length}`}
+        </Text>
+      )}
     </Box>
   );
 }

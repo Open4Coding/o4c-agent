@@ -106,6 +106,8 @@ from the current context, nothing is added to history, and the main task is not 
 ## `/queue`
 
 Show the messages waiting to run after the current turn (queued with Ctrl+Q while the model works).
+Pick one to edit or drop it. To drop everything at once while the turn runs, press Ctrl+K: the hint under the
+queued list shows whenever something is waiting. Ctrl+K also drops steering messages the model has not read yet.
 
 ## `/review`
 

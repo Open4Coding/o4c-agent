@@ -14,6 +14,7 @@ export const KEY_ACTIONS = {
   'line-start': { key: 'a', label: 'Jump to the start of the whole input' },
   'line-end': { key: 'e', label: 'Jump to the end of the whole input' },
   'editor': { key: 'g', label: 'Compose the message in your editor' },
+  'drop-queue': { key: 'k', label: 'Drop everything waiting to run (shown while something is queued)' },
   'next-paragraph': { key: 'n', label: 'Jump to the next paragraph' },
   'expand-pastes': { key: 'o', label: 'Expand collapsed pastes' },
   'prev-paragraph': { key: 'p', label: 'Jump to the previous paragraph' },

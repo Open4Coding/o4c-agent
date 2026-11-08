@@ -822,6 +822,27 @@ test('/exit bypasses the FIFO queue even while a turn is stuck processing, inste
   });
 });
 
+test('Ctrl+K drops everything queued behind a busy turn, and the hint for it shows only while something is queued', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, lastFrame } = await setup({ dir, provider: new HangingProvider() });
+    await submit(stdin, 'this will hang forever');
+    await tick(50);
+    assert.equal(anyFrameIncludes(frames, 'Ctrl+K drops'), false, 'no hint with nothing queued');
+
+    await submit(stdin, '/usage');
+    await submit(stdin, '/view-permissions');
+    await tick(50);
+    assert.ok(lastFrame()!.includes('Queued #2: /view-permissions'));
+    assert.ok(lastFrame()!.includes('Ctrl+K drops all 2'));
+
+    stdin.write('');
+    await tick(50);
+    assert.equal(lastFrame()!.includes('Queued #1'), false, 'the queue is empty');
+    assert.equal(lastFrame()!.includes('Ctrl+K drops'), false, 'and the hint is gone');
+    assert.ok(anyFrameIncludes(frames, 'Dropped 2 waiting: /usage | /view-permissions'));
+  });
+});
+
 test('/clear bypasses the FIFO queue even while a turn is busy, instead of firing silently once it finishes', async () => {
   await withTempDir(async (dir) => {
     const { stdin, frames, restartCalls } = await setup({ dir, provider: new HangingProvider() });
