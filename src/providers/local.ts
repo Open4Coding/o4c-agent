@@ -328,6 +328,8 @@ export class LocalProvider implements LLMProvider {
   private readonly hosted: boolean;
   /** How errors name the server: "Local server", or the endpoint by name. */
   private readonly label: string;
+  private readonly chatPath: string;
+  private readonly extraHeaders: Record<string, string>;
   private baseUrl: string;
   private connectTimeoutMs: number;
   private idleTimeoutMs: number;
@@ -375,11 +377,17 @@ export class LocalProvider implements LLMProvider {
       slots?: number;
       /** The endpoint's name, for a hosted OpenAI-compatible API (see `hosted`). */
       hosted?: string;
+      /** Hosted only: the chat path after `baseUrl` when it is not `/v1/chat/completions` (GitHub Copilot's has no `/v1`). */
+      chatPath?: string;
+      /** Hosted only: headers the API wants on every request (GitHub Copilot's client identification). */
+      headers?: Record<string, string>;
     } = {},
   ) {
     this.hosted = options.hosted !== undefined;
     this.name = options.hosted ?? 'local';
     this.label = options.hosted !== undefined ? `Endpoint "${options.hosted}"` : 'Local server';
+    this.chatPath = (this.hosted && options.chatPath) || '/v1/chat/completions';
+    this.extraHeaders = this.hosted ? (options.headers ?? {}) : {};
     this.setSlots(options.slots);
     this.modelId = options.modelId;
     this.samplingConfig = options.sampling;
@@ -595,10 +603,11 @@ export class LocalProvider implements LLMProvider {
       : undefined;
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+      response = await fetch(`${this.baseUrl}${this.chatPath}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...this.extraHeaders,
           ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
         },
         body: JSON.stringify(this.hosted ? await this.hostedBody(request) : {

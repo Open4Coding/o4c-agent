@@ -312,6 +312,19 @@ test('a hosted endpoint never borrows O4C_LOCAL_API_KEY, and says which endpoint
   }
 });
 
+test('a hosted endpoint can name its own chat path and headers (GitHub Copilot: no /v1, its client headers); the local server ignores both', async () => {
+  let url = '';
+  const copilot = new LocalProvider({ hosted: 'copilot', baseUrl: 'https://api.individual.githubcopilot.com', chatPath: '/chat/completions', headers: { 'Copilot-Integration-Id': 'x' }, apiKey: 'gho_t', modelId: 'gpt-4.1' });
+  await withMockedFetch((input) => ((url = String(input)), okResponse()), () => copilot.complete(baseRequest));
+  assert.equal(url, 'https://api.individual.githubcopilot.com/chat/completions');
+  assert.equal(capturedHeaders()['Copilot-Integration-Id'], 'x');
+  assert.equal(capturedHeaders().Authorization, 'Bearer gho_t');
+  const local = new LocalProvider({ baseUrl: 'http://box:8080', chatPath: '/chat/completions', headers: { 'Copilot-Integration-Id': 'x' } });
+  await withMockedFetch((input) => ((url = String(input)), okResponse()), () => local.complete(baseRequest));
+  assert.equal(url, 'http://box:8080/v1/chat/completions');
+  assert.equal('Copilot-Integration-Id' in capturedHeaders(), false);
+});
+
 test('a hosted endpoint makes no llama-only side calls', async () => {
   let calls = 0;
   const provider = new LocalProvider({ hosted: 'x', modelId: 'm' });

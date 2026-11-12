@@ -24,7 +24,8 @@ import { registerSecret, setPassKeysToShell } from './session/redact.js';
 import { setPinnedCommands } from './ui/slashCommand.js';
 import { SHOW_TIPS_KEY, TIP_COUNTER_KEY, tipFor } from './ui/tips.js';
 import { defaultProvider } from './session/providerDefault.js';
-import { ENDPOINTS_KEY, endpointFor, HOSTED_DEFAULT_CONTEXT_WINDOW, parseEndpoints } from './session/endpoints.js';
+import { ENDPOINTS_KEY, endpointFor, HOSTED_DEFAULT_CONTEXT_WINDOW, hostedRoute, parseEndpoints } from './session/endpoints.js';
+import { copilotLoginHelp, resolveCopilotToken } from './providers/copilot.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
 import { setShellTimeoutDefault } from './tools/runShell.js';
@@ -931,10 +932,22 @@ program
       }
     } else if (endpoint) {
       // A hosted OpenAI-compatible API: the same streaming client, standard fields only, its own key.
+      // GitHub Copilot's key is the GitHub login, looked up now so a renewed one is picked up.
+      let apiKey = credentials.values[endpoint.name];
+      if (endpoint.copilot) {
+        const found = await resolveCopilotToken(endpoint.copilot, apiKey);
+        if (!found) {
+          console.error(copilotLoginHelp(endpoint.copilot).replace(' and paste it here', ' and run /endpoint-add again'));
+          process.exitCode = 1;
+          return;
+        }
+        apiKey = found.token;
+        registerSecret(apiKey);
+      }
       provider = new LocalProvider({
         hosted: endpoint.name,
-        baseUrl: endpoint.baseUrl,
-        apiKey: credentials.values[endpoint.name],
+        ...hostedRoute(endpoint),
+        apiKey,
         modelId: opts.model,
         maxTokens: providerMaxTokens,
         connectTimeoutMs,

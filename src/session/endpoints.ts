@@ -1,4 +1,5 @@
 import { AgentLoop } from '../agent/loop.js';
+import { COPILOT_CHAT_PATH, copilotHeaders } from '../providers/copilot.js';
 import { LocalProvider } from '../providers/local.js';
 import type { ConfigStore } from './configStore.js';
 
@@ -29,6 +30,12 @@ export interface Endpoint {
   baseUrl: string;
   model: string;
   contextWindow?: number;
+  /**
+   * GitHub Copilot: the GitHub host it signs in to (`github.com` or `<name>.ghe.com`). The token is
+   * looked up on every start (providers/copilot.ts) rather than only read from credentials, so a
+   * GitHub CLI login that is renewed keeps working; `url` is the account's Copilot API base.
+   */
+  copilot?: string;
 }
 
 /** `https://host/openai/v1/chat/completions/` -> `https://host/openai/v1`. */
@@ -70,6 +77,7 @@ export function parseEndpoints(value: unknown): { endpoints: Endpoint[]; problem
         baseUrl: baseUrlOf(e.url),
         model: e.model,
         ...(typeof e.contextWindow === 'number' && e.contextWindow > 0 ? { contextWindow: e.contextWindow } : {}),
+        ...(typeof e.copilot === 'string' && e.copilot ? { copilot: e.copilot } : {}),
       });
     }
   }
@@ -95,6 +103,8 @@ export interface EndpointPreset {
   /** Whether `GET /v1/models` answers, so the offered list can come from the endpoint itself. */
   listsModels: boolean;
   keyHelp: string;
+  /** Signs in with a GitHub login and finds its own URL and models (providers/copilot.ts). */
+  copilot?: true;
 }
 
 const AWS_REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-northeast-1', 'ap-southeast-2'] as const;
@@ -102,9 +112,8 @@ const AWS_REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-cen
 /**
  * Amazon Bedrock per AWS's Chat Completions guide (checked 2026-11-07): `bedrock-runtime` is the
  * recommended endpoint and has no models list; `bedrock-mantle` is the compatibility one and does.
- * Both take a Bedrock API key as a Bearer token. GitHub Copilot is not here: GitHub Models (the
- * key-based API) was retired 2026-07-30, and Copilot's own chat endpoint is not offered to other
- * clients - see the endpoints doc.
+ * Both take a Bedrock API key as a Bearer token. GitHub Copilot signs in with the user's GitHub
+ * login instead of a key, on github.com or a `<name>.ghe.com` enterprise - see providers/copilot.ts.
  */
 export const PRESETS: readonly EndpointPreset[] = [
   {
@@ -146,6 +155,15 @@ export const PRESETS: readonly EndpointPreset[] = [
     keyHelp: 'An OpenRouter API key (openrouter.ai > Keys)',
   },
   {
+    id: 'copilot',
+    label: 'GitHub Copilot - your Copilot plan on github.com or a <name>.ghe.com enterprise (signs in with your GitHub login)',
+    name: 'copilot',
+    models: [],
+    listsModels: true,
+    keyHelp: 'A GitHub token',
+    copilot: true,
+  },
+  {
     id: 'custom',
     label: 'Another OpenAI-compatible endpoint - type its URL',
     name: 'custom',
@@ -179,7 +197,7 @@ export async function listModels(
 /** Saves an endpoint (and its key) to the global config; `select` also makes it the provider. */
 export async function saveEndpoint(
   store: ConfigStore,
-  endpoint: { name: string; url: string; model: string; contextWindow?: number },
+  endpoint: { name: string; url: string; model: string; contextWindow?: number; copilot?: string },
   apiKey: string | undefined,
   select: boolean,
 ): Promise<void> {
@@ -190,6 +208,7 @@ export async function saveEndpoint(
     url: normalizeUrl(endpoint.url),
     model: endpoint.model,
     ...(endpoint.contextWindow ? { contextWindow: endpoint.contextWindow } : {}),
+    ...(endpoint.copilot ? { copilot: endpoint.copilot } : {}),
   };
   await store.set('global', ENDPOINTS_KEY, map);
   if (apiKey) {
@@ -213,16 +232,26 @@ export async function selectProvider(store: ConfigStore, provider: string): Prom
 
 /** One line per choice for `/endpoint`: the built-ins that are set up, then every endpoint. */
 export function describeEndpoint(e: Endpoint): string {
-  return `${e.name} - ${e.model} at ${e.url}`;
+  return `${e.name} - ${e.model} at ${e.copilot ? `GitHub Copilot (${e.copilot})` : e.url}`;
+}
+
+/**
+ * Where a hosted provider sends its requests: `<base>/v1/chat/completions` for an OpenAI-compatible
+ * API, `<url>/chat/completions` plus Copilot's own headers for GitHub Copilot.
+ */
+export function hostedRoute(endpoint: { url: string; copilot?: string }): { baseUrl: string; chatPath?: string; headers?: Record<string, string> } {
+  return endpoint.copilot
+    ? { baseUrl: normalizeUrl(endpoint.url), chatPath: COPILOT_CHAT_PATH, headers: copilotHeaders() }
+    : { baseUrl: baseUrlOf(endpoint.url) };
 }
 
 /** One real tool call against the endpoint, before anything is saved - the check /setup and /doctor make. */
 export async function checkEndpoint(
-  endpoint: { name: string; url: string; model: string },
+  endpoint: { name: string; url: string; model: string; copilot?: string },
   apiKey: string | undefined,
 ): Promise<{ ok: boolean; detail: string }> {
   try {
-    const provider = new LocalProvider({ hosted: endpoint.name, baseUrl: baseUrlOf(endpoint.url), apiKey, modelId: endpoint.model });
+    const provider = new LocalProvider({ hosted: endpoint.name, ...hostedRoute(endpoint), apiKey, modelId: endpoint.model });
     return await new AgentLoop(provider, [], '').probeToolCall(AbortSignal.timeout(120_000));
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };

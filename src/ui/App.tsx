@@ -85,6 +85,7 @@ import {
 } from './contextWindowSetting.js';
 import { formatError } from './formatError.js';
 import { checkEndpoint, describeEndpoint, ENDPOINTS_KEY, listModels, normalizeUrl, parseEndpoints, PRESETS, saveEndpoint, selectProvider, validName } from '../session/endpoints.js';
+import { copilotAccount, copilotLoginHelp, copilotModels, normalizeHost, resolveCopilotToken, validHost } from '../providers/copilot.js';
 import { formatConfirmMessage, previewLineCount } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
 import { formatMessage } from './formatMessage.js';
@@ -3415,7 +3416,58 @@ export function App({
         const presetId = await pickChoice('Which kind of endpoint? (↑/↓, Enter, Esc to cancel)', PRESETS.map((p) => ({ key: p.id, label: p.label })));
         const preset = PRESETS.find((p) => p.id === presetId);
         let url: string | undefined;
-        if (preset?.regions && preset.url) {
+        let apiKey: string | undefined;
+        let model: string | undefined;
+        // GitHub Copilot: the GitHub host, then its login (found, or a pasted token), and the
+        // account's own API base and models.
+        let copilotHost: string | undefined;
+        let copilotToken: string | undefined;
+        let contextWindow: number | undefined;
+        if (preset?.copilot) {
+          const where = await pickChoice('Which GitHub? (↑/↓, Enter, Esc to cancel)', [
+            { key: 'github.com', label: 'github.com - a personal or organisation Copilot plan' },
+            { key: 'ghe', label: 'An enterprise on <name>.ghe.com (GitHub Enterprise Cloud with data residency) - type it' },
+          ]);
+          const typedHost = where === 'ghe' ? await typed('Your enterprise host (e.g. octo-corp.ghe.com):') : where;
+          const host = typedHost ? normalizeHost(typedHost) : undefined;
+          const badHost = host ? validHost(host) : undefined;
+          if (badHost) pushBlock([infoLine(`${badHost} Nothing changed.`)]);
+          if (host && !badHost) {
+            const found = await resolveCopilotToken(host, undefined);
+            if (found) {
+              pushBlock([infoLine(`Signing in with ${found.source}.`)]);
+              copilotToken = found.token;
+            } else {
+              apiKey = await typed(`${copilotLoginHelp(host)}\nPaste a token (saved in your global ~/.o4c/config.json credentials, never in a project; Enter to stop):`);
+              copilotToken = apiKey;
+            }
+          }
+          if (host && copilotToken) {
+            registerSecret(copilotToken);
+            const account = await copilotAccount(host, copilotToken);
+            const models = await copilotModels(account.api, copilotToken);
+            if (!models) {
+              pushBlock([infoLine(`Could not read the Copilot models at ${account.api} - check that this login has a Copilot seat.`)]);
+            } else {
+              const notes = [
+                models.responsesOnly.length ? `Not offered, they need the Responses API o4c does not speak yet: ${models.responsesOnly.join(', ')}.` : '',
+                models.disabled.length ? `Turned off for this account by a Copilot policy: ${models.disabled.join(', ')}.` : '',
+              ].filter(Boolean);
+              if (notes.length) pushBlock([infoLine(notes.join('\n'))]);
+              const offered = models.usable.slice(0, 40);
+              const picked = offered.length
+                ? await pickChoice(`Model (${models.usable.length} on your Copilot plan${account.plan ? `, ${account.plan}` : ''}) (↑/↓, Enter, Esc to cancel):`, [
+                    ...offered.map((m) => ({ key: `m:${m.id}`, label: m.contextWindow ? `${m.id} - ${Math.round(m.contextWindow / 1000)}K context` : m.id })),
+                    { key: 'type', label: 'Another model - type its id' },
+                  ])
+                : 'type';
+              model = picked === 'type' ? await typed('The model id:') : picked?.slice(2);
+              contextWindow = models.usable.find((m) => m.id === model)?.contextWindow;
+              url = account.api;
+              copilotHost = host;
+            }
+          }
+        } else if (preset?.regions && preset.url) {
           const region = await pickChoice('Region (↑/↓, Enter, Esc to cancel):', [
             ...preset.regions.map((r) => ({ key: r, label: r })),
             { key: '', label: 'Another region - type it' },
@@ -3431,10 +3483,11 @@ export function App({
             url = undefined;
           }
         }
-        const apiKey = preset && url ? await typed(`${preset.keyHelp}. Paste it (saved in your global ~/.o4c/config.json credentials, never in a project; Enter for none):`) : undefined;
+        if (preset && url && !preset.copilot) {
+          apiKey = await typed(`${preset.keyHelp}. Paste it (saved in your global ~/.o4c/config.json credentials, never in a project; Enter for none):`);
+        }
         if (apiKey) registerSecret(apiKey);
-        let model: string | undefined;
-        if (preset && url) {
+        if (preset && url && !preset.copilot) {
           const listed = preset.listsModels ? await listModels(url, apiKey) : undefined;
           const offered = (listed ?? [...preset.models]).slice(0, 40);
           const picked = offered.length
@@ -3459,9 +3512,16 @@ export function App({
         if (!preset || !url || !model || !name) {
           pushBlock([infoLine('No endpoint added. /endpoint-add starts again.')]);
         } else {
-          const endpoint = { name, url: normalizeUrl(url), model };
+          const endpoint = {
+            name,
+            url: normalizeUrl(url),
+            model,
+            ...(contextWindow ? { contextWindow } : {}),
+            ...(copilotHost ? { copilot: copilotHost } : {}),
+          };
           pushBlock([infoLine(`Checking ${describeEndpoint({ ...endpoint, baseUrl: url })} with one real tool call...`)]);
-          const check = await checkEndpoint(endpoint, apiKey);
+          // A Copilot login that was found (not pasted) is looked up again on every start, never saved.
+          const check = await checkEndpoint(endpoint, copilotToken ?? apiKey);
           if (!check.ok) {
             pushBlock([infoLine(`That did not work: ${check.detail}\nNothing was saved. Check the key, the model id and the region, and run /endpoint-add again.`)]);
           } else {

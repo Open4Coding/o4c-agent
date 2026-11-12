@@ -193,6 +193,7 @@ Add a hosted model API that speaks the OpenAI Chat Completions protocol:
   runtime does not serve), in the region you pick. It needs an Amazon Bedrock API key (Bedrock console >
   API keys). Runtime has no models list, so o4c offers the gpt-oss models and lets you type any other id.
 - **OpenAI**, **OpenRouter**, or **any other** OpenAI-compatible URL.
+- **GitHub Copilot**: your Copilot plan, signed in with your GitHub login (see below).
 
 o4c asks for the key (saved in your global `~/.o4c/config.json` credentials, never in a project), the
 model and a name, then checks one real tool call before saving anything. The endpoint is kept in the
@@ -206,8 +207,31 @@ Optional `"contextWindow"` per endpoint; without it o4c assumes 128,000 tokens u
 registry knows the model. An endpoint gets only standard request fields - the llama.cpp extras o4c uses
 with a local server (slot pinning, prefill progress, ending thinking early, exact token counts) are off.
 
-GitHub Copilot is not offered: GitHub Models, its key-based API, was retired on 2026-07-30, and
-Copilot's own chat endpoint is not open to other clients.
+### GitHub Copilot
+
+Runs o4c on the models of your own Copilot plan, on github.com or on an enterprise at
+`<name>.ghe.com` (GitHub Enterprise Cloud with data residency). It needs no API key. o4c signs in with
+your GitHub login, taking the first one it finds:
+
+1. `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN` / `GITHUB_TOKEN` for github.com, or `GH_ENTERPRISE_TOKEN` for
+   an enterprise host;
+2. a token you paste into `/endpoint-add` (saved in your global credentials);
+3. the GitHub CLI's login: `gh auth login --hostname <host>` once, and o4c asks `gh` on every start.
+
+A token you create yourself comes from `https://<host>/settings/personal-access-tokens/new`.
+
+o4c then reads your account to find its Copilot API, lists the models your plan and its policies allow,
+and checks one real tool call. The list has the models that answer Chat Completions. The GPT-5 and
+later family answers only OpenAI's Responses API, which o4c does not speak yet, so o4c names those
+models and does not offer them. It also names the models a Copilot policy has turned off. The model's
+context window comes from the list.
+
+```json
+"endpoints": { "copilot": { "url": "https://api.individual.githubcopilot.com", "model": "gpt-4.1", "contextWindow": 64000, "copilot": "github.com" } }
+```
+
+Copilot bills by its own measure (AI credits or premium requests, depending on the plan). o4c makes one
+request per model step, so a long task uses more of the allowance than one chat question.
 
 ## `/endpoint [name]`
 
