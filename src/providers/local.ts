@@ -165,6 +165,8 @@ export interface ServerProbe {
   contextWindow?: number;
   /** `/props` `total_slots` - how many requests the server serves at once (plan 0006 A19). */
   totalSlots?: number;
+  /** It answered 401/403: up, but the key was missing or wrong. */
+  keyRefused?: true;
 }
 
 /**
@@ -184,6 +186,7 @@ export async function probeLocalServer(baseUrl: string, apiKey?: string): Promis
     return { status: 'down' };
   }
   if (response.status === 503) return { status: 'loading' };
+  if (response.status === 401 || response.status === 403) return { status: 'up', keyRefused: true };
   let contextWindow: number | undefined;
   let totalSlots: number | undefined;
   if (response.ok) {

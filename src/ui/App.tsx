@@ -86,6 +86,7 @@ import {
 import { formatError } from './formatError.js';
 import { baseUrlOf, checkEndpoint, describeEndpoint, ENDPOINTS_KEY, listModels, normalizeUrl, parseEndpoints, PRESETS, saveEndpoint, selectProvider, suggestLocalName, validName } from '../session/endpoints.js';
 import { copilotAccount, copilotLoginHelp, copilotModels, normalizeHost, resolveCopilotToken, validHost } from '../providers/copilot.js';
+import { loadCredentials } from '../session/credentials.js';
 import { formatConfirmMessage, previewLineCount } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
 import { formatMessage } from './formatMessage.js';
@@ -2248,6 +2249,8 @@ export function App({
           const probe = await (probeServer ? probeServer() : probeLocalServer(baseUrl, apiKey)).catch(() => undefined);
           if (probe?.status !== 'up') {
             checks.push({ name: 'Server', state: 'fail', detail: `${baseUrl}: ${probe?.status ?? 'unreachable'}`, fix: 'Start llama-server (or check the address with /config, and the network path - a closed tunnel is the usual cause), then /doctor again.' });
+          } else if (probe.keyRefused) {
+            checks.push({ name: 'Server', state: 'fail', detail: `${baseUrl}: up, but it refused the API key (401)`, fix: 'Give o4c the server\'s key (llama-server\'s --api-key): /endpoint-add for a named server, or "localApiKey" in the global config.' });
           } else {
             checks.push({ name: 'Server', state: 'ok', detail: `${baseUrl}: ${probe.model ?? 'model id not reported'}, context ${probe.contextWindow?.toLocaleString() ?? 'unknown'}${probe.totalSlots ? `, ${probe.totalSlots} slot(s)` : ''}` });
             try {
@@ -3382,15 +3385,15 @@ export function App({
           const s = usable.find((x) => `server:${x.url}` === pick)!;
           choice = { provider: 'local', baseUrl: s.url, model: s.models[0] };
           if (s.state === 'needs-key') {
-            const key = ask ? await ask(`The server at ${s.url} needs an API key. Paste it (it is saved in your global ~/.o4c/config.json credentials, never in a project):`, []) : undefined;
+            const key = ask ? await ask(`The server at ${s.url} needs an API key. Paste it (it is saved in your global ~/.o4c/config.json credentials, never in a project):`, [], undefined, true) : undefined;
             if (!key?.trim()) choice = undefined;
             else choice.apiKey = key.trim();
           }
         } else if (pick === 'other') {
-          const url = ask ? await ask('The server\'s base URL (e.g. http://192.168.1.20:8080):', []) : undefined;
+          const url = ask ? await ask('The server\'s base URL (e.g. http://192.168.1.20:8080):', [], undefined, true) : undefined;
           if (url?.trim()) choice = { provider: 'local', baseUrl: url.trim().replace(/\/+$/, '') };
         } else if (pick === 'anthropic') {
-          const key = process.env.ANTHROPIC_API_KEY ?? (ask ? await ask('Your Anthropic API key (saved in your global config credentials):', []) : undefined);
+          const key = process.env.ANTHROPIC_API_KEY ?? (ask ? await ask('Your Anthropic API key (saved in your global config credentials):', [], undefined, true) : undefined);
           if (key?.trim()) choice = { provider: 'anthropic', ...(process.env.ANTHROPIC_API_KEY ? {} : { apiKey: key.trim() }) };
         }
         if (!choice) pushBlock([infoLine('Setup cancelled - nothing changed. /setup runs it again.')]);
@@ -3414,7 +3417,7 @@ export function App({
         // model, its key, one real tool call - then saved to the global config, key in credentials.
         pushBlock([userLine(input)]);
         const ask = askUserHandler();
-        const typed = async (q: string): Promise<string | undefined> => ((ask ? await ask(q, []) : undefined) ?? '').trim() || undefined;
+        const typed = async (q: string): Promise<string | undefined> => ((ask ? await ask(q, [], undefined, true) : undefined) ?? '').trim() || undefined;
         const presetId = await pickChoice('Which kind of endpoint? (↑/↓, Enter, Esc to cancel)', PRESETS.map((p) => ({ key: p.id, label: p.label })));
         const preset = PRESETS.find((p) => p.id === presetId);
         let url: string | undefined;
@@ -3425,6 +3428,8 @@ export function App({
         let copilotHost: string | undefined;
         let copilotToken: string | undefined;
         let contextWindow: number | undefined;
+        // A local server: the key its check uses, which may be the one already in use rather than a new one.
+        let localKey: string | undefined;
         if (preset?.copilot) {
           const where = await pickChoice('Which GitHub? (↑/↓, Enter, Esc to cancel)', [
             { key: 'github.com', label: 'github.com - a personal or organisation Copilot plan' },
@@ -3476,11 +3481,25 @@ export function App({
           if (!/^https?:\/\//.test(candidate)) {
             pushBlock([infoLine('That is not an http:// or https:// URL - nothing changed.')]);
           } else {
-            apiKey = await typed('Its API key, if it needs one (saved in your global ~/.o4c/config.json credentials, never in a project; Enter for none):');
+            // The key o4c already sends local servers (the same lookup as at start): Enter reuses it,
+            // and it is not saved again - a named server without its own key falls back to it.
+            const knownKey =
+              (await loadCredentials(configStore).catch(() => undefined))?.values.local ??
+              ((await configStore.get('localApiKey').catch(() => undefined)) as string | undefined) ??
+              process.env.O4C_LOCAL_API_KEY;
+            const answer = await typed(
+              knownKey
+                ? 'Its API key: Enter to use the key you already have for your local server, "none" if it needs no key, or paste another (saved in your global ~/.o4c/config.json credentials, never in a project):'
+                : 'Its API key, if it needs one (saved in your global ~/.o4c/config.json credentials, never in a project; Enter for none):',
+            );
+            apiKey = answer && answer.toLowerCase() !== 'none' ? answer : undefined;
             if (apiKey) registerSecret(apiKey);
-            const probe = await probeLocalServer(baseUrlOf(candidate), apiKey);
+            localKey = apiKey ?? (answer ? undefined : knownKey);
+            const probe = await probeLocalServer(baseUrlOf(candidate), localKey);
             if (probe.status !== 'up') {
               pushBlock([infoLine(`${candidate} is ${probe.status === 'loading' ? 'still loading its model' : 'not answering'} - nothing changed. Start the server (or check the address), then /endpoint-add again.`)]);
+            } else if (probe.keyRefused) {
+              pushBlock([infoLine(`${candidate} is up but refused ${localKey ? 'that key' : 'to answer without a key'} (401) - nothing changed. /endpoint-add again with the server's key (llama-server's --api-key).`)]);
             } else {
               url = candidate;
               model = probe.model ?? (await typed('It did not say which model it serves. The model id:'));
@@ -3543,7 +3562,7 @@ export function App({
           };
           pushBlock([infoLine(`Checking ${describeEndpoint({ ...endpoint, baseUrl: url })} with one real tool call...`)]);
           // A Copilot login that was found (not pasted) is looked up again on every start, never saved.
-          const check = await checkEndpoint(endpoint, copilotToken ?? apiKey);
+          const check = await checkEndpoint(endpoint, copilotToken ?? localKey ?? apiKey);
           if (!check.ok) {
             pushBlock([infoLine(`That did not work: ${check.detail}\nNothing was saved. Check the key, the model id and the region, and run /endpoint-add again.`)]);
           } else {
@@ -4718,8 +4737,8 @@ export function App({
 
   // ask_user (C7): the question in the transcript, the options as a dropdown, and free text always.
   useEffect(() => {
-    setAskUserHandler(async (question, options, signal) => {
-      pushBlock([infoLine(`The model asks: ${question}`)]);
+    setAskUserHandler(async (question, options, signal, fromO4c) => {
+      pushBlock([infoLine(fromO4c ? question : `The model asks: ${question}`)]);
       const TYPED = '__o4c_typed__';
       if (options.length > 0) {
         const picked = await pickChoice('Answer (↑/↓, Enter; Esc = no answer):', [

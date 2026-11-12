@@ -53,6 +53,15 @@ test('probeLocalServer reports loading when the server answers 503 (llama-server
   }
 });
 
+test('probeLocalServer says when the server is up but refuses the key (401), rather than reporting no model', async () => {
+  const { baseUrl, server } = await startServer(() => ({ status: 401, body: '{"error":{"message":"Invalid API Key"}}' }));
+  try {
+    assert.deepEqual(await probeLocalServer(baseUrl, 'wrong'), { status: 'up', keyRefused: true });
+  } finally {
+    server.close();
+  }
+});
+
 test('probeLocalServer reports down when nothing is listening', async () => {
   assert.deepEqual(await probeLocalServer(await deadUrl()), { status: 'down' });
 });

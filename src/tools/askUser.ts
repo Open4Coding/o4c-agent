@@ -9,7 +9,8 @@ import type { Tool } from './types.js';
  * scripts) the model is told nobody can answer, so it decides and says what it assumed rather
  * than stopping.
  */
-export type AskUserHandler = (question: string, options: string[], signal?: AbortSignal) => Promise<string | undefined>;
+/** `fromO4c`: o4c's own command is asking (/setup, /endpoint-add), so the question is not labelled as the model's. */
+export type AskUserHandler = (question: string, options: string[], signal?: AbortSignal, fromO4c?: boolean) => Promise<string | undefined>;
 
 let handler: AskUserHandler | undefined;
 
