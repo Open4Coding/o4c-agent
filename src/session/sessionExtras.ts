@@ -23,8 +23,8 @@ export async function forkSession(store: SessionStore, entries: readonly Context
 }
 
 /** One line under the banner on a fresh start: is the server up, what model, how much context. */
-export function startupLine(s: { provider: string; status: string; model?: string; contextWindow?: number; last?: SessionMeta }): string {
-  const server = s.provider === 'local' ? `server ${s.status}` : s.provider;
+export function startupLine(s: { provider: string; local?: boolean; status: string; model?: string; contextWindow?: number; last?: SessionMeta }): string {
+  const server = s.provider === 'local' ? `server ${s.status}` : s.local ? `${s.provider} server ${s.status}` : s.provider;
   const parts = [server, ...(s.model ? [`model ${s.model}`] : []), ...(s.contextWindow ? [`context ${s.contextWindow.toLocaleString()}`] : [])];
   const last = s.last ? `; last session "${s.last.title}" (o4c --continue, or /resume)` : '';
   return `${parts.join(' · ')}${last}`;

@@ -187,8 +187,15 @@ the first time o4c starts.
 
 ## `/endpoint-add`
 
-Add a hosted model API that speaks the OpenAI Chat Completions protocol:
+Add a model service that speaks the OpenAI Chat Completions protocol:
 
+- **Local AI server**: llama.cpp, Ollama, LM Studio or any OpenAI-compatible server, on this machine or
+  your network. Add as many as you have, each under its own name (`phoebe`, `laptop`...), and switch
+  between them with `/endpoint <name>`. o4c asks for the address and the key (if the server has one),
+  checks that it is up and which model it has loaded, then makes one real tool call. A named local
+  server runs exactly like the built-in `local`: it is checked at start, gets the `/think` levels and
+  slot pinning, and o4c uses whatever model it has loaded at the time. Saved as
+  `"phoebe": { "url": "http://192.168.1.20:8080", "model": "...", "local": true }`.
 - **Amazon Bedrock**: `bedrock-runtime` (AWS's recommended endpoint) or `bedrock-mantle` (for models
   runtime does not serve), in the region you pick. It needs an Amazon Bedrock API key (Bedrock console >
   API keys). Runtime has no models list, so o4c offers the gpt-oss models and lets you type any other id.

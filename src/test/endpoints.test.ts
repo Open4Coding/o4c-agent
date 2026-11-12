@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { ConfigStore } from '../session/configStore.js';
-import { baseUrlOf, endpointFor, listModels, normalizeUrl, parseEndpoints, PRESETS, saveEndpoint, selectProvider, validName } from '../session/endpoints.js';
+import { baseUrlOf, describeEndpoint, endpointFor, listModels, normalizeUrl, parseEndpoints, PRESETS, saveEndpoint, selectProvider, suggestLocalName, validName } from '../session/endpoints.js';
 
 test('URLs: whatever the user pastes, the base the provider appends /v1/... to', () => {
   assert.equal(normalizeUrl(' https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions/ '), 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1');
@@ -67,4 +67,31 @@ test('listModels reads GET <url>/models, adds /v1 when the URL has none, and say
   assert.deepEqual(seen, ['https://openrouter.ai/api/v1/models Bearer k', 'http://box:8080/v1/models -']);
   const failing = (async () => new Response('nope', { status: 404 })) as unknown as typeof fetch;
   assert.equal(await listModels('https://x/v1', undefined, failing), undefined);
+});
+
+test('local AI servers: any number of them, each under its own name, kept as local and named after their host', () => {
+  const { endpoints, problems } = parseEndpoints({
+    phoebe: { url: 'http://192.168.1.20:8080', model: 'qwen3.8-27b', local: true },
+    lmstudio: { url: 'http://localhost:1234/v1', model: 'gemma', local: true },
+    openai: { url: 'https://api.openai.com/v1', model: 'gpt-5', local: 'yes' },
+  });
+  assert.deepEqual(problems, []);
+  assert.deepEqual(endpoints.map((e) => [e.name, e.baseUrl, e.local]), [
+    ['phoebe', 'http://192.168.1.20:8080', true],
+    ['lmstudio', 'http://localhost:1234', true],
+    ['openai', 'https://api.openai.com', undefined],
+  ]);
+  assert.equal(describeEndpoint(endpoints[0]), 'phoebe - local server at http://192.168.1.20:8080 (qwen3.8-27b when added)');
+  assert.equal(PRESETS[0].id, 'local', 'local servers come first in /endpoint-add');
+  assert.equal(suggestLocalName('http://phoebe.lan:8080'), 'phoebe');
+  assert.equal(suggestLocalName('http://Big_Box:8080'), 'big-box');
+  assert.equal(suggestLocalName('http://192.168.1.20:8080'), 'local-server');
+  assert.equal(suggestLocalName('http://localhost:8080'), 'local-server');
+  assert.equal(suggestLocalName('http://local:8080'), 'local-server', 'a built-in provider name is never suggested');
+});
+
+test('saveEndpoint keeps the local flag', async () => {
+  const store = new ConfigStore(undefined, mkdtempSync(join(tmpdir(), 'o4c-ep-local-')));
+  await saveEndpoint(store, { name: 'phoebe', url: 'http://10.0.0.5:8080', model: 'qwen', local: true }, undefined, false);
+  assert.deepEqual((await store.readScope('global')).endpoints, { phoebe: { url: 'http://10.0.0.5:8080', model: 'qwen', local: true } });
 });

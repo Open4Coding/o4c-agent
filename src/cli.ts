@@ -661,6 +661,10 @@ program
     const endpointSetup = parseEndpoints(resolvedConfig[ENDPOINTS_KEY]);
     const endpoint = endpointFor(resolvedConfig, opts.provider);
     if (endpoint && program.getOptionValueSource('model') === 'default') opts = { ...opts, model: endpoint.model };
+    // A named local AI server runs exactly as the built-in `local` does, at its own address.
+    const localServer = endpoint?.local ? endpoint : undefined;
+    if (localServer && program.getOptionValueSource('baseUrl') === 'default') opts = { ...opts, baseUrl: localServer.baseUrl };
+    const runsLocal = opts.provider === 'local' || localServer !== undefined;
     // No CLI flag for this on purpose (same reasoning as O4C_LOCAL_API_KEY - keeps it out of
     // process listings). config.json read here on every launch/restart, so unlike model/provider/
     // baseUrl above it's never frozen into spawnRestart's argv - a key rotated in config.local.json
@@ -671,7 +675,9 @@ program
     const credentials = await loadCredentials(configStore);
     for (const value of Object.values(credentials.values)) registerSecret(value);
     const localApiKey =
-      credentials.values.local ?? (typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined);
+      (localServer ? credentials.values[localServer.name] : undefined) ??
+      credentials.values.local ??
+      (typeof resolvedConfig.localApiKey === 'string' ? resolvedConfig.localApiKey : undefined);
     // Every key o4c holds is redacted wherever o4c writes text to disk (session/redact.ts).
     registerSecret(localApiKey);
     registerSecret(process.env.O4C_LOCAL_API_KEY);
@@ -701,7 +707,7 @@ program
     // H3: phone notifications through ntfy, when configured.
     setNtfy({ url: typeof resolvedConfig[NTFY_URL_KEY] === 'string' ? (resolvedConfig[NTFY_URL_KEY] as string) : undefined, secureMode });
     if (secureMode) {
-      const refusal = secureModeProviderRefusal(opts.provider, opts.baseUrl);
+      const refusal = secureModeProviderRefusal(runsLocal ? 'local' : opts.provider, opts.baseUrl);
       if (refusal) {
         console.error(refusal);
         process.exit(1);
@@ -813,7 +819,7 @@ program
     // the probe answers; `thinkLevel.ts` falls back to sane defaults in both cases.
     let thinkCaps: ThinkCaps | undefined;
     let serverStatus: ServerStatus = 'up';
-    if (opts.provider === 'local') {
+    if (runsLocal) {
       const probe = await probeLocalServer(opts.baseUrl, localApiKey);
       serverStatus = probe.status;
       if (probe.model) opts = { ...opts, model: probe.model };
@@ -860,7 +866,7 @@ program
       endpoint?.contextWindow ??
       registryModel?.contextWindow ??
       autoContextWindow ??
-      (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : endpoint ? HOSTED_DEFAULT_CONTEXT_WINDOW : undefined);
+      (opts.provider === 'anthropic' ? ANTHROPIC_DEFAULT_CONTEXT_WINDOW : endpoint && !localServer ? HOSTED_DEFAULT_CONTEXT_WINDOW : undefined);
     // E18: /config-editor's choice, unless O4C_EDITOR is already set in the environment.
     if (!process.env.O4C_EDITOR && typeof resolvedConfig[EDITOR_CONFIG_KEY] === 'string' && resolvedConfig[EDITOR_CONFIG_KEY]) {
       process.env.O4C_EDITOR = resolvedConfig[EDITOR_CONFIG_KEY] as string;
@@ -872,6 +878,7 @@ program
       ? undefined
       : startupLine({
           provider: opts.provider,
+          local: runsLocal,
           status: serverStatus,
           model: opts.model,
           contextWindow,
@@ -893,7 +900,7 @@ program
     let localProvider: LocalProvider | undefined;
     if (opts.provider === 'mock') {
       provider = new MockProvider();
-    } else if (opts.provider === 'local') {
+    } else if (runsLocal) {
       provider = localProvider = new LocalProvider({
         baseUrl: opts.baseUrl,
         apiKey: localApiKey,
@@ -1364,7 +1371,7 @@ program
         initialSession,
         initialMode,
         sessionView,
-        opts.provider === 'local'
+        runsLocal
           ? {
               status: serverStatus,
               probe: () => probeLocalServer(opts.baseUrl, localApiKey),

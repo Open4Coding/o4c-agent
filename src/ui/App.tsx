@@ -84,7 +84,7 @@ import {
   parseContextWindowType,
 } from './contextWindowSetting.js';
 import { formatError } from './formatError.js';
-import { checkEndpoint, describeEndpoint, ENDPOINTS_KEY, listModels, normalizeUrl, parseEndpoints, PRESETS, saveEndpoint, selectProvider, validName } from '../session/endpoints.js';
+import { baseUrlOf, checkEndpoint, describeEndpoint, ENDPOINTS_KEY, listModels, normalizeUrl, parseEndpoints, PRESETS, saveEndpoint, selectProvider, suggestLocalName, validName } from '../session/endpoints.js';
 import { copilotAccount, copilotLoginHelp, copilotModels, normalizeHost, resolveCopilotToken, validHost } from '../providers/copilot.js';
 import { formatConfirmMessage, previewLineCount } from './confirmPreview.js';
 import { needsGapBefore } from './lineSpacing.js';
@@ -877,7 +877,8 @@ export function App({
           // component) - hardcoded here rather than reading that state var, which isn't in scope
           // yet at this point in the component body (this lazy initializer runs before it).
           modeLabel: modeInfo('manual').label,
-          baseUrl: provider === 'local' ? baseUrl : undefined,
+          // probeServer is set for any local server, the built-in one or a named one.
+          baseUrl: provider === 'local' || probeServer ? baseUrl : undefined,
         }),
       },
       {
@@ -2241,9 +2242,10 @@ export function App({
         }
         checks.push(...checkDatabases([...(dbDirFor(projectRoot) ? [{ label: 'project', dir: dbDirFor(projectRoot)! }] : []), { label: 'global', dir: join(homedir(), '.o4c', 'db') }]));
         checks.push(checkDisk(projectRoot ?? process.cwd()));
-        if (provider === 'local') {
+        if (provider === 'local' || probeServer) {
           const apiKey = process.env.O4C_LOCAL_API_KEY ?? ((await configStore.get('localApiKey')) as string | undefined);
-          const probe = await probeLocalServer(baseUrl, apiKey).catch(() => undefined);
+          // A named local server's probe carries its own key.
+          const probe = await (probeServer ? probeServer() : probeLocalServer(baseUrl, apiKey)).catch(() => undefined);
           if (probe?.status !== 'up') {
             checks.push({ name: 'Server', state: 'fail', detail: `${baseUrl}: ${probe?.status ?? 'unreachable'}`, fix: 'Start llama-server (or check the address with /config, and the network path - a closed tunnel is the usual cause), then /doctor again.' });
           } else {
@@ -3467,6 +3469,24 @@ export function App({
               copilotHost = host;
             }
           }
+        } else if (preset?.local) {
+          // A local AI server: where it is, its key if it has one, then what it has loaded.
+          const typedUrl = await typed('Its address (e.g. http://192.168.1.20:8080 - Enter for http://localhost:8080):');
+          const candidate = typedUrl ?? 'http://localhost:8080';
+          if (!/^https?:\/\//.test(candidate)) {
+            pushBlock([infoLine('That is not an http:// or https:// URL - nothing changed.')]);
+          } else {
+            apiKey = await typed('Its API key, if it needs one (saved in your global ~/.o4c/config.json credentials, never in a project; Enter for none):');
+            if (apiKey) registerSecret(apiKey);
+            const probe = await probeLocalServer(baseUrlOf(candidate), apiKey);
+            if (probe.status !== 'up') {
+              pushBlock([infoLine(`${candidate} is ${probe.status === 'loading' ? 'still loading its model' : 'not answering'} - nothing changed. Start the server (or check the address), then /endpoint-add again.`)]);
+            } else {
+              url = candidate;
+              model = probe.model ?? (await typed('It did not say which model it serves. The model id:'));
+              if (model) pushBlock([infoLine(`${candidate} is up: ${model}${probe.contextWindow ? `, context ${probe.contextWindow.toLocaleString()}` : ''}.`)]);
+            }
+          }
         } else if (preset?.regions && preset.url) {
           const region = await pickChoice('Region (↑/↓, Enter, Esc to cancel):', [
             ...preset.regions.map((r) => ({ key: r, label: r })),
@@ -3483,11 +3503,11 @@ export function App({
             url = undefined;
           }
         }
-        if (preset && url && !preset.copilot) {
+        if (preset && url && !preset.copilot && !preset.local) {
           apiKey = await typed(`${preset.keyHelp}. Paste it (saved in your global ~/.o4c/config.json credentials, never in a project; Enter for none):`);
         }
         if (apiKey) registerSecret(apiKey);
-        if (preset && url && !preset.copilot) {
+        if (preset && url && !preset.copilot && !preset.local) {
           const listed = preset.listsModels ? await listModels(url, apiKey) : undefined;
           const offered = (listed ?? [...preset.models]).slice(0, 40);
           const picked = offered.length
@@ -3501,7 +3521,8 @@ export function App({
         const existing = parseEndpoints(await configStore.get(ENDPOINTS_KEY).catch(() => undefined)).endpoints;
         let name: string | undefined;
         if (preset && url && model) {
-          const suggested = existing.some((e) => e.name === preset.name) ? `${preset.name}-${existing.length + 1}` : preset.name;
+          const base = preset.local ? suggestLocalName(url) : preset.name;
+          const suggested = existing.some((e) => e.name === base) ? `${base}-${existing.length + 1}` : base;
           name = (await typed(`A name for it - you switch with /endpoint <name> (Enter for "${suggested}"):`)) ?? suggested;
           const bad = validName(name);
           if (bad) {
@@ -3518,6 +3539,7 @@ export function App({
             model,
             ...(contextWindow ? { contextWindow } : {}),
             ...(copilotHost ? { copilot: copilotHost } : {}),
+            ...(preset.local ? { local: true as const } : {}),
           };
           pushBlock([infoLine(`Checking ${describeEndpoint({ ...endpoint, baseUrl: url })} with one real tool call...`)]);
           // A Copilot login that was found (not pasted) is looked up again on every start, never saved.

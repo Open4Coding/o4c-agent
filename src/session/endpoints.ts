@@ -36,6 +36,12 @@ export interface Endpoint {
    * GitHub CLI login that is renewed keeps working; `url` is the account's Copilot API base.
    */
   copilot?: string;
+  /**
+   * A local AI server (llama.cpp, Ollama, LM Studio...) under its own name - run exactly like the
+   * built-in `local`: probed at start, `/think` levels, slot pinning, its loaded model. `model` is
+   * what it served when added; the probe's answer wins at start.
+   */
+  local?: true;
 }
 
 /** `https://host/openai/v1/chat/completions/` -> `https://host/openai/v1`. */
@@ -78,6 +84,7 @@ export function parseEndpoints(value: unknown): { endpoints: Endpoint[]; problem
         model: e.model,
         ...(typeof e.contextWindow === 'number' && e.contextWindow > 0 ? { contextWindow: e.contextWindow } : {}),
         ...(typeof e.copilot === 'string' && e.copilot ? { copilot: e.copilot } : {}),
+        ...(e.local === true ? { local: true as const } : {}),
       });
     }
   }
@@ -105,6 +112,8 @@ export interface EndpointPreset {
   keyHelp: string;
   /** Signs in with a GitHub login and finds its own URL and models (providers/copilot.ts). */
   copilot?: true;
+  /** A local AI server: its URL is typed, its model is whatever it has loaded. */
+  local?: true;
 }
 
 const AWS_REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-northeast-1', 'ap-southeast-2'] as const;
@@ -116,6 +125,15 @@ const AWS_REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-cen
  * login instead of a key, on github.com or a `<name>.ghe.com` enterprise - see providers/copilot.ts.
  */
 export const PRESETS: readonly EndpointPreset[] = [
+  {
+    id: 'local',
+    label: 'Local AI server - llama.cpp, Ollama, LM Studio or any OpenAI-compatible server on this machine or your network',
+    name: 'local-server',
+    models: [],
+    listsModels: false,
+    keyHelp: 'Its API key',
+    local: true,
+  },
   {
     id: 'bedrock',
     label: 'Amazon Bedrock - bedrock-runtime, the recommended endpoint (needs a Bedrock API key)',
@@ -197,7 +215,7 @@ export async function listModels(
 /** Saves an endpoint (and its key) to the global config; `select` also makes it the provider. */
 export async function saveEndpoint(
   store: ConfigStore,
-  endpoint: { name: string; url: string; model: string; contextWindow?: number; copilot?: string },
+  endpoint: { name: string; url: string; model: string; contextWindow?: number; copilot?: string; local?: true },
   apiKey: string | undefined,
   select: boolean,
 ): Promise<void> {
@@ -209,6 +227,7 @@ export async function saveEndpoint(
     model: endpoint.model,
     ...(endpoint.contextWindow ? { contextWindow: endpoint.contextWindow } : {}),
     ...(endpoint.copilot ? { copilot: endpoint.copilot } : {}),
+    ...(endpoint.local ? { local: true } : {}),
   };
   await store.set('global', ENDPOINTS_KEY, map);
   if (apiKey) {
@@ -232,7 +251,20 @@ export async function selectProvider(store: ConfigStore, provider: string): Prom
 
 /** One line per choice for `/endpoint`: the built-ins that are set up, then every endpoint. */
 export function describeEndpoint(e: Endpoint): string {
+  if (e.local) return `${e.name} - local server at ${e.url} (${e.model} when added)`;
   return `${e.name} - ${e.model} at ${e.copilot ? `GitHub Copilot (${e.copilot})` : e.url}`;
+}
+
+/** A name to suggest for a local server: its host when that makes a valid name (`phoebe`), else the preset's. */
+export function suggestLocalName(url: string): string {
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    // fall through
+  }
+  const name = host.split('.')[0].replace(/[^a-z0-9-]/g, '-');
+  return /^[a-z]/.test(name) && !validName(name) && name !== 'localhost' ? name.slice(0, 32) : 'local-server';
 }
 
 /**
@@ -247,11 +279,13 @@ export function hostedRoute(endpoint: { url: string; copilot?: string }): { base
 
 /** One real tool call against the endpoint, before anything is saved - the check /setup and /doctor make. */
 export async function checkEndpoint(
-  endpoint: { name: string; url: string; model: string; copilot?: string },
+  endpoint: { name: string; url: string; model: string; copilot?: string; local?: true },
   apiKey: string | undefined,
 ): Promise<{ ok: boolean; detail: string }> {
   try {
-    const provider = new LocalProvider({ hosted: endpoint.name, ...hostedRoute(endpoint), apiKey, modelId: endpoint.model });
+    const provider = endpoint.local
+      ? new LocalProvider({ baseUrl: baseUrlOf(endpoint.url), apiKey, modelId: endpoint.model })
+      : new LocalProvider({ hosted: endpoint.name, ...hostedRoute(endpoint), apiKey, modelId: endpoint.model });
     return await new AgentLoop(provider, [], '').probeToolCall(AbortSignal.timeout(120_000));
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };

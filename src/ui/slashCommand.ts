@@ -501,7 +501,7 @@ export const COMMANDS: CommandInfo[] = [
   },
   {
     name: '/endpoint-add',
-    description: 'Add a hosted model API: Amazon Bedrock, OpenAI, OpenRouter, GitHub Copilot, or any OpenAI-compatible URL. Asks for the region, key and model, checks one real tool call, saves it.',
+    description: 'Add a model service: a local AI server (as many as you have), Amazon Bedrock, OpenAI, OpenRouter, GitHub Copilot, or any OpenAI-compatible URL. Asks where, the key and model, checks one real tool call, saves it.',
   },
   {
     name: '/goal',

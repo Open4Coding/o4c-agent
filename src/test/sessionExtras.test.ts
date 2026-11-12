@@ -38,6 +38,7 @@ test('startupLine names the server state, model, context and the last session', 
     'server up · model qwen · context 229,376; last session "fix the parser" (o4c --continue, or /resume)',
   );
   assert.equal(startupLine({ provider: 'anthropic', status: 'up' }), 'anthropic');
+  assert.equal(startupLine({ provider: 'phoebe', local: true, status: 'down' }), 'phoebe server down');
 });
 
 test('lastErrorReport shows the recorded error and the end of crash.log', () => {
