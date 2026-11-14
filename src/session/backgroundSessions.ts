@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isSingleExecutable } from '../sea.js';
 
 /**
  * Background sessions (plan 0006 L1): more than one session at once in one o4c window. The one on
@@ -185,5 +186,5 @@ function alive(pid: number): boolean {
 /** How to run this o4c again: node and the script, or the single executable on its own. */
 export function selfCommand(): { exe: string; args: string[] } {
   const script = process.argv[1];
-  return script && script !== process.execPath ? { exe: process.execPath, args: [script] } : { exe: process.execPath, args: [] };
+  return script && !isSingleExecutable() ? { exe: process.execPath, args: [script] } : { exe: process.execPath, args: [] };
 }

@@ -70,7 +70,8 @@ export type SupervisorSpawn = (
 
 export interface SupervisorOptions {
   nodePath: string;
-  script: string;
+  /** The script node runs; none for the single executable, whose nodePath is o4c itself. */
+  script?: string;
   /** The user's original arguments, used for the first launch only. */
   initialArgs: string[];
   handoffPath: string;
@@ -113,7 +114,7 @@ export function runSupervisor(options: SupervisorOptions): number {
     } catch {
       // Diagnostics must never be able to stop the app restarting.
     }
-    const result = options.spawn(options.nodePath, [options.script, ...args], { stdio: 'inherit', env });
+    const result = options.spawn(options.nodePath, [...(options.script ? [options.script] : []), ...args], { stdio: 'inherit', env });
     if (result.status !== RESTART_EXIT_CODE) {
       rmSync(options.handoffPath, { force: true });
       return result.status ?? 0;

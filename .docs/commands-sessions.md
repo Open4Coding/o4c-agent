@@ -183,7 +183,8 @@ checks on its own - and not at all in secure mode. Same as `o4c --check-update`.
 
 Find a model server (llama.cpp on 8080, Ollama on 11434, LM Studio on 1234, and the configured URL), ask
 for its key if it wants one, check one real tool call, and save it in the global config. Runs by itself
-the first time o4c starts.
+the first time o4c starts. Its list also offers Anthropic, and GitHub Copilot or another hosted API,
+which carries on as `/endpoint-add`.
 
 ## `/endpoint-add`
 

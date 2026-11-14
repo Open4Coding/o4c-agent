@@ -845,8 +845,9 @@ export function App({
   const [contextWindow, setContextWindow] = useState(contextWindowProp);
   // The "Server is down: wait or choose another model" box. Open at launch if the server did not answer, and
   // reopened when a request fails because the server cannot be reached; `checks` counts the polls since.
+  // Not on a first start: there is no server to wait for yet, and the box hid /setup's list.
   const [serverWait, setServerWait] = useState<{ status: ServerWaitStatus; checks: number } | null>(() =>
-    serverStatus === 'up' ? null : { status: serverStatus, checks: 0 },
+    serverStatus === 'up' || firstRun ? null : { status: serverStatus, checks: 0 },
   );
   const plansDir = plansDirFor(projectRoot);
   // Where an over-budget tool result's full text is spilled before the model is handed a bounded
@@ -3378,6 +3379,7 @@ export function App({
           ...usable.map((s) => ({ key: `server:${s.url}`, label: describeServer(s) })),
           { key: 'other', label: 'Another server - type its URL' },
           { key: 'anthropic', label: 'Anthropic (Claude API) - needs an API key; costs money' },
+          { key: 'endpoint', label: 'GitHub Copilot, Amazon Bedrock, OpenAI, OpenRouter or another hosted API (/endpoint-add)' },
         ]);
         let choice: SetupChoice | undefined;
         const ask = askUserHandler();
@@ -3396,7 +3398,9 @@ export function App({
           const key = process.env.ANTHROPIC_API_KEY ?? (ask ? await ask('Your Anthropic API key (saved in your global config credentials):', [], undefined, true) : undefined);
           if (key?.trim()) choice = { provider: 'anthropic', ...(process.env.ANTHROPIC_API_KEY ? {} : { apiKey: key.trim() }) };
         }
-        if (!choice) pushBlock([infoLine('Setup cancelled - nothing changed. /setup runs it again.')]);
+        // A hosted API has its own questions: /endpoint-add runs next, as if typed.
+        if (pick === 'endpoint') queuedInputsRef.current.unshift('/endpoint-add');
+        else if (!choice) pushBlock([infoLine('Setup cancelled - nothing changed. /setup runs it again.')]);
         else {
           if (choice.apiKey) registerSecret(choice.apiKey);
           pushBlock([infoLine('Checking it with one real tool call...')]);

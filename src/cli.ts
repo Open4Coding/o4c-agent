@@ -84,7 +84,7 @@ import { loadSkills, setSkills, skillGate, skillListing } from './session/skills
 import { createTaskTool, loadProfiles, setTaskPolicy, setTaskRuntime } from './agent/subAgents.js';
 import { HistoryRecorder } from './session/historyRecorder.js';
 import { TurnTracer } from './agent/tracer.js';
-import { BackgroundSessions } from './session/backgroundSessions.js';
+import { BackgroundSessions, selfCommand } from './session/backgroundSessions.js';
 import type { PolicyAnswer } from './agent/loop.js';
 import type { Tool } from './tools/types.js';
 
@@ -241,7 +241,9 @@ function spawnRestart(
   fromConfig?: boolean,
 ): number {
   const args = buildRestartArgs({ ...opts, resumeId, mode, window, fromConfig });
-  const result = spawnSync(process.execPath, [process.argv[1], ...args], {
+  // selfCommand: in the single executable argv[1] is the exe itself, which as an argument became a prompt.
+  const self = selfCommand();
+  const result = spawnSync(self.exe, [...self.args, ...args], {
     stdio: 'inherit',
     env: { ...process.env, O4C_FRESH_SCREEN: '1' },
   });
@@ -550,6 +552,11 @@ program
       }
     }
 
+    // I2: no global config at all yet, so the setup runs by itself. Decided here, before startup writes
+    // its first key (the Tab-hint count, a trusted folder): checked later, the file always existed and
+    // a new machine was left pointed at a local server it does not have.
+    const firstStart = !opts.resume && !existsSync(join(defaultGlobalConfigDir(), 'config.json'));
+
     // Before anything that can block - the trust gate prompts, the server probes wait, and a
     // process that dies in here used to leave nothing behind at all. Resolved synchronously
     // because `ensureTrusted` below has not run yet and this line has to be on disk before it
@@ -581,8 +588,8 @@ program
       process.stdout.isTTY
     ) {
       const supervisorCode = runSupervisor({
-          nodePath: process.execPath,
-          script: process.argv[1],
+          nodePath: selfCommand().exe,
+          script: selfCommand().args[0],
           initialArgs: process.argv.slice(2),
           handoffPath: join(tmpdir(), `o4c-handoff-${process.pid}.json`),
           env: process.env,
@@ -1416,8 +1423,7 @@ program
         checkpointHooks,
         tip,
         startup,
-        // I2: no global config at all yet - the setup runs by itself (fresh start only).
-        !opts.resume && !existsSync(join(defaultGlobalConfigDir(), 'config.json')),
+        firstStart,
       );
       return;
     }

@@ -86,6 +86,20 @@ test('the supervisor relaunches on the restart exit code with the handed-off arg
   }
 });
 
+test('the single executable is relaunched with only the arguments, never its own path as one (it became a one-shot prompt)', () => {
+  const { dir, path } = tempHandoffPath();
+  try {
+    const launches: string[][] = [];
+    runSupervisor({
+      nodePath: 'o4c.exe', initialArgs: [], handoffPath: path, env: {},
+      spawn: (_cmd, args) => (launches.push(args), { status: 0 }),
+    });
+    assert.deepEqual(launches, [[]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the supervisor passes a normal exit code straight through and cleans up the handoff file', () => {
   const { dir, path } = tempHandoffPath();
   try {

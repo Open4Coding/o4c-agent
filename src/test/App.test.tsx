@@ -513,6 +513,8 @@ async function setup(opts: {
   // The code graph, for the footer's `bg:` part. Only the background-activity test passes it.
   codeGraph?: CodeGraphSession;
   announceIndexing?: boolean;
+  // The first start ever (no global config): /setup runs by itself.
+  firstRun?: boolean;
   mcpStatusReport?: () => readonly string[];
   expandMcpPrompt?: (
     ref: McpPromptRef,
@@ -560,6 +562,7 @@ async function setup(opts: {
       probeServer: opts.probeServer,
       onServerRecovered: opts.onServerRecovered,
       serverPollMs: opts.serverPollMs,
+      firstRun: opts.firstRun,
       os: opts.os,
       usageStore: opts.usageStore,
       mcpPromptCommands: opts.mcpPromptCommands,
@@ -3206,6 +3209,17 @@ test('a server that is down at launch opens the wait box straight away, with Wai
     const box = lastFrame() ?? '';
     assert.ok(/> Wait for the server/.test(box), 'Wait is selected by default');
     assert.ok(box.includes('Choose another model'));
+  });
+});
+
+test('a first start with no server shows /setup (with Copilot and the hosted APIs), not the wait box that hid it', async () => {
+  await withTempDir(async (dir) => {
+    const { probe } = scriptedProbe([{ status: 'down' }]);
+    const { lastFrame } = await setup({ dir, configGlobalDir: dir, firstRun: true, serverStatus: 'down', probeServer: probe, serverPollMs: 60_000 });
+    await waitFor(() => (lastFrame() ?? '').includes('Which model should o4c use?'), 15_000);
+    const frame = lastFrame() ?? '';
+    assert.ok(frame.includes('GitHub Copilot'), 'the list offers Copilot');
+    assert.ok(!frame.includes('Server is down'), 'no wait box on a first start');
   });
 });
 
