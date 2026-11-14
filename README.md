@@ -12,6 +12,16 @@ ask for.
 
 ## Install
 
+**Windows, one line** (PowerShell; no admin rights, no Node.js):
+
+```powershell
+irm https://raw.githubusercontent.com/Open4Coding/o4c-agent/main/install.ps1 | iex
+```
+
+It downloads `o4c-win32-x64.exe` from the latest release, checks it against `SHA256SUMS.txt`, installs
+it as `o4c` in `%LOCALAPPDATA%\Programs\o4c` and adds that folder to your PATH. Run it again to
+update. [install.ps1](install.ps1) is short enough to read first.
+
 **Single executable** (Node included, nothing else to install): download `o4c-win32-x64.exe`,
 `o4c-linux-x64` or `o4c-darwin-arm64` (Apple Silicon) from the
 [GitHub releases](https://github.com/Open4Coding/o4c-agent/releases) (`SHA256SUMS.txt` is there to
@@ -57,6 +67,14 @@ backoff first.
 
 **Anthropic:** set `ANTHROPIC_API_KEY` and run `o4c -p anthropic`, or put `"provider": "anthropic"` in
 the config.
+
+**GitHub Copilot:** runs o4c on the models of your own Copilot plan, on github.com or an enterprise
+`<name>.ghe.com`. Sign in once with the GitHub CLI (`gh auth login`, plus `--hostname <name>.ghe.com`
+for an enterprise), then in o4c run `/endpoint-add` → **GitHub Copilot**, pick a model, and
+`/endpoint copilot`. No API key is needed.
+
+**More servers:** `/endpoint-add` also saves other local AI servers under their own names, Amazon
+Bedrock, OpenAI, OpenRouter or any OpenAI-compatible URL; `/endpoint <name>` switches between them.
 
 ## Use
 
