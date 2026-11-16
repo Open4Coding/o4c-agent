@@ -995,6 +995,9 @@ export function App({
   const shellNotesRef = useRef<string[]>([]);
   // ask_user (C7): while the model waits for a typed answer, the next Enter answers it.
   const askUserPendingRef = useRef<((answer: string | undefined) => void) | undefined>(undefined);
+  // The question being answered, shown over the input box, which prompts `answer>` meanwhile: a plain
+  // `>` looked like the normal prompt, and a task typed there became the answer.
+  const [askingFor, setAskingFor] = useState<string | undefined>(undefined);
 
   // undefined = no session persisted yet (fresh start, or just after /clear). Set once the first
   // turn autosaves successfully, or immediately on mount by a /resume restart handoff; reused on
@@ -1651,6 +1654,18 @@ export function App({
   const pushBlock = useCallback((lines: Line[]) => {
     dispatchTextWindow({ type: 'commit', lines });
   }, []);
+
+  // /setup and /endpoint-add: a list leaves no trace once closed, so its answer goes in the transcript -
+  // otherwise those commands looked as if they had skipped their questions.
+  const pickAndEcho = useCallback(
+    async <K extends string>(title: string, rows: readonly ChoiceRow<K>[]): Promise<K | undefined> => {
+      const key = await pickChoice(title, rows);
+      const row = rows.find((r) => r.key === key);
+      if (row) pushBlock([infoLine(`${title.replace(/\s*\(↑\/↓[^)]*\):?\s*$/, '')} → ${row.label}`)]);
+      return key;
+    },
+    [pickChoice, pushBlock],
+  );
 
   // The session's first index pass, in the transcript: when it starts and when it is done.
   useEffect(() => {
@@ -3375,7 +3390,7 @@ export function App({
         const configuredUrl = (await configStore.get('baseUrl').catch(() => undefined)) as string | undefined;
         const found = await detectServers(configuredUrl ? [configuredUrl] : []);
         const usable = found.filter((s) => s.state !== 'down');
-        const pick = await pickChoice('Which model should o4c use? (↑/↓, Enter, Esc to cancel)', [
+        const pick = await pickAndEcho('Which model should o4c use? (↑/↓, Enter, Esc to cancel)', [
           ...usable.map((s) => ({ key: `server:${s.url}`, label: describeServer(s) })),
           { key: 'other', label: 'Another server - type its URL' },
           { key: 'anthropic', label: 'Anthropic (Claude API) - needs an API key; costs money' },
@@ -3422,7 +3437,17 @@ export function App({
         pushBlock([userLine(input)]);
         const ask = askUserHandler();
         const typed = async (q: string): Promise<string | undefined> => ((ask ? await ask(q, [], undefined, true) : undefined) ?? '').trim() || undefined;
-        const presetId = await pickChoice('Which kind of endpoint? (↑/↓, Enter, Esc to cancel)', PRESETS.map((p) => ({ key: p.id, label: p.label })));
+        // A wrong answer asks again rather than dropping everything answered so far - typing the
+        // task into a question meant for o4c must not cost the whole /endpoint-add.
+        const typedValid = async (q: string, check: (answer: string) => string | undefined): Promise<string | undefined> => {
+          for (;;) {
+            const answer = await typed(q);
+            const bad = answer === undefined ? undefined : check(answer);
+            if (!bad) return answer;
+            pushBlock([infoLine(`${bad} Try again.`)]);
+          }
+        };
+        const presetId = await pickAndEcho('Which kind of endpoint? (↑/↓, Enter, Esc to cancel)', PRESETS.map((p) => ({ key: p.id, label: p.label })));
         const preset = PRESETS.find((p) => p.id === presetId);
         let url: string | undefined;
         let apiKey: string | undefined;
@@ -3435,11 +3460,11 @@ export function App({
         // A local server: the key its check uses, which may be the one already in use rather than a new one.
         let localKey: string | undefined;
         if (preset?.copilot) {
-          const where = await pickChoice('Which GitHub? (↑/↓, Enter, Esc to cancel)', [
+          const where = await pickAndEcho('Which GitHub? (↑/↓, Enter, Esc to cancel)', [
             { key: 'github.com', label: 'github.com - a personal or organisation Copilot plan' },
             { key: 'ghe', label: 'An enterprise on <name>.ghe.com (GitHub Enterprise Cloud with data residency) - type it' },
           ]);
-          const typedHost = where === 'ghe' ? await typed('Your enterprise host (e.g. octo-corp.ghe.com):') : where;
+          const typedHost = where === 'ghe' ? await typedValid('Your enterprise host (e.g. octo-corp.ghe.com):', (a) => validHost(normalizeHost(a))) : where;
           const host = typedHost ? normalizeHost(typedHost) : undefined;
           const badHost = host ? validHost(host) : undefined;
           if (badHost) pushBlock([infoLine(`${badHost} Nothing changed.`)]);
@@ -3467,7 +3492,7 @@ export function App({
               if (notes.length) pushBlock([infoLine(notes.join('\n'))]);
               const offered = models.usable.slice(0, 40);
               const picked = offered.length
-                ? await pickChoice(`Model (${models.usable.length} on your Copilot plan${account.plan ? `, ${account.plan}` : ''}) (↑/↓, Enter, Esc to cancel):`, [
+                ? await pickAndEcho(`Model (${models.usable.length} on your Copilot plan${account.plan ? `, ${account.plan}` : ''}) (↑/↓, Enter, Esc to cancel):`, [
                     ...offered.map((m) => ({ key: `m:${m.id}`, label: m.contextWindow ? `${m.id} - ${Math.round(m.contextWindow / 1000)}K context` : m.id })),
                     { key: 'type', label: 'Another model - type its id' },
                   ])
@@ -3511,7 +3536,7 @@ export function App({
             }
           }
         } else if (preset?.regions && preset.url) {
-          const region = await pickChoice('Region (↑/↓, Enter, Esc to cancel):', [
+          const region = await pickAndEcho('Region (↑/↓, Enter, Esc to cancel):', [
             ...preset.regions.map((r) => ({ key: r, label: r })),
             { key: '', label: 'Another region - type it' },
           ]);
@@ -3534,7 +3559,7 @@ export function App({
           const listed = preset.listsModels ? await listModels(url, apiKey) : undefined;
           const offered = (listed ?? [...preset.models]).slice(0, 40);
           const picked = offered.length
-            ? await pickChoice(`Model${listed ? ` (${listed.length} from the endpoint${listed.length > 40 ? ', first 40' : ''})` : ''} (↑/↓, Enter, Esc to cancel):`, [
+            ? await pickAndEcho(`Model${listed ? ` (${listed.length} from the endpoint${listed.length > 40 ? ', first 40' : ''})` : ''} (↑/↓, Enter, Esc to cancel):`, [
                 ...offered.map((m) => ({ key: `m:${m}`, label: m })),
                 { key: 'type', label: 'Another model - type its id' },
               ])
@@ -3546,12 +3571,7 @@ export function App({
         if (preset && url && model) {
           const base = preset.local ? suggestLocalName(url) : preset.name;
           const suggested = existing.some((e) => e.name === base) ? `${base}-${existing.length + 1}` : base;
-          name = (await typed(`A name for it - you switch with /endpoint <name> (Enter for "${suggested}"):`)) ?? suggested;
-          const bad = validName(name);
-          if (bad) {
-            pushBlock([infoLine(`${bad} Nothing changed.`)]);
-            name = undefined;
-          }
+          name = (await typedValid(`A name for it - you switch with /endpoint <name> (Enter for "${suggested}"):`, validName)) ?? suggested;
         }
         if (!preset || !url || !model || !name) {
           pushBlock([infoLine('No endpoint added. /endpoint-add starts again.')]);
@@ -3570,7 +3590,7 @@ export function App({
           if (!check.ok) {
             pushBlock([infoLine(`That did not work: ${check.detail}\nNothing was saved. Check the key, the model id and the region, and run /endpoint-add again.`)]);
           } else {
-            const now = await pickChoice(`Works (${check.detail}). Use "${name}" now?`, [
+            const now = await pickAndEcho(`Works (${check.detail}). Use "${name}" now?`, [
               { key: 'yes', label: `yes - save it and restart o4c on ${name}` },
               { key: 'no', label: `no - save it; /endpoint ${name} switches later` },
             ]);
@@ -4358,7 +4378,7 @@ export function App({
         setIsProcessing(false);
       }
     },
-    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans, pickChoice, checkpoints],
+    [loop, initialImage, pushBlock, sessionStore, usageStore, askConfirm, toolPolicy, mode, plansDir, reloadAfterTurn, restart, exit, contextWindow, toolOutputDir, mcpCommands, mcpStatusReport, expandMcpPrompt, codeGraph, configStore, saveSessionNow, plans, pickChoice, pickAndEcho, checkpoints],
   );
 
   // Every turn starts here. processTurn unlocks the input only at its own end, so a command that
@@ -4559,6 +4579,13 @@ export function App({
   // once there - asking would be more friction than the loss is worth. The approval dialog keeps its own
   // Esc (decline AND stop - see ConfirmDialog's onEscape), since that box is already a Yes/No.
   const handleEscape = useCallback(() => {
+    // A question waiting for a typed answer: Esc gives no answer (the asker's default, or it stops).
+    const pendingAnswer = askUserPendingRef.current;
+    if (pendingAnswer) {
+      askUserPendingRef.current = undefined;
+      pendingAnswer(undefined);
+      return;
+    }
     if (!abortControllerRef.current) return;
     if (isInThinkBlock) {
       stopTargetRef.current = abortControllerRef.current;
@@ -4670,6 +4697,14 @@ export function App({
   const handleSubmit = useCallback(
     (raw: string) => {
       const input = raw.trim();
+      // A plain Enter answers a waiting question with its default ("Enter for copilot"); it was
+      // dropped here, so those defaults could never be taken.
+      if (!input && askUserPendingRef.current) {
+        const answer = askUserPendingRef.current;
+        askUserPendingRef.current = undefined;
+        answer('');
+        return;
+      }
       if (!input) return;
       setSuggestion(undefined);
       suggestionRef.current = undefined;
@@ -4756,14 +4791,16 @@ export function App({
           return answer;
         }
       }
-      pushBlock([infoLine('Type your answer and press Enter.')]);
-      return new Promise<string | undefined>((resolve) => {
+      setAskingFor(fromO4c ? question : `The model asks: ${question}`);
+      const typed = await new Promise<string | undefined>((resolve) => {
         askUserPendingRef.current = resolve;
         signal?.addEventListener('abort', () => {
           if (askUserPendingRef.current === resolve) askUserPendingRef.current = undefined;
           resolve(undefined);
         }, { once: true });
       });
+      setAskingFor(undefined);
+      return typed;
     });
     return () => setAskUserHandler(undefined);
   }, [pushBlock, pickChoice]);
@@ -4943,7 +4980,14 @@ export function App({
           }
         />
       )}
+      {askingFor ? (
+        <Text>
+          <Text color={highlightColor}>{`? ${askingFor}`}</Text>
+          <Text color={theme.border}>{'\n  Enter answers this question (it does not go to the model). Esc skips it.'}</Text>
+        </Text>
+      ) : null}
       <InputBox
+        prompt={askingFor ? 'answer> ' : undefined}
         disabled={isProcessing}
         onQueue={handleQueue}
         active={!confirmDialog && !stopConfirm && !clearConfirm && !serverWait && !resumePicker && !modePicker && !thinkPicker && !thinkScopePicker && !viewPicker && !choicePicker}

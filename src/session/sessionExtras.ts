@@ -22,10 +22,19 @@ export async function forkSession(store: SessionStore, entries: readonly Context
   return { id, title: forkTitle };
 }
 
+/**
+ * What the banner, startup line and footer call the model when a local server gave none and nobody
+ * named one - instead of the CLI's built-in `-m` default, which read as if Claude were set up.
+ * `configured`: a provider, server address or endpoint is in the config at all.
+ */
+export function noModelLabel(configured: boolean): string {
+  return configured ? 'no model (server not answering)' : 'no model or endpoint chosen';
+}
+
 /** One line under the banner on a fresh start: is the server up, what model, how much context. */
 export function startupLine(s: { provider: string; local?: boolean; status: string; model?: string; contextWindow?: number; last?: SessionMeta }): string {
   const server = s.provider === 'local' ? `server ${s.status}` : s.local ? `${s.provider} server ${s.status}` : s.provider;
-  const parts = [server, ...(s.model ? [`model ${s.model}`] : []), ...(s.contextWindow ? [`context ${s.contextWindow.toLocaleString()}`] : [])];
+  const parts = [server, ...(s.model ? [s.model.startsWith('no model') ? s.model : `model ${s.model}`] : []), ...(s.contextWindow ? [`context ${s.contextWindow.toLocaleString()}`] : [])];
   const last = s.last ? `; last session "${s.last.title}" (o4c --continue, or /resume)` : '';
   return `${parts.join(' · ')}${last}`;
 }

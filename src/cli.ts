@@ -42,7 +42,7 @@ import { setRecentTasksSource } from './session/reflect.js';
 import { ensureTrusted, findProjectRootSync, logsDirFor, resolveO4cMd, sessionsDirFor, usageFileFor, toolOutputDirFor } from './session/projectContext.js';
 import { recordLifecycle } from './lifecycleLog.js';
 import { globalUsageFile, UsageStore } from './session/usageStore.js';
-import { latestSession, startupLine } from './session/sessionExtras.js';
+import { latestSession, noModelLabel, startupLine } from './session/sessionExtras.js';
 import { modelEntry } from './session/modelRegistry.js';
 import { RetryingProvider } from './providers/retry.js';
 import { runAcp } from './acp/agent.js';
@@ -830,6 +830,10 @@ program
       const probe = await probeLocalServer(opts.baseUrl, localApiKey);
       serverStatus = probe.status;
       if (probe.model) opts = { ...opts, model: probe.model };
+      else if (program.getOptionValueSource('model') === 'default' && typeof resolvedConfig.model !== 'string' && !localServer) {
+        const configured = ['provider', 'baseUrl', ENDPOINTS_KEY].some((k) => resolvedConfig[k] !== undefined);
+        opts = { ...opts, model: noModelLabel(configured) };
+      }
       autoContextWindow = probe.contextWindow;
       probedSlots = probe.totalSlots;
       // Which reasoning controls this model honours, for `/think`. Cached per model id in

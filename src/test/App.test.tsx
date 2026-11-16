@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseHooks, setHooks } from '../session/hooks.js';
 import { App } from '../ui/App.js';
+import { askUserHandler } from '../tools/askUser.js';
 import type { OsKey } from '../ui/platform.js';
 import { AgentLoop } from '../agent/loop.js';
 import { contextWindowTypeControl, type ContextWindowTypeControl } from '../agent/contextWindowType.js';
@@ -3220,6 +3221,41 @@ test('a first start with no server shows /setup (with Copilot and the hosted API
     const frame = lastFrame() ?? '';
     assert.ok(frame.includes('GitHub Copilot'), 'the list offers Copilot');
     assert.ok(!frame.includes('Server is down'), 'no wait box on a first start');
+  });
+});
+
+test("an o4c question shows over the box with an answer> prompt; Enter answers it, Esc skips it", async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir });
+    const ask = askUserHandler();
+    assert.ok(ask);
+    const first = ask('Your enterprise host (e.g. octo-corp.ghe.com):', [], undefined, true);
+    await waitFor(() => (lastFrame() ?? '').includes('answer>'));
+    assert.ok((lastFrame() ?? '').includes('? Your enterprise host'), 'the question sits over the box');
+    await submit(stdin, 'octo.ghe.com');
+    assert.equal(await first, 'octo.ghe.com');
+    await waitFor(() => !(lastFrame() ?? '').includes('answer>'));
+    const second = ask('A name for it (Enter for "copilot"):', [], undefined, true);
+    await waitFor(() => (lastFrame() ?? '').includes('answer>'));
+    stdin.write(ENTER);
+    assert.equal(await second, '', 'a plain Enter answers, so the asker takes its default');
+    await waitFor(() => !(lastFrame() ?? '').includes('answer>'));
+    const third = ask('Another:', [], undefined, true);
+    await waitFor(() => (lastFrame() ?? '').includes('answer>'));
+    stdin.write(ESCAPE);
+    assert.equal(await third, undefined);
+  });
+});
+
+test('a choice from a list stays in the transcript after the list closes', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, lastFrame } = await setup({ dir, configGlobalDir: dir });
+    await submit(stdin, '/endpoint-add');
+    await waitFor(() => (lastFrame() ?? '').includes('Which kind of endpoint?'));
+    stdin.write(ENTER);
+    await waitFor(() => (lastFrame() ?? '').includes('Which kind of endpoint? → Local AI server'));
+    await waitFor(() => (lastFrame() ?? '').includes('answer>'));
+    stdin.write(ESCAPE);
   });
 });
 

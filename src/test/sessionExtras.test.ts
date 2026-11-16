@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionStore } from '../session/sessionStore.js';
 import type { ContextEntry } from '../agent/contextEntry.js';
-import { cleanTitle, forkSession, lastErrorReport, latestSession, recordLastError, startupLine, titlePrompt } from '../session/sessionExtras.js';
+import { cleanTitle, forkSession, lastErrorReport, latestSession, noModelLabel, recordLastError, startupLine, titlePrompt } from '../session/sessionExtras.js';
 
 function entry(content: string): ContextEntry {
   return { type: 'user', sub_type: 'input', content } as unknown as ContextEntry;
@@ -39,6 +39,15 @@ test('startupLine names the server state, model, context and the last session', 
   );
   assert.equal(startupLine({ provider: 'anthropic', status: 'up' }), 'anthropic');
   assert.equal(startupLine({ provider: 'phoebe', local: true, status: 'down' }), 'phoebe server down');
+});
+
+test('with no model, the label says so instead of the CLI default model', () => {
+  assert.equal(noModelLabel(false), 'no model or endpoint chosen');
+  assert.equal(noModelLabel(true), 'no model (server not answering)');
+  assert.equal(
+    startupLine({ provider: 'local', status: 'down', model: noModelLabel(false) }),
+    'server down · no model or endpoint chosen',
+  );
 });
 
 test('lastErrorReport shows the recorded error and the end of crash.log', () => {
