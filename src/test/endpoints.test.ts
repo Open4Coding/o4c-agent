@@ -90,6 +90,20 @@ test('local AI servers: any number of them, each under its own name, kept as loc
   assert.equal(suggestLocalName('http://local:8080'), 'local-server', 'a built-in provider name is never suggested');
 });
 
+test("saveEndpoint also updates a project's copy of the endpoints, which would otherwise hide the change", async () => {
+  const project = mkdtempSync(join(tmpdir(), 'o4c-ep-proj-'));
+  const store = new ConfigStore(project, mkdtempSync(join(tmpdir(), 'o4c-ep-glob-')), [], null);
+  const old = { name: 'copilot', url: 'https://api.individual.githubcopilot.com', model: 'gpt-4.1', copilot: 'github.com' };
+  await saveEndpoint(store, old, undefined, false);
+  await store.set('local', 'endpoints', (await store.readScope('global')).endpoints);
+  await saveEndpoint(store, { ...old, model: 'copilot-search-a', contextWindow: 244000 }, undefined, false);
+  const local = (await store.readScope('local')).endpoints as Record<string, { model: string; contextWindow?: number }>;
+  assert.equal(local.copilot.model, 'copilot-search-a');
+  assert.equal(local.copilot.contextWindow, 244000);
+  assert.equal(((await store.readScope('global')).endpoints as Record<string, { model: string }>).copilot.model, 'copilot-search-a');
+  assert.equal((await store.readScope('personal')).endpoints, undefined, 'a scope without the key is left alone');
+});
+
 test('saveEndpoint keeps the local flag', async () => {
   const store = new ConfigStore(undefined, mkdtempSync(join(tmpdir(), 'o4c-ep-local-')));
   await saveEndpoint(store, { name: 'phoebe', url: 'http://10.0.0.5:8080', model: 'qwen', local: true }, undefined, false);

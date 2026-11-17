@@ -127,6 +127,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help an
     '/update',
     '/setup',
     '/endpoint',
+    '/models',
     '/endpoint-add',
     '/goal',
     '/hooks',

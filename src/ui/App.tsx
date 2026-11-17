@@ -3634,6 +3634,66 @@ export function App({
           restart(currentSessionIdRef.current, modeRef.current, true);
           setTimeout(() => exit(), 0);
         }
+      } else if (commandName(input) === '/models') {
+        // The endpoint's own model list: pick one, check it with one real tool call, save, restart on it.
+        pushBlock([userLine(input)]);
+        const endpoints = parseEndpoints(await configStore.get(ENDPOINTS_KEY).catch(() => undefined)).endpoints;
+        const endpoint = endpoints.find((e) => e.name === provider);
+        if (!endpoint) {
+          pushBlock([
+            infoLine(
+              provider === 'local'
+                ? 'The local server runs whatever model it has loaded - change it on the server. /models lists the models of an endpoint (/endpoint-add, then /endpoint <name>).'
+                : `/models lists the models of an endpoint; o4c is on ${provider}. /endpoint switches to one, /endpoint-add adds one.`,
+            ),
+          ]);
+        } else {
+          const saved = (await loadCredentials(configStore).catch(() => undefined))?.values[endpoint.name];
+          const key = endpoint.copilot ? (await resolveCopilotToken(endpoint.copilot, saved))?.token : saved;
+          if (key) registerSecret(key);
+          pushBlock([infoLine(`Reading the models of ${endpoint.name}...`)]);
+          const listed: { id: string; contextWindow?: number }[] | undefined = endpoint.copilot
+            ? key
+              ? (await copilotModels(endpoint.url, key))?.usable
+              : undefined
+            : (await listModels(endpoint.url, key))?.map((id) => ({ id }));
+          if (!listed?.length) {
+            pushBlock([
+              infoLine(
+                endpoint.copilot && !key
+                  ? copilotLoginHelp(endpoint.copilot)
+                  : `${endpoint.name} did not list its models. /endpoint-add can save it again with another model id.`,
+              ),
+            ]);
+          } else {
+            const picked = await pickAndEcho(
+              `Model on ${endpoint.name}, now ${endpoint.model} (↑/↓, Enter, Esc to cancel):`,
+              listed.slice(0, 60).map((m) => ({
+                key: m.id,
+                label: `${m.id}${m.contextWindow ? ` - ${Math.round(m.contextWindow / 1000)}K context` : ''}${m.id === endpoint.model ? ' (in use)' : ''}`,
+              })),
+            );
+            if (!picked) {
+              pushBlock([infoLine('Model unchanged.')]);
+            } else if (picked === endpoint.model) {
+              pushBlock([infoLine(`Already on ${picked}.`)]);
+            } else {
+              // The old context size belonged to the old model: Copilot says the new one's, others fall back.
+              const next = { ...endpoint, model: picked, contextWindow: listed.find((m) => m.id === picked)?.contextWindow };
+              pushBlock([infoLine(`Checking ${picked} with one real tool call...`)]);
+              const check = await checkEndpoint(next, key);
+              if (!check.ok) {
+                pushBlock([infoLine(`That did not work: ${check.detail}\nModel unchanged.`)]);
+              } else {
+                await saveEndpoint(configStore, next, undefined, false);
+                pushBlock([infoLine(`Works - ${endpoint.name} now uses ${picked}. Restarting o4c on it.`)]);
+                await saveSessionNow().catch(() => undefined);
+                restart(currentSessionIdRef.current, modeRef.current, true);
+                setTimeout(() => exit(), 0);
+              }
+            }
+          }
+        }
       } else if (commandName(input) === '/hooks') {
         // G3: the configured hooks and any problems in them.
         pushBlock([userLine(input)]);

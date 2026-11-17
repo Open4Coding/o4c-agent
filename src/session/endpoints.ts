@@ -220,16 +220,26 @@ export async function saveEndpoint(
   select: boolean,
 ): Promise<void> {
   const global = await store.readScope('global');
-  const current = global[ENDPOINTS_KEY];
-  const map = { ...(current && typeof current === 'object' && !Array.isArray(current) ? (current as Record<string, unknown>) : {}) };
-  map[endpoint.name] = {
+  const entry = {
     url: normalizeUrl(endpoint.url),
     model: endpoint.model,
     ...(endpoint.contextWindow ? { contextWindow: endpoint.contextWindow } : {}),
     ...(endpoint.copilot ? { copilot: endpoint.copilot } : {}),
     ...(endpoint.local ? { local: true } : {}),
   };
-  await store.set('global', ENDPOINTS_KEY, map);
+  const withEntry = (current: unknown) => ({
+    ...(current && typeof current === 'object' && !Array.isArray(current) ? (current as Record<string, unknown>) : {}),
+    [endpoint.name]: entry,
+  });
+  await store.set('global', ENDPOINTS_KEY, withEntry(global[ENDPOINTS_KEY]));
+  // A trusted project starts with a copy of the global config, and its `endpoints` hides the global
+  // one - so a project scope that has the key gets the entry too, as selectProvider does for
+  // `provider`. Without it a /models switch was saved and then read back as the old model.
+  for (const scope of ['local', 'personal'] as const) {
+    if (!store.hasScope(scope)) continue;
+    const projectMap = (await store.readScope(scope))[ENDPOINTS_KEY];
+    if (projectMap !== undefined) await store.set(scope, ENDPOINTS_KEY, withEntry(projectMap));
+  }
   if (apiKey) {
     const creds = global.credentials;
     await store.set('global', 'credentials', { ...(creds && typeof creds === 'object' ? (creds as Record<string, unknown>) : {}), [endpoint.name]: apiKey });

@@ -247,6 +247,15 @@ Which model service o4c runs on: `local`, `anthropic`, or an endpoint you added.
 `provider` in the global config and restarts o4c on it. `-p <name>` on the command line selects an
 endpoint for one run.
 
+## `/models`
+
+The models of the endpoint o4c is on, from the endpoint itself: GitHub Copilot lists the ones your plan
+and its policies allow, with their context sizes; other endpoints answer `GET /v1/models` if they can.
+The one in use is marked. Pick another and o4c checks it with one real tool call, saves it as that
+endpoint's model (with its context size, when the list gives one) and restarts on it; if the check
+fails, nothing changes. On `local` the model is whatever the server has loaded, so there is nothing to
+pick.
+
 ## `/exit` (alias `/quit`)
 
 End the session. It is saved and can be resumed.

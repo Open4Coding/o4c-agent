@@ -500,6 +500,10 @@ export const COMMANDS: CommandInfo[] = [
     description: 'Which model service o4c runs on: local, Anthropic, or an endpoint you added. Switching restarts o4c. Usage: /endpoint [name]',
   },
   {
+    name: '/models',
+    description: "The models of the endpoint o4c is on (GitHub Copilot lists your plan's, with context sizes): pick one, it is checked with one real tool call, saved, and o4c restarts on it.",
+  },
+  {
     name: '/endpoint-add',
     description: 'Add a model service: a local AI server (as many as you have), Amazon Bedrock, OpenAI, OpenRouter, GitHub Copilot, or any OpenAI-compatible URL. Asks where, the key and model, checks one real tool call, saves it.',
   },
