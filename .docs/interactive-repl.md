@@ -12,7 +12,7 @@
 The three lines under the input box:
 
 1. The mode, the key hints, how full the context window is, and the session's active time.
-2. `view` and `Think` settings, then tokens: `t-tks` for this project, `s-tks` for this session
+2. `view` and `Think` settings, then tokens: `all` for this machine, `t-tks` for this project, `s-tks` for this session
    (sent↑/received↓ and the server's speed), and how much of the prompt the server had cached.
 3. The model, the git branch (`*` = uncommitted changes) and the directory, then where the turn's
    time went: `prefill 4.2s · think 38.0s · answer 6.1s`, live while a turn runs and the last

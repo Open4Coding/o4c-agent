@@ -545,9 +545,9 @@ function StatusBar({
 /**
  * The footer's second line: what this project has cost in tokens.
  *
- *     t-tks: 18.6M↑/1.3M↓ | s-tks: 1.6M↑/0.3M↓/46 t/s
+ *     all: 42.0M↑/3.1M↓ | t-tks: 18.6M↑/1.3M↓ | s-tks: 1.6M↑/0.3M↓/46 t/s
  *
- * `t-` is this project's lifetime total, `s-` this session. Prompt and completion are shown
+ * `all` is the whole machine, `t-` this project's lifetime total, `s-` this session. Prompt and completion are shown
  * apart because they are not comparable quantities: a measured 8h run sent 18.6M prompt tokens
  * and generated 1.3M, so one sum would be 94% prefill and would bury the figure that actually
  * tracks output.
@@ -630,14 +630,16 @@ function UsageBar({
       <Text color={theme.border}> | </Text>
       {totals && (
         <Text>
-          <Text color={theme.border}>t-tks: </Text>
-          {pair(totals.project)}
+          {/* Widest scope first: the whole machine, then this project, then this session. */}
           {totals.machine && (
             <Text>
-              <Text color={theme.border}> all: </Text>
+              <Text color={theme.border}>all: </Text>
               {pair(totals.machine)}
+              <Text color={theme.border}> | </Text>
             </Text>
           )}
+          <Text color={theme.border}>t-tks: </Text>
+          {pair(totals.project)}
           <Text color={theme.border}> | </Text>
         </Text>
       )}
