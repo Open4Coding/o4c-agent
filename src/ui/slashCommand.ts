@@ -65,6 +65,11 @@ export const COMMANDS: CommandInfo[] = [
   },
   { name: '/resume', description: 'Browse and resume one of the last 20 saved sessions.' },
   {
+    name: '/screenrefresh',
+    select: 'run',
+    description: 'Redraw the whole screen at its current size, clearing leftovers from a resize. The conversation is kept - no LLM call.',
+  },
+  {
     name: '/context',
     aliases: ['/ctx'],
     description: 'Show local token-usage for this session - no LLM call.',

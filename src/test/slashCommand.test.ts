@@ -43,6 +43,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help an
   assert.deepEqual(KNOWN_COMMANDS, [
     '/clear',
     '/resume',
+    '/screenrefresh',
     '/context',
     '/ctx',
     '/plan',

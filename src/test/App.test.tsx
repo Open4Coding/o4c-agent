@@ -739,6 +739,20 @@ test('/endpoint <name> selects a saved endpoint and restarts from config; an unk
   });
 });
 
+test('/screenrefresh saves the session and reloads onto it, so the new process redraws it at the current size', async () => {
+  await withTempDir(async (dir) => {
+    const { stdin, frames, restartCalls, restartFromConfig, store } = await setup({ dir, projectRoot: dir, provider: new ManyToolCallsProvider(0) });
+    await submit(stdin, 'hello');
+    await waitFor(() => anyFrameIncludes(frames, 'done scanning'));
+    await submit(stdin, '/screenrefresh');
+    await waitFor(() => restartCalls.length === 1);
+    const saved = await store.readManifest();
+    assert.equal(saved.length, 1, 'the session was saved before the reload');
+    assert.equal(restartCalls[0], saved[0]!.id, 'and the reload resumes that same session');
+    assert.deepEqual(restartFromConfig, [false], 'a plain reload, not a provider change');
+  });
+});
+
 test('pressing Tab retires the tip for good, in the global scope', async () => {
   await withTempDir(async (dir) => {
     const configGlobalDir = join(dir, 'fake-global');

@@ -3050,6 +3050,16 @@ export function App({
             pushBlock([{ kind: 'error', text: formatError(err) }]);
           }
         }
+      } else if (commandName(input) === '/screenrefresh') {
+        // Redraw the whole screen, e.g. after a resize left pieces of old frames behind. The same
+        // reload the end of a turn does: the new process clears the screen and its scrollback
+        // (cli.ts, O4C_FRESH_SCREEN) and repaints the saved session at the current width - a known
+        // good path, rather than trying to patch over a terminal in an unknown state.
+        const id = (await saveSessionNow()) ?? currentSessionIdRef.current;
+        if (suggestionRef.current && id) saveSuggestion(id, suggestionRef.current);
+        restart(id, modeRef.current);
+        setTimeout(() => exit(), 0);
+        return;
       } else if (
         commandName(input) === '/set-steplimit' ||
         commandName(input) === '/set-local-steplimit' ||

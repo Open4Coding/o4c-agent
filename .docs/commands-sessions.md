@@ -13,6 +13,13 @@ Pick one of the saved sessions (the newest 20 by default - see `/set-sessionsToS
 the conversation, the input history and the session's token totals come back. From the shell,
 `o4c -c` resumes the newest one without the picker.
 
+## `/screenrefresh`
+
+Redraw the whole screen at its current size. Use it when resizing the window left pieces of old
+frames behind (stray borders, a doubled input box, half-drawn lines). The conversation is kept: o4c
+saves the session, clears the screen and its scrollback, and redraws the session from the start, the
+same reload it does after most turns. Typed while the model is working, it waits for the turn to end.
+
 ## `/session`
 
 More than one session at a time in this window. `/session new <task>` starts a background session that
