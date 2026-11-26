@@ -15,7 +15,7 @@ export interface BackgroundSources {
   graphProgress?: () => { readonly done: number; readonly total: number } | undefined;
   /** The checkpoint repository's session-start warm-up. */
   checkpointWarming?: () => boolean;
-  /** This session's background jobs (run_shell with background, /ps). */
+  /** This session's background jobs (run_shell with background, /bg). */
   jobs?: () => readonly JobRecord[];
 }
 

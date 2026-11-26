@@ -19,7 +19,7 @@ export const TIPS: readonly string[] = [
   '/view-permissions shows your allow/ask/deny rules; "Yes, and always allow" in an approval adds one.',
   '/init drafts an O4C.md from your project\'s own files - commands, layout, languages.',
   'o4c reads AGENTS.md or CLAUDE.md when a project has no O4C.md.',
-  'run_shell can start a server in the background; /ps lists background jobs and /kill stops one.',
+  'run_shell can start a server in the background; /bg lists background jobs and /kill stops one.',
   '/set-shell picks the shell commands run in - cmd, PowerShell 7, bash.',
   '/review has the model review this session\'s changes, read-only.',
   '/all lists every command, including the hidden ones.',

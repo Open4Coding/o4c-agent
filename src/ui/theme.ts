@@ -46,7 +46,21 @@ export const theme = {
    * brightness and the output sits a step behind it, instead of both being one weight.
    */
   toolCall: '#FFFFFF',
+  /**
+   * `[info]` lines - o4c telling you something. Asked for 2026-11-22: "every [info] needs to be a
+   * lighter shade of white or green", instead of the bronze `system` they shared with `[think]`. A
+   * pale green-white: lighter than `user`'s green, so it is not mistaken for your own turn, and
+   * cooler than `tool`'s warm white, so it is not mistaken for tool output.
+   */
+  info: '#BFDDBB',
 } as const;
+
+/** The color a line is drawn in: its own override, `info` for an `[info]` line, else its kind's. */
+export function lineColor(line: { kind: LineKind; text: string; color?: string }): string {
+  if (line.color) return line.color;
+  if (line.kind === 'system' && line.text.startsWith('[info]')) return theme.info;
+  return lineStyle[line.kind].color;
+}
 
 /**
  * How each kind of transcript line is drawn. One map rather than a switch in `App.tsx` so the

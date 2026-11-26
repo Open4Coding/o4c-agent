@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { theme, lineStyle, contextBarStyle } from '../ui/theme.js';
+import { theme, lineStyle, lineColor, contextBarStyle } from '../ui/theme.js';
 import { CONTEXT_PRESSURE_RATIO } from '../agent/loop.js';
 import type { LineKind } from '../ui/types.js';
 
@@ -99,4 +99,14 @@ test('the threshold is inclusive, matching the gate the loop actually applies', 
 // the gate reports what it sees. The bar must stay red rather than wrapping around to calm.
 test('an over-full estimate stays red rather than wrapping around', () => {
   assert.equal(contextBarStyle(1.31, CONTEXT_PRESSURE_RATIO).bar, theme.error);
+});
+
+// Asked for 2026-11-22: "every [info] needs to be a lighter shade of white or green".
+test('[info] lines are pale green-white; other system lines ([think], plain notices) keep the bronze', () => {
+  assert.equal(lineColor({ kind: 'system', text: '[info]\nSaved.' }), theme.info);
+  assert.equal(lineColor({ kind: 'system', text: '[think]\nhmm' }), theme.border);
+  assert.equal(lineColor({ kind: 'system', text: 'Resume cancelled.' }), theme.border);
+  assert.equal(lineColor({ kind: 'system', text: '[info] x', color: '#123456' }), '#123456', 'an explicit override still wins');
+  assert.notEqual(theme.info, theme.user);
+  assert.notEqual(theme.info, theme.tool);
 });

@@ -174,3 +174,19 @@ test('wrapRow splits a word that is longer than a whole line, and counts wide ch
 test('wrapRow joins embedded newlines into single spaces so a row never contains a hard break', () => {
   assert.deepEqual(wrapRow('one\ntwo   three', 40, 38), ['one two   three']);
 });
+
+test('rowLeadLength colors only the name at the start of a row; the rest keeps the row color', async () => {
+  const chalk = (await import('chalk')).default;
+  const before = chalk.level;
+  chalk.level = 3;
+  try {
+    const { lastFrame } = render(
+      <SelectList items={['a', 'b']} getKey={(x) => x} rowText={(x) => `/cmd${x} — explains ${x}`} rowLeadLength={() => 5} leadColor="#FFF8DC" onSelect={() => {}} />,
+    );
+    const row = lastFrame()!.split('\n').find((l) => l.includes('/cmdb'))!;
+    // #FFF8DC = 255;248;220 as a truecolor foreground, opened before the name and closed before the explanation.
+    assert.match(row, /\x1b\[38;2;255;248;220m\/cmdb\x1b\[39m — explains b/);
+  } finally {
+    chalk.level = before;
+  }
+});

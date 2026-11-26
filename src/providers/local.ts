@@ -852,9 +852,12 @@ export async function parseSseStream(
   onPrefillProgress?: (progress: PrefillProgress) => void,
   onCompletionId?: (id: string) => void,
   repetition?: RepetitionDetector,
+  now: () => number = Date.now,
 ): Promise<ParsedStream> {
   let repeated: string | undefined;
   let idSeen = false;
+  // When the first generated token arrived, for the rate fallback below.
+  let firstTokenAt: number | undefined;
   let content = '';
   let reasoning = '';
   let finishReason = 'stop';
@@ -910,6 +913,7 @@ export async function parseSseStream(
 
         const choice = chunk.choices?.[0];
         if (!choice) continue;
+        if (firstTokenAt === undefined && (choice.delta?.reasoning_content || choice.delta?.content || choice.delta?.tool_calls?.length)) firstTokenAt = now();
         if (choice.delta?.reasoning_content) {
           reasoning += choice.delta.reasoning_content;
           onToken?.(choice.delta.reasoning_content, 'think');
@@ -941,6 +945,15 @@ export async function parseSseStream(
     }
   } finally {
     reader.releaseLock();
+  }
+
+  // Hosted endpoints (Copilot, Bedrock, OpenAI, OpenRouter) send no `timings`, so the footer's rate
+  // stayed at 0. Measured here instead, like anthropic.ts does: output tokens over the time from the
+  // first generated token to the end, which leaves prefill out the way llama.cpp's figure does. Not
+  // for a reply that arrived in one burst (under 200 ms), where the figure would be noise.
+  if (usage && usage.tokensPerSecond === undefined && usage.outputTokens > 0 && firstTokenAt !== undefined) {
+    const elapsedMs = now() - firstTokenAt;
+    if (elapsedMs >= 200) usage = { ...usage, tokensPerSecond: (usage.outputTokens * 1000) / elapsedMs };
   }
 
   // Real bug found via direct reproduction (2026-10-03, a --parallel 1 run at only 16% context

@@ -118,7 +118,7 @@ import {
   liveRegionCapRows as sharedLiveRegionCapRows,
   liveRegionCapRowsFor,
 } from './frameBudget.js';
-import { theme, lineStyle, contextBarStyle, diffColors, scopeColor } from './theme.js';
+import { theme, lineStyle, lineColor, contextBarStyle, diffColors, scopeColor } from './theme.js';
 import { FenceTracker, fencedSegments } from './codeFences.js';
 import { colorViewLines } from './colorView.js';
 import {
@@ -140,6 +140,7 @@ import { describeCacheBreak } from '../agent/cacheBreak.js';
 import type { SessionStore, SessionMeta } from '../session/sessionStore.js';
 import { createProviderCallLogger, type RunLogger } from '../session/runLog.js';
 import { ConfigStore, scopeOwningEntry, type ConfigScope } from '../session/configStore.js';
+import { DEFAULT_STEP_LIMIT, describeStepLimit, parseStepLimit, resolveStepLimit, saveStepLimit } from '../session/stepLimit.js';
 import type { UsageStore } from '../session/usageStore.js';
 import type { CodeGraphSession } from '../graph/startup.js';
 import { HIGHLIGHT_COLOR_NAMES, isValidHighlightColor, resolveHighlightColor } from './highlightColor.js';
@@ -792,7 +793,7 @@ function LineText({ line }: { line: Line }) {
     );
   }
   return (
-    <Text bold={style.bold} color={line.color ?? style.color}>
+    <Text bold={style.bold} color={lineColor(line)}>
       {line.text}
     </Text>
   );
@@ -993,6 +994,8 @@ export function App({
   // Messages typed while a turn runs, for the model's next step (C6). Plain Enter steers; Ctrl+Q
   // queues for after the turn; anything the turn did not pick up joins the queue at its end.
   const steeringRef = useRef<string[]>([]);
+  // The step limit in force (/set-steplimit changes it for the next turn too); undefined = the default.
+  const stepLimitRef = useRef<number | undefined>(maxIterations);
   // `!command` outputs waiting to go in front of the next message (E7) - append-only, cache-safe.
   const shellNotesRef = useRef<string[]>([]);
   // ask_user (C7): while the model waits for a typed answer, the next Enter answers it.
@@ -3048,6 +3051,45 @@ export function App({
           }
         }
       } else if (
+        commandName(input) === '/set-steplimit' ||
+        commandName(input) === '/set-local-steplimit' ||
+        commandName(input) === '/set-global-steplimit'
+      ) {
+        // How many model requests one turn may make before o4c asks Continue / Summarize / Stop.
+        // Bare and -local- = this project, -global- = every project on this machine; 0 = no limit.
+        pushBlock([userLine(input)]);
+        const name = commandName(input);
+        const scope: ConfigScope = name === '/set-global-steplimit' ? 'global' : 'local';
+        const raw = input.slice(name.length).trim();
+        const usage = `Usage: ${name} <n> - steps per turn before o4c asks to continue; 0 (or off) for no limit. The default is ${DEFAULT_STEP_LIMIT}.`;
+        const inForce = async () => {
+          const r = await resolveStepLimit(configStore);
+          return r ? `${describeStepLimit(r.value)} (set in ${r.scope === 'global' ? 'the global config' : 'this project'})` : `${DEFAULT_STEP_LIMIT} steps (the default)`;
+        };
+        const n = parseStepLimit(raw);
+        if (!raw) {
+          pushBlock([infoLine(`Step limit: ${await inForce()}.\n${usage}`)]);
+        } else if (n === undefined) {
+          pushBlock([{ kind: 'error', text: `"${raw}" isn't a whole number. ${usage}` }]);
+        } else if (scope === 'local' && !configStore.hasScope('local')) {
+          pushBlock([{ kind: 'error', text: 'No trusted project in this directory - nothing to set a project value into. Trust this project first, or use /set-global-steplimit instead.' }]);
+        } else {
+          try {
+            await saveStepLimit(configStore, scope, n);
+            const r = await resolveStepLimit(configStore);
+            stepLimitRef.current = r?.value;
+            const hidden = scope === 'global' && r && r.scope !== 'global';
+            pushBlock([
+              infoLine(
+                `Step limit set to ${describeStepLimit(n)} (${scope === 'global' ? 'global default' : 'this project'}).` +
+                  (hidden ? `\nThis project has its own step limit, ${describeStepLimit(r.value)}, which wins here. /set-steplimit ${n} changes it.` : ' It applies from your next message.'),
+              ),
+            ]);
+          } catch (err) {
+            pushBlock([{ kind: 'error', text: formatError(err) }]);
+          }
+        }
+      } else if (
         commandName(input) === '/set-sessionsToSave' ||
         commandName(input) === '/set-local-sessionsToSave' ||
         commandName(input) === '/set-global-sessionsToSave'
@@ -3770,7 +3812,7 @@ export function App({
           setShell(choice);
           pushBlock([infoLine(`Shell set to ${choice} (${currentShell().exe}). The model is told from your next message.`)]);
         }
-      } else if (commandName(input) === '/ps') {
+      } else if (commandName(input) === '/bg') {
         // Local: the job records under .o4c/jobs (B22).
         pushBlock([userLine(input)]);
         const jobs = listJobs();
@@ -3779,7 +3821,7 @@ export function App({
         pushBlock([userLine(input)]);
         const id = input.trim().split(/\s+/)[1] ?? '';
         const job = id ? getJob(id) : undefined;
-        if (!job) pushBlock([infoLine(id ? `No background job "${id}" - see /ps.` : 'Usage: /kill <id> - see /ps for the ids.')]);
+        if (!job) pushBlock([infoLine(id ? `No background job "${id}" - see /bg.` : 'Usage: /kill <id> - see /bg for the ids.')]);
         else pushBlock([infoLine(killJob(job) ? `Stopped ${job.id}: ${job.command}` : `${job.id} is not running.`)]);
       } else if (commandName(input) === '/mcp' && /^\/mcp\s+(inspect|add)\b/i.test(input.trim())) {
         // G8: /mcp inspect <server> and /mcp add [preset].
@@ -3981,7 +4023,7 @@ export function App({
             // At the step limit, ask (B18) - Esc counts as stop, the old behaviour.
             onStepLimit: async (steps: number) =>
               (await pickChoice(`The model has taken ${steps} steps this turn (the step limit). What now?`, [
-                { key: 'continue', label: `Continue - allow another ${maxIterations && maxIterations > 0 ? maxIterations : 25} steps.` },
+                { key: 'continue', label: `Continue - allow another ${stepLimitRef.current || DEFAULT_STEP_LIMIT} steps.` },
                 { key: 'summarize', label: 'Summarize - one last answer, no tools: what is done, what is left, what to do next.' },
                 { key: 'stop', label: 'Stop - end the turn now' },
               ])) ?? 'stop',
@@ -3995,7 +4037,7 @@ export function App({
             // `/think`'s level, read fresh per turn via the ref so a change made while a turn
             // was queued still applies to it.
             thinkLevel: ultra && THINK_LEVELS.indexOf(thinkLevelRef.current ?? DEFAULT_THINK_LEVEL) < THINK_LEVELS.indexOf('high') ? 'high' : thinkLevelRef.current,
-            maxIterations: ultra ? Math.min(maxIterations ?? ULTRAPLAN_MAX_ITERATIONS, ULTRAPLAN_MAX_ITERATIONS) : maxIterations,
+            maxIterations: ultra ? Math.min(stepLimitRef.current ?? ULTRAPLAN_MAX_ITERATIONS, ULTRAPLAN_MAX_ITERATIONS) : stepLimitRef.current,
             // The full request/response wire transcript - "the sends", distinct from onEvent's
             // already-derived AgentEvent stream below (which only ever carries the *response*
             // side, split/reshaped for display). Fire-and-forget, same reasoning as runLogger's

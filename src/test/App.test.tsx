@@ -2541,6 +2541,43 @@ test('/worked hands its argument to the history store and shows the answer; with
   });
 });
 
+test('/set-steplimit: shows the limit, sets it for the next turn (the picker offers that many more), 0 removes it', async () => {
+  await withTempDir(async (dir) => {
+    const projectRoot = dir;
+    const configGlobalDir = join(dir, 'global');
+    const { stdin, frames, lastFrame } = await setup({ dir, projectRoot, configGlobalDir, provider: new ManyToolCallsProvider(6) });
+
+    // Run on select: Enter on the bare name shows the limit instead of waiting for an argument, and
+    // leaves the input box empty.
+    await submit(stdin, '/set-steplimit');
+    await waitFor(() => anyFrameIncludes(frames, 'Step limit: 25 steps (the default)'));
+    await tick(100);
+    assert.match(lastFrame() ?? '', /│ >\s+│/, 'the input box is empty again');
+
+    await submit(stdin, '/set-steplimit ten');
+    await waitFor(() => anyFrameIncludes(frames, '"ten" isn\'t a whole number'));
+
+    await submit(stdin, '/set-steplimit 3');
+    await waitFor(() => anyFrameIncludes(frames, 'Step limit set to 3 steps (this project)'));
+    assert.equal((await new ConfigStore(projectRoot, configGlobalDir).readScope('local')).stepLimit, 3);
+
+    await submit(stdin, 'scan everything');
+    await waitFor(() => (lastFrame() ?? '').includes('The model has taken 3 steps this turn'));
+    assert.ok((lastFrame() ?? '').includes('Continue - allow another 3 steps'));
+    stdin.write(ESCAPE);
+    await waitFor(() => !(lastFrame() ?? '').includes('The model has taken 3 steps this turn'));
+
+    await submit(stdin, '/set-global-steplimit 0');
+    await waitFor(() => anyFrameIncludes(frames, 'This project has its own step limit, 3 steps, which wins here'));
+    assert.equal((await new ConfigStore(projectRoot, configGlobalDir).readScope('global')).stepLimit, 0);
+
+    await submit(stdin, '/set-steplimit off');
+    await waitFor(() => anyFrameIncludes(frames, 'Step limit set to no limit (this project)'));
+    await submit(stdin, 'scan again');
+    await waitFor(() => anyFrameIncludes(frames, 'done scanning'));
+  });
+});
+
 test('/set-sessionsToSave with no argument shows a usage error, writes nothing', async () => {
   await withTempDir(async (dir) => {
     const projectRoot = dir;

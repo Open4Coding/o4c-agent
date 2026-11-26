@@ -20,6 +20,7 @@ export const SETTINGS: readonly SettingRow[] = [
   { command: '/set-contextwindowtype', key: 'contextWindowType', unset: 'default' },
   { command: '/set-sessionview', key: 'sessionView', unset: 'default' },
   { command: '/set-sessionsToSave', key: 'sessionsToSave', unset: 'default' },
+  { command: '/set-steplimit', key: 'stepLimit', unset: '25 (default)' },
   { command: '/set-blockgap', key: 'blockGap', unset: '1 (default)' },
   { command: '/set-shell', key: 'shell', unset: 'auto' },
   { command: '/set-notify', key: 'notify', unset: 'bell (default)' },

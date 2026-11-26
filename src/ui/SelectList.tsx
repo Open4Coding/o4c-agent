@@ -66,6 +66,11 @@ export interface SelectListProps<T> {
   /** Color for all of a row's lines (a mode's own color, the highlight color on the selected row).
    * Default: the terminal's normal color. */
   rowColor?: (item: T, selected: boolean) => string | undefined;
+  /** How many characters at the start of the row's text are its name, drawn in `leadColor` while the
+   * rest keeps the row's color (the "/" menu brightens command names, not their explanations). Applies
+   * to the first line only, and not to a filled selected row. */
+  rowLeadLength?: (item: T) => number;
+  leadColor?: string;
   /** When set, the selected row is drawn on this background instead of in inverse video. Opt-in,
    * so the other lists keep the inverse look they were designed around. */
   selectedBackground?: string;
@@ -101,6 +106,8 @@ export function SelectList<T>({
   getKey,
   rowText,
   rowColor,
+  rowLeadLength,
+  leadColor,
   selectedBackground,
   selectedTextColor,
   onSelect,
@@ -172,6 +179,7 @@ export function SelectList<T>({
         const color = rowColor?.(item, isSelected);
         const filled = isSelected && selectedBackground !== undefined;
         const lines = wrapRow(rowText(item), inner - MARKER_WIDTH, inner - CONTINUATION_INDENT);
+        const lead = !filled && leadColor && rowLeadLength ? rowLeadLength(item) : 0;
         return (
           <Box key={getKey(item)} flexDirection="column">
             {lines.map((line, lineIndex) => (
@@ -182,7 +190,14 @@ export function SelectList<T>({
                 inverse={isSelected && !filled}
               >
                 {lineIndex === 0 ? (isSelected ? '> ' : '  ') : ' '.repeat(CONTINUATION_INDENT)}
-                {line}
+                {lineIndex === 0 && lead > 0 ? (
+                  <>
+                    <Text color={leadColor}>{line.slice(0, lead)}</Text>
+                    {line.slice(lead)}
+                  </>
+                ) : (
+                  line
+                )}
               </Text>
             ))}
           </Box>

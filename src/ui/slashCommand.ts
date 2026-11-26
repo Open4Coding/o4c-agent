@@ -289,6 +289,25 @@ export const COMMANDS: CommandInfo[] = [
     description: "Set how many sessions /resume keeps for this machine's global default (~/.o4c/config.json).",
     hidden: true,
   },
+  // How many model requests one turn may make before o4c asks Continue / Summarize / Stop.
+  {
+    name: '/set-steplimit',
+    description: 'Steps (model requests) per turn before o4c asks to continue, for this project; 0 = no limit, default 25. Usage: /set-steplimit <n>',
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/set-local-steplimit',
+    description: 'Same as /set-steplimit - explicit alias for the same project-shared tier.',
+    hidden: true,
+    select: 'run',
+  },
+  {
+    name: '/set-global-steplimit',
+    description: "Steps per turn before o4c asks to continue, as this machine's default for every project; 0 = no limit.",
+    hidden: true,
+    select: 'run',
+  },
   // How much of a saved session the screen shows after a reload or /resume - a picklist (compact /
   // full / default), same local/global naming convention as the trio above.
   {
@@ -542,13 +561,13 @@ export const COMMANDS: CommandInfo[] = [
     description: "Show what changed in the project's files since this session's first checkpoint - no LLM call.",
   },
   {
-    name: '/ps',
+    name: '/bg',
     select: 'run',
     description: 'List background jobs started with run_shell background:true - id, state, command - no LLM call.',
   },
   {
     name: '/kill',
-    description: 'Stop a background job and everything it started. Usage: /kill <id> (see /ps).',
+    description: 'Stop a background job and everything it started. Usage: /kill <id> (see /bg).',
   },
   {
     name: '/mcp',

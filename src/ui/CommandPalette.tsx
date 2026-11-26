@@ -2,6 +2,9 @@ import React from 'react';
 import type { CommandInfo } from './slashCommand.js';
 import { SelectList } from './SelectList.js';
 import { SELECTED_ROW_BACKGROUND, SELECTED_ROW_TEXT } from './highlightColor.js';
+import { theme } from './theme.js';
+
+const names = (c: CommandInfo) => [c.name, ...(c.aliases ?? [])].join(', ');
 
 export interface CommandPaletteProps {
   commands: readonly CommandInfo[];
@@ -29,7 +32,10 @@ export function CommandPalette({ commands, onSelect, onCancel, highlightColor }:
       selectedTextColor={SELECTED_ROW_TEXT}
       onSelect={onSelect}
       onCancel={onCancel}
-      rowText={(c) => `${[c.name, ...(c.aliases ?? [])].join(', ')} — ${c.description}`}
+      rowText={(c) => `${names(c)} — ${c.description}`}
+      // The command names a little brighter than the terminal's normal text; explanations unchanged.
+      rowLeadLength={(c) => names(c).length}
+      leadColor={theme.text}
     />
   );
 }

@@ -22,7 +22,7 @@ The three lines under the input box:
    in the background, a `bg:` part is added at the end of this line: `indexing code 1,200/11,509`
    (the code graph is building or refreshing its index, files done out of the total; `code_graph` answers may be incomplete until it
    finishes), `checkpoint prep` (the first-time setup for `/undo`, which keeps the first edit
-   fast), and `N job(s)` (background shell jobs, see `/ps`). No `bg:` means nothing is running.
+   fast), and `N job(s)` (background shell jobs, see `/bg`). No `bg:` means nothing is running.
 
 When you start o4c in a project, the transcript also says when the code graph's first scan
 starts (`[code graph] running in background, indexing files (bg)`) and when it is done

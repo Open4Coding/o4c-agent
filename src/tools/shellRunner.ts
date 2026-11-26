@@ -66,7 +66,7 @@ function installExitHook(): void {
   });
 }
 
-/** Children still running - for /ps-style reporting and tests. */
+/** Children still running - for /bg-style reporting and tests. */
 export function liveChildren(): number {
   return live.size;
 }

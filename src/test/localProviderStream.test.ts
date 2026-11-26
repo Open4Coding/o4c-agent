@@ -167,6 +167,29 @@ test('extracts usage from the final chunk (stream_options.include_usage)', async
   assert.deepEqual(result.usage, { inputTokens: 50, outputTokens: 5 });
 });
 
+test('without llama.cpp timings, the rate is measured from the first token to the end (hosted endpoints)', async () => {
+  const stream = (chunks: string[]) => sseStream(chunks);
+  const clock = (times: number[]) => () => times.shift() ?? 0;
+  // First token at t=1000, stream ends at t=3000: 100 tokens in 2 s = 50 t/s; prefill before t=1000 is left out.
+  const measured = await parseSseStream(
+    stream([sse({ choices: [{ delta: { content: 'a' } }] }), sse({ choices: [{ delta: { content: 'b' } }] }), sse({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 100 } })]),
+    undefined, undefined, undefined, undefined, undefined, clock([1000, 3000]),
+  );
+  assert.equal(measured.usage?.tokensPerSecond, 50);
+  // The server's own figure wins when it sends one.
+  const reported = await parseSseStream(
+    stream([sse({ choices: [{ delta: { content: 'a' } }] }), sse({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 100 }, timings: { predicted_per_second: 31 } })]),
+    undefined, undefined, undefined, undefined, undefined, clock([1000, 3000]),
+  );
+  assert.equal(reported.usage?.tokensPerSecond, 31);
+  // A reply that arrived in one burst gets no figure rather than a nonsense one.
+  const burst = await parseSseStream(
+    stream([sse({ choices: [{ delta: { content: 'a' } }] }), sse({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 100 } })]),
+    undefined, undefined, undefined, undefined, undefined, clock([1000, 1050]),
+  );
+  assert.equal(burst.usage?.tokensPerSecond, undefined);
+});
+
 test('usage is undefined when the server never sends a usage chunk', async () => {
   const stream = sseStream([sse({ choices: [{ delta: { content: 'hi' }, finish_reason: 'stop' }] })]);
 

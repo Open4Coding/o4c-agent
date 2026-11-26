@@ -61,6 +61,28 @@ Same as `/set-sessionsToSave`.
 
 How many sessions `/resume` keeps, as this machine's default.
 
+## `/set-steplimit`
+
+`/set-steplimit <n>` - how many steps the model may take in one turn before o4c stops and asks what
+to do: **Continue** (another `<n>` steps), **Summarize** (one last answer with no tools: what is done,
+what is left, the next step) or **Stop**. A step is one request to the model - typically reading a
+file, running a command or making an edit, then deciding what to do next. The default is 25;
+`/set-steplimit 0` (or `off`) removes the limit. On its own, `/set-steplimit` shows the limit in force
+and where it is set. Applies from your next message.
+
+The limit is a safety net: it stops a model that is going in circles from spending requests without
+end (free on a local server, your allowance on a paid one) and makes Auto mode check in now and
+then. Raise it for long, unattended work. Saved as `stepLimit` in the config; the older
+`maxIterations` key is still read.
+
+## `/set-local-steplimit`
+
+Same as `/set-steplimit`.
+
+## `/set-global-steplimit`
+
+The step limit for every project on this machine. A project's own `/set-steplimit` wins over it.
+
 ## `/set-sessionview`
 
 How a session is shown: `compact` (one line per tool call) or `full` (everything streamed as it comes).

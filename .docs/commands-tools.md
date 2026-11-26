@@ -65,7 +65,7 @@ memories - to a dated folder in `.o4c/backups`, as a consistent snapshot even wh
 Pick a backup; it is checked, you confirm, and o4c restarts with it. The databases it replaces are kept
 in a `before-restore` folder.
 
-## `/ps`
+## `/bg`
 
 Background jobs started by `run_shell` with `background: true` (dev servers, long builds): id, command,
 state, how long.

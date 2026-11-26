@@ -29,6 +29,7 @@ import { copilotLoginHelp, resolveCopilotToken } from './providers/copilot.js';
 import { runEvalCli, STATS_MARK } from './eval/evalRunner.js';
 import { setSyntaxCheckMode } from './tools/syntaxCheck.js';
 import { setShellTimeoutDefault } from './tools/runShell.js';
+import { resolveStepLimit } from './session/stepLimit.js';
 import { currentShell, setShell, SHELL_CONFIG_KEY, shellPromptLine } from './tools/shell.js';
 import { describeJob, killOwnedJobs, setJobsDir, unreportedFinished } from './tools/jobs.js';
 import { fileStateComponent, fileStatePath } from './session/fileState.js';
@@ -786,8 +787,8 @@ program
     // user report: a long autonomous research turn against a local model (PHOEBE) hit the default
     // cap ("stopped after 25 iterations without a final answer") well before it was actually done -
     // 25 is a reasonable safety default, not a real ceiling for long, unattended tool-call chains.
-    const maxIterations =
-      typeof resolvedConfig.maxIterations === 'number' ? resolvedConfig.maxIterations : undefined;
+    // `/set-steplimit` (stepLimit.ts); the old `maxIterations` key is still read.
+    const maxIterations = (await resolveStepLimit(configStore))?.value;
     // Front-end plan item #9: SessionStore's own retention cap (was a hardcoded MAX_SESSIONS=20),
     // now settable via /set-sessionsToSave (+ -local-/-global-, App.tsx) - same
     // "config.json only, re-read fresh on every launch/restart" shape as the others above.

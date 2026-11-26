@@ -113,7 +113,7 @@ yourself and hands its output to the next message, `@file` attaches a file. `/ke
 ## What the model can do
 
 Tools: `read_file`, `write_file`, `edit_file`, `glob_files`, `grep_files`, `run_shell` (with background
-jobs: `job_output`, `/ps`, `/kill`), `code_graph`, `search_history`, `update_plan`, `remember`, `ask_user`,
+jobs: `job_output`, `/bg`, `/kill`), `code_graph`, `search_history`, `update_plan`, `remember`, `ask_user`,
 `skill`, `task` (sub-agents), `web_fetch` and `web_search`, plus any tool from a configured MCP server.
 `pty` (driving interactive programs in a real terminal) is there when config `ptyTool` is true. What needs
 your approval depends on the mode and your permission rules (`/view-permissions`).

@@ -91,6 +91,9 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help an
     '/set-sessionsToSave',
     '/set-local-sessionsToSave',
     '/set-global-sessionsToSave',
+    '/set-steplimit',
+    '/set-local-steplimit',
+    '/set-global-steplimit',
     '/set-sessionview',
     '/set-local-sessionview',
     '/set-global-sessionview',
@@ -136,7 +139,7 @@ test('KNOWN_COMMANDS matches the commands actually handled in App.tsx - /help an
     '/undo',
     '/rewind',
     '/diff',
-    '/ps',
+    '/bg',
     '/kill',
     '/mcp',
   ]);
