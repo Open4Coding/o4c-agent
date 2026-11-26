@@ -4,9 +4,11 @@ import { EventEmitter } from 'node:events';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import {
+  cursorEraseUp,
   expectedUp,
   installResizeReflowFix,
   measureFrame,
+  reflowedRowsAboveCursor,
   withoutCursorSuffix,
   type ReflowFixableStream,
 } from '../ui/resizeReflowFix.js';
@@ -478,4 +480,62 @@ test('a home+erase-down full-clear chunk is never recorded as the on-screen fram
   const after = stdout.writes.slice(1).join('');
   assert.equal(/\x1b\[\d+A\x1b\[J/.test(after), false);
   assert.ok(after.includes('frame two'));
+});
+
+// Ink's cursor-relative frame erase (`buildEraseFrame`, cursor-helpers.js): what its resize handler
+// writes on every narrowing while the input box holds the cursor.
+const cursorErase = (up: number) => `${CSI}?25l` + (up > 0 ? `${CSI}${up}A` : '') + `${CSI}1G${CSI}J`;
+
+test('cursorEraseUp reads the line count of Ink\'s cursor-relative erase and nothing else', () => {
+  assert.equal(cursorEraseUp(cursorErase(1)), 1);
+  assert.equal(cursorEraseUp(cursorErase(0)), 0);
+  assert.equal(cursorEraseUp(`${CSI}?25l${CSI}5B${CSI}1G${CSI}2K`), undefined); // a repaint's prefix
+  assert.equal(cursorEraseUp(inkFrame(frameAt(100))), undefined);
+});
+
+test('Ctrl+scroll zoom: a narrowing erase from the input box reaches the reflowed frame top, not one row short', async () => {
+  const stdout = new MockStdout();
+  const uninstall = installResizeReflowFix(stdout, { settleMs: SETTLE });
+  // The box with the cursor on its input line (line 1, column 4), as o4c draws it.
+  const f0 = inkFrame(frameAt(100)) + cursorSuffix(3, 4);
+  stdout.write(f0);
+
+  stdout.columns = 60;
+  stdout.emit('resize');
+  const f1 = inkFrame(frameAt(60)) + cursorSuffix(3, 4);
+  stdout.write(cursorErase(1)); // Ink: "the top is 1 line above the cursor"
+  stdout.write(f1);
+  await tick(SETTLE * 3);
+  // At 60 wide the 100-wide top border takes 2 rows, so the erase must move up 2.
+  assert.deepEqual(stdout.writes, [f0, cursorErase(2), f1]);
+  uninstall();
+});
+
+test('the same erase with no reflow passes through unchanged', () => {
+  const stdout = new MockStdout();
+  const uninstall = installResizeReflowFix(stdout, { settleMs: SETTLE });
+  const f0 = inkFrame(frameAt(100)) + cursorSuffix(3, 4);
+  stdout.write(f0);
+  stdout.write(cursorErase(1));
+  assert.deepEqual(stdout.writes, [f0, cursorErase(1)]);
+  uninstall();
+});
+
+test('a held wide frame replayed into a narrower window: the erase starts from where the cursor really landed', () => {
+  // The 2026-11-25 screenshot: frames drawn at 233 columns, written after the window was already
+  // narrower. The 100-wide frame wraps as it is written at 60 (rows 2,2,2,1), so Ink's "up 3" from
+  // the bottom puts the cursor on the bottom border's first row, 4 rows below the top - not on the
+  // input line, 1 row below it, where Ink's own erase assumes it is.
+  const stdout = new MockStdout();
+  stdout.columns = 60;
+  const uninstall = installResizeReflowFix(stdout, { settleMs: SETTLE });
+  const wide = inkFrame(frameAt(100)) + cursorSuffix(3, 4);
+  stdout.write(wide);
+  stdout.write(cursorErase(1));
+  assert.deepEqual(stdout.writes, [wide, cursorErase(4)]);
+  uninstall();
+});
+
+test('reflowedRowsAboveCursor: no cursor suffix means no answer, so Ink\'s own count is kept', () => {
+  assert.equal(reflowedRowsAboveCursor(inkFrame(frameAt(100)), 100, 60), undefined);
 });

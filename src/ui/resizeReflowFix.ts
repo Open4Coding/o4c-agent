@@ -155,6 +155,70 @@ function displayWidth(line: string): number {
 
 export { withoutCursorSuffix };
 
+const HIDE_CURSOR = `${CSI}?25l`;
+const TO_COLUMN_ONE_ERASE_DOWN = `${CSI}1G${CSI}J`;
+
+/**
+ * How many rows up Ink's cursor-relative frame erase moves, or undefined for any other chunk.
+ *
+ * With a cursor position shown, Ink's `log.clear()` (`buildEraseFrame`, cursor-helpers.js) does not
+ * return to the bottom and erase line by line - it hides the cursor, moves UP from the cursor to
+ * the frame's top by a count of `\n`-lines, then erases to the end of the screen:
+ * `ESC[?25l` + `ESC[<n>A` (left out when n is 0) + `ESC[1G` + `ESC[J`. Ink's resize handler calls it
+ * on every narrowing. That line count is wrong once the terminal has reflowed the frame - each
+ * line wider than the new width now takes two or more rows - so the erase stops short and the
+ * top of the old frame stays behind: one stale input-box border per narrowing step, which is
+ * exactly what Ctrl+scroll zooming left on screen (2026-11-25, confirmed in an O4C_TERMLOG
+ * capture: every narrowing began with `ESC[?25l ESC[1A ESC[1G ESC[J` over a frame twice as wide).
+ */
+export function cursorEraseUp(chunk: string): number | undefined {
+  if (!chunk.startsWith(HIDE_CURSOR) || !chunk.endsWith(TO_COLUMN_ONE_ERASE_DOWN)) return undefined;
+  const middle = chunk.slice(HIDE_CURSOR.length, chunk.length - TO_COLUMN_ONE_ERASE_DOWN.length);
+  if (middle === '') return 0;
+  if (!middle.startsWith(CSI) || !middle.endsWith('A')) return undefined;
+  const digits = middle.slice(CSI.length, -1);
+  return isDigits(digits) ? Number(digits) : undefined;
+}
+
+/**
+ * The rows between a frame's true top and the cursor, now that the terminal is `columns` wide, for
+ * a frame that was written while it was `writtenColumns` wide. Undefined when the frame carries no
+ * cursor suffix (the cursor then sits below it, and Ink erases line by line instead).
+ *
+ * Worked out from where the cursor REALLY is, not where Ink means it to be. Ink's suffix moves the
+ * cursor up a count of ROWS from the frame's bottom, assuming one row per line. A frame wider than
+ * the terminal it lands in - an intermediate frame from a zoom or drag, held and replayed after
+ * the width has already dropped - wraps as it is written, so those rows land somewhere else in the
+ * frame (on the bottom border instead of the input line). The 2026-11-25 capture showed exactly
+ * that: every replayed wide frame left its 2-row top border behind. So: lay the frame out at the
+ * width it was written at, find the line and character the cursor actually sits on, then measure
+ * the rows above that character at today's width (the terminal moves the cursor with the text when
+ * it reflows - measured, see the module comment).
+ */
+export function reflowedRowsAboveCursor(frame: string, writtenColumns: number, columns: number): number | undefined {
+  const body = withoutCursorSuffix(frame);
+  const suffix = frame.slice(body.length);
+  const column = /\x1B\[(\d+)G/.exec(suffix);
+  if (!column) return undefined;
+  const up = /\x1B\[(\d+)A/.exec(suffix);
+  const cursorColumn = Number(column[1]) - 1;
+  const lines = body.split('\n');
+  lines.pop(); // the trailing '\n' every frame ends with
+  const widths = lines.map(displayWidth);
+  const rowsAt = (width: number, at: number) => Math.max(1, Math.ceil(width / at));
+  // Where the cursor landed, in rows from the top, as the frame was written.
+  const written = widths.map((w) => rowsAt(w, writtenColumns));
+  const cursorRow = written.reduce((a, b) => a + b, 0) - (up ? Number(up[1]) : 0);
+  // The line holding that row, and the character offset within the line.
+  let line = 0;
+  let start = 0;
+  while (line < lines.length && start + written[line]! <= cursorRow) start += written[line++]!;
+  const offset = (cursorRow - start) * writtenColumns + cursorColumn;
+  let rows = 0;
+  for (const w of widths.slice(0, line)) rows += rowsAt(w, columns);
+  return rows + Math.floor(offset / columns);
+}
+
 export function measureFrame(chunk: string, columns: number): { lines: number; rows: number } {
   const lines = withoutCursorSuffix(chunk).split('\n');
   lines.pop(); // the trailing '\n' every frame ends with yields one empty tail element
@@ -267,6 +331,8 @@ export function installResizeReflowFix(
   };
 
   let lastFrame: string | undefined;
+  /** The terminal width `lastFrame` was written at - where its cursor really landed depends on it. */
+  let lastFrameColumns: number | undefined;
   let frameOnScreen = false;
   let resizing = false;
   let held: Array<[unknown, unknown[]]> = [];
@@ -331,6 +397,19 @@ export function installResizeReflowFix(
       frameOnScreen = false;
       return;
     }
+    const cursorUp = cursorEraseUp(chunk);
+    if (cursorUp !== undefined) {
+      // Ink's cursor-relative erase (see `cursorEraseUp`): redo it with the reflowed row count, so
+      // it reaches the frame's true top instead of stopping short and leaving its first rows behind.
+      const columns = liveColumns(stdout) ?? stdout.columns;
+      const up =
+        (frameOnScreen && lastFrame !== undefined && lastFrameColumns && columns
+          ? reflowedRowsAboveCursor(lastFrame, lastFrameColumns, columns)
+          : undefined) ?? cursorUp;
+      forward(up === cursorUp ? chunk : `${HIDE_CURSOR}${up > 0 ? `${CSI}${up}A` : ''}${TO_COLUMN_ONE_ERASE_DOWN}`, rest);
+      frameOnScreen = false;
+      return;
+    }
     const erases = chunk.startsWith(ERASE_LINE);
     if (erases) reconcile(chunk);
     forward(chunk, rest);
@@ -339,6 +418,7 @@ export function installResizeReflowFix(
     if (withoutCursorSuffix(chunk).endsWith('\n')) {
       // A frame (live or static) - it's what's on screen now.
       lastFrame = chunk;
+      lastFrameColumns = liveColumns(stdout) ?? stdout.columns;
       frameOnScreen = true;
     } else if (erases) {
       // Erase-only (Ink's log.clear() before a static commit) - the frame is gone.
